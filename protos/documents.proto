@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package storagedemo.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option csharp_namespace = "StorageDemo.Grpc";
+
+// The primary API. REST exists alongside it for tooling that cannot speak gRPC.
+service Documents {
+  rpc List(google.protobuf.Empty) returns (ListResponse);
+
+  rpc Get(DocumentId) returns (DocumentMessage);
+
+  // Server streaming: the file is chunked so a large object never sits in memory whole.
+  rpc Download(DocumentId) returns (stream Chunk);
+
+  // The generated preview image. NOT_FOUND when the type has no thumbnail.
+  rpc DownloadThumbnail(DocumentId) returns (stream Chunk);
+
+  // Client streaming: the first message carries metadata, the rest carry bytes.
+  rpc Upload(stream UploadRequest) returns (DocumentMessage);
+
+  rpc Delete(DocumentId) returns (google.protobuf.Empty);
+
+  // Long-lived stream of changes, including ones the storage monitor detects from outside.
+  rpc Watch(google.protobuf.Empty) returns (stream ChangeEvent);
+
+  rpc GetProviders(google.protobuf.Empty) returns (ProviderResponse);
+
+  // Live sessions running anywhere in the cluster, not only on the replica answering this call.
+  rpc ListLive(google.protobuf.Empty) returns (LiveListResponse);
+
+  // The latest preview frame of a running stream. NOT_FOUND before the first frame arrives.
+  rpc DownloadLivePreview(LiveSessionId) returns (stream Chunk);
+}
+
+message LiveSessionId {
+  string id = 1;
+}
+
+message LiveSessionMessage {
+  string id = 1;
+  string name = 2;
+  string direction = 3;
+  string state = 4;
+  string url = 5;
+
+  // Where a player should pull this stream. Empty when the server has not been told its own
+  // public address, since a URL a viewer cannot reach is worse than none.
+  string playback_url = 6;
+
+  bool has_preview = 7;
+  int64 packets = 8;
+  int64 bytes = 9;
+  google.protobuf.Timestamp started_at = 10;
+
+  // The replica holding the socket. Shown so an operator can tell where a stream actually is.
+  string owner = 11;
+}
+
+message LiveListResponse {
+  repeated LiveSessionMessage sessions = 1;
+
+  // Transports the loaded FFmpeg can carry, such as udp or srt.
+  repeated string transports = 2;
+
+  // False when live streaming is switched off, so a client can hide the whole idea.
+  bool enabled = 3;
+}
+
+message DocumentId {
+  string id = 1;
+}
+
+message DocumentMessage {
+  string id = 1;
+  string file_name = 2;
+  string storage_key = 3;
+  string content_type = 4;
+  int64 size = 5;
+  google.protobuf.Timestamp created_at = 6;
+
+  // True when DownloadThumbnail will return an image for this document.
+  bool has_thumbnail = 7;
+
+  // Everything the media probe could read: dimensions, duration, codecs, bitrate, tags.
+  // Ordered by the server for display; empty for anything that is not media.
+  repeated MetadataEntry metadata = 8;
+}
+
+// A list rather than a map, because protobuf maps have no defined ordering and the client
+// displays these rows in the order the probe reported them.
+message MetadataEntry {
+  string key = 1;
+  string value = 2;
+}
+
+message ListResponse {
+  repeated DocumentMessage documents = 1;
+}
+
+message Chunk {
+  bytes data = 1;
+}
+
+message UploadMetadata {
+  string file_name = 1;
+  string content_type = 2;
+}
+
+message UploadRequest {
+  oneof payload {
+    UploadMetadata metadata = 1;
+    bytes chunk = 2;
+  }
+}
+
+message ChangeEvent {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    ADDED = 1;
+    UPDATED = 2;
+    REMOVED = 3;
+  }
+
+  Kind kind = 1;
+  string document_id = 2;
+  string storage_key = 3;
+  string file_name = 4;
+}
+
+message ProviderResponse {
+  string storage = 1;
+  string database = 2;
+}

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- libav is called through pointers; there is no other way to talk to it. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\StorageDemo.Core\StorageDemo.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.0.103" />
+    <!-- Ships ffmpeg/ffprobe and the libav libraries for every RID we run on, so the host never
+         needs its own FFmpeg install and every environment probes with the same build. -->
+    <PackageReference Include="DevEnvy.FFmpeg.Binaries.LGPL" Version="8.0.1.4" />
+    <!-- Pinned to the FFmpeg 8.0 ABI that the binaries package ships. These move together. -->
+    <PackageReference Include="FFmpeg.AutoGen.Abstractions" Version="8.0.0.1" />
+    <PackageReference Include="FFmpeg.AutoGen.Bindings.DynamicallyLoaded" Version="8.0.0.1" />
+    <PackageReference Include="LiteDB" Version="5.0.21" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.4">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.0" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="StackExchange.Redis" Version="2.9.11" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="SeedData\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

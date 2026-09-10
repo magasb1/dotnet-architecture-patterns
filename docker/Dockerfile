@@ -1,0 +1,63 @@
+# Build from the repository root: docker build -f docker/Dockerfile .
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+COPY Directory.Build.props NuGet.config ./
+COPY protos/ protos/
+COPY src/StorageDemo.Core/ src/StorageDemo.Core/
+COPY src/StorageDemo.Infrastructure/ src/StorageDemo.Infrastructure/
+COPY src/StorageDemo.Api/ src/StorageDemo.Api/
+
+RUN dotnet publish src/StorageDemo.Api/StorageDemo.Api.csproj -c Release -o /app
+
+# FFmpeg ships in the image rather than coming from the distro, so nothing depends on the host's
+# build. The NuGet package carries every platform it supports; only this one is worth keeping, and
+# NuGet does not preserve the execute bit.
+RUN find /app/ffmpeg -mindepth 1 -maxdepth 1 ! -name linux-x64 -exec rm -rf {} + \
+    && chmod +x /app/ffmpeg/linux-x64/ffmpeg /app/ffmpeg/linux-x64/ffprobe
+
+# That packaged build is LGPL and has no libsrt, so it is replaced by one that does, matching what
+# scripts/fetch-ffmpeg.sh puts in place for local runs. Same version family the bindings expect:
+# 8.1 carries the same library majors as 8.0. Downloaded here rather than committed, since it is
+# 70 MB of binaries.
+ARG FFMPEG_BUILD=ffmpeg-n8.1-latest-linux64-gpl-shared-8.1
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl xz-utils ca-certificates \
+    && curl -fsSL -o /tmp/ffmpeg.tar.xz \
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${FFMPEG_BUILD}.tar.xz" \
+    && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp \
+    && cp -P /tmp/${FFMPEG_BUILD}/lib/*.so* /app/ffmpeg/linux-x64/ \
+    && cp /tmp/${FFMPEG_BUILD}/bin/ffmpeg /tmp/${FFMPEG_BUILD}/bin/ffprobe /app/ffmpeg/linux-x64/ \
+    && chmod +x /app/ffmpeg/linux-x64/ffmpeg /app/ffmpeg/linux-x64/ffprobe \
+    && rm -rf /tmp/ffmpeg.tar.xz /tmp/${FFMPEG_BUILD} /var/lib/apt/lists/*
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+
+# The bundled FFmpeg links against these at load time, for hardware acceleration it will never use
+# inside a container. They are small, and the alternative is building FFmpeg per deployment. Note
+# that the image carries them: nothing here depends on what the host machine happens to have.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libx11-6 libdrm2 libva2 libva-drm2 libvdpau1 libvpl2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root. The image carries no credentials; everything comes from the environment at runtime.
+RUN useradd --system --uid 64198 --create-home storagedemo \
+    && mkdir -p /data \
+    && chown -R storagedemo:storagedemo /data
+USER storagedemo
+
+COPY --from=build --chown=storagedemo:storagedemo /app .
+
+# libav is loaded into this process by explicit path, but the libraries then resolve each other
+# through the normal loader, which does not look next to the library it just loaded. Windows does;
+# Linux needs telling. Without this, avformat cannot find avcodec and nothing decodes.
+ENV LD_LIBRARY_PATH=/app/ffmpeg/linux-x64
+
+# Two cleartext ports, because HTTP/1.1 and HTTP/2 cannot share one without TLS to negotiate
+# with: 8080 serves REST and the health probes, 5080 serves gRPC. TLS terminates at the ingress.
+EXPOSE 8080
+EXPOSE 5080
+
+ENTRYPOINT ["dotnet", "StorageDemo.Api.dll"]

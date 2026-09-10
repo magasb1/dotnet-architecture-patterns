@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: storage-demo
+  namespace: storage-demo
+  annotations:
+    # IRSA: the pod assumes this role and the AWS SDK picks the credentials up on its own.
+    # No access keys anywhere in this repository.
+    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/storage-demo
+---
+# Migrations run once here rather than in every replica, so concurrent starts cannot race.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: storage-demo-migrate
+  namespace: storage-demo
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      name: storage-demo-migrate
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: storage-demo
+      containers:
+        - name: migrate
+          image: storage-demo:latest
+          # Applies migrations and reference data, then exits. The Deployment below starts only
+          # after this succeeds, so no replica ever migrates.
+          args: ["--migrate-only"]
+          envFrom:
+            - configMapRef:
+                name: storage-demo-config
+            - secretRef:
+                name: storage-demo-secrets
+          env:
+            - name: StorageMonitor__Enabled
+              value: "false"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage-demo
+  namespace: storage-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: storage-demo
+  template:
+    metadata:
+      labels:
+        app: storage-demo
+    spec:
+      serviceAccountName: storage-demo
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 64198
+        fsGroup: 64198
+      containers:
+        - name: api
+          image: storage-demo:latest
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 5080
+          envFrom:
+            - configMapRef:
+                name: storage-demo-config
+            - secretRef:
+                name: storage-demo-secrets
+          # S3 plus PostgreSQL means the pod holds no state and needs no volume.
+          # Switching to Filesystem or LiteDb would require a PersistentVolumeClaim here.
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

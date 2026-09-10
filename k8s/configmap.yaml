@@ -1,0 +1,42 @@
+# Scenario D: real S3 plus PostgreSQL. Only configuration differs from the laptop scenario.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storage-demo-config
+  namespace: storage-demo
+data:
+  ASPNETCORE_ENVIRONMENT: Production
+
+  Storage__Provider: S3
+  Storage__S3__Bucket: storage-demo
+  Storage__S3__Region: eu-north-1
+  # ServiceUrl stays unset against real AWS; it exists for MinIO and other S3-compatible stores.
+  Storage__S3__ForcePathStyle: "false"
+
+  Database__Provider: Postgres
+
+  # The Deployment runs several replicas, so the change feed, the analysis queue and the scan lock
+  # all have to be shared. With InMemory here, every pod would scan the bucket on its own schedule
+  # and a client would only hear about uploads that happened to land on its own pod.
+  Messaging__Provider: Redis
+  Messaging__Redis__ConnectionString: redis:6379
+
+  # Every replica polling the bucket is wasteful; one pass every two minutes is plenty.
+  StorageMonitor__IntervalSeconds: "120"
+
+  # Live streaming. Off here: switch it on only once the ingest ports are actually exposed, which
+  # is what k8s/statefulset.yaml does. The token belongs in the Secret next to the others.
+  Live__Enabled: "false"
+  Live__AllowedSchemes: "udp,srt"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storage-demo-secrets
+  namespace: storage-demo
+type: Opaque
+stringData:
+  # Replace before applying, or better, have an external secret operator populate this.
+  # No AWS keys belong here: the service account below carries the S3 identity.
+  Database__Postgres__ConnectionString: >-
+    Host=postgres;Database=storagedemo;Username=storagedemo;Password=CHANGE_ME;SSL Mode=Require;Trust Server Certificate=true

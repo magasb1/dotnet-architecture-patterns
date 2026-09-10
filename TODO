@@ -1,0 +1,14 @@
+- [x] Add filters to file list - date, type etc.
+- [x] Add search to file list - by name
+- [x] Add redis as an alternative to in-memory
+- [x] Add S3 webhook and filesystemwatcher
+- [x] Improve the media handling in infrastructure
+- [x] Performance numbers for local vs containerized
+- [x] Update readme
+- [x] Abstract remaining in-memory state (analysis queue, scan lock, live session registry)
+- [x] Switch the ffmpeg solution over to FFmpeg.AutoGen
+- [x] MPEG-TS multiplexer, live ingest and egress
+- [x] Live preview thumbnails, in-client playback, tiles removed when a stream stops
+- [x] Multi-node shape: StatefulSet, headless DNS, per-pod ingest services (k8s/live/)
+- [ ] SRT needs an FFmpeg built with libsrt; point Media__LibraryPath at one
+- [ ] Local UDP ingest is blocked by this machine's inbound filtering (see README)

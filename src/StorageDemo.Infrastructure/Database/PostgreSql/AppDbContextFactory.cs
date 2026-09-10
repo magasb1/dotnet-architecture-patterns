@@ -1,0 +1,18 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Design;
+
+namespace StorageDemo.Infrastructure.Database.PostgreSql;
+
+/// <summary>
+/// Used only by `dotnet ef` at design time. The connection string is never used to connect
+/// when generating migrations, so a placeholder is fine.
+/// </summary>
+public sealed class AppDbContextFactory : IDesignTimeDbContextFactory<AppDbContext>
+{
+    public AppDbContext CreateDbContext(string[] args)
+        => new(new DbContextOptionsBuilder<AppDbContext>()
+            .UseNpgsql(
+                Environment.GetEnvironmentVariable("Database__Postgres__ConnectionString")
+                ?? "Host=localhost;Database=storagedemo;Username=postgres;Password=postgres")
+            .Options);
+}

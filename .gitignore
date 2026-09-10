@@ -1,0 +1,12 @@
+bin/
+obj/
+data/
+.vs/
+*.user
+
+# Local databases, uploaded files and logs never belong in the repository.
+*.db
+*.db-log
+
+# Fetched by scripts/fetch-ffmpeg.sh, not committed: it is ~200 MB of binaries.
+ffmpeg/
