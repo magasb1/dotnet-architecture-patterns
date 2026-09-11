@@ -23,7 +23,7 @@ public enum DemuxOutcome
 /// to be a single remux loop; the multiplexing half now belongs to each consumer that writes bytes.
 ///
 /// It takes an already-open transport rather than a URL, because the accept happened on the
-/// carousel's thread and the carousel had to move on. libav is told the container is MPEG-TS
+/// listener's thread and that thread had to move on. libav is told the container is MPEG-TS
 /// rather than left to probe it: this is a contribution ingest, and probing costs a read before
 /// the first packet reaches anybody.
 /// </summary>
@@ -107,7 +107,7 @@ public sealed unsafe class StreamDemuxer(
 
     /// <summary>
     /// The manual path: this replica opens the input itself, for a protocol that cannot name
-    /// itself and so could never have arrived at the carousel. Everything after the open is the
+    /// itself and so could never have arrived at a listening port. Everything after the open is the
     /// same, which is the point - once a demultiplexer exists the two are indistinguishable.
     /// </summary>
     public DemuxOutcome Run(

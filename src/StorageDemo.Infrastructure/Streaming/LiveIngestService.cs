@@ -6,14 +6,13 @@ using StorageDemo.Infrastructure.Media;
 namespace StorageDemo.Infrastructure.Streaming;
 
 /// <summary>
-/// Runs the ingest port for the life of the process: the boot-time self-test, then the accept
-/// carousel, then the heartbeat that keeps the registry honest.
+/// Runs the ingest port for the life of the process: the libsrt listener, and beside it the
+/// heartbeat that keeps the registry honest.
 ///
 /// Nothing is requested before it exists. An encoder connects to one address, names itself in the
 /// stream identifier, and the stream is on air from that moment.
 /// </summary>
 public sealed class LiveIngestService(
-    SrtAcceptLoop acceptLoop,
     LiveStreamCoordinator coordinator,
     LiveListeners listeners,
     IOptions<LiveOptions> options,
@@ -39,50 +38,51 @@ public sealed class LiveIngestService(
 
         FfmpegLibrary.EnsureLoaded();
 
-        if (!FfmpegLibrary.InputProtocols().Contains("srt"))
+        if (!Srt.IsAvailable)
         {
-            // Saying so plainly beats a port that opens and never accepts anything. The fix is a
-            // build with libsrt; see scripts/fetch-ffmpeg.sh.
-            listeners.Fault = "the loaded FFmpeg has no SRT";
+            // Both listening ports are libsrt's, so without it this replica can accept nothing and
+            // takes itself out of the Service rather than swallowing encoders it cannot serve.
+            listeners.Fault = "libsrt is not loaded";
 
             logger.LogError(
-                "The loaded FFmpeg has no SRT, so nothing can be ingested. Point Media:LibraryPath "
-                + "at a build compiled with libsrt.");
+                "libsrt is not loaded, or is older than 1.5, so no media port can be opened. Run "
+                + "scripts/fetch-libsrt.sh, or install libsrt1.5 on the host.");
 
             return;
         }
 
-        // Before the port opens, not after. A reworded log line in a new FFmpeg would otherwise
-        // leave every stream arriving unnamed, in production, with nothing reporting a fault.
-        //
-        // A replica that fails this cannot name anything it accepts, so it takes itself out of the
-        // Service rather than swallowing encoders it will never serve.
-        try
+        if (!FfmpegLibrary.InputProtocols().Contains("srt"))
         {
-            StreamIdCapture.SelfTest(SelfTestPort(), logger);
+            // Not a fault: the listening ports are libsrt's now. libav is still the SRT caller for
+            // a pulled stream and for relaying a viewer to the replica that owns its stream, and
+            // both of those fail without it, so an operator has to hear which half is missing.
+            logger.LogWarning(
+                "The loaded FFmpeg has no SRT. Encoders can still push here, but pulled streams "
+                + "and relaying a viewer to another replica both dial with libav and will fail. "
+                + "Point Media:LibraryPath at a build compiled with libsrt.");
         }
-        catch (Exception ex)
-        {
-            listeners.Fault = "the stream identifier self-test failed";
 
-            logger.LogCritical(ex, "This replica cannot name the streams it accepts");
-
-            return;
-        }
+        var listener = new SrtListener(
+            StreamIntent.Publish,
+            _options,
+            Admit,
+            coordinator.OnAccepted,
+            logger,
+            listeners);
 
         var listening = Task.Factory.StartNew(
-            () => acceptLoop.Run(
-                $"srt://{_options.IngestAddress}:{_options.IngestPort}?mode=listener"
-                + $"&timeout={_options.FeedTimeoutSeconds * 1_000_000}",
-                TimeSpan.FromSeconds(1),
-                StreamIntent.Publish,
-                coordinator.OnAccepted,
-                stoppingToken),
+            () => listener.Run(_options.IngestPort, stoppingToken),
             TaskCreationOptions.LongRunning);
 
         await HeartbeatAsync(stoppingToken);
         await listening;
     }
+
+    /// <summary>
+    /// Everything the listener could parse is admitted: Phase 1b refuses a name that is live and
+    /// held, Phase 4 refuses when the pod is full, and neither exists yet.
+    /// </summary>
+    private static int? Admit(Admission admission) => null;
 
     private async Task HeartbeatAsync(CancellationToken stoppingToken)
     {
@@ -113,12 +113,4 @@ public sealed class LiveIngestService(
             return false;
         }
     }
-
-    /// <summary>
-    /// A port of its own for the self-test, so it never collides with the ingest port it is about
-    /// to open, and a fixed offset so an operator can recognise it in a firewall log.
-    /// </summary>
-    private int SelfTestPort() => _options.IngestPort >= 65500
-        ? _options.IngestPort - 1
-        : _options.IngestPort + 1;
 }

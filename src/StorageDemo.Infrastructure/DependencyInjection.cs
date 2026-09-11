@@ -53,7 +53,6 @@ public static class DependencyInjection
         // because switching it on opens a port anybody who can reach it may push a stream into.
         Bind<LiveOptions>(services, configuration, LiveOptions.SectionName);
         services.AddSingleton<LiveListeners>();
-        services.AddSingleton<SrtAcceptLoop>();
         services.AddSingleton<StreamDemuxer>();
         services.AddSingleton<LiveStreamCoordinator>();
         services.AddSingleton<ILiveStreamService>(sp => sp.GetRequiredService<LiveStreamCoordinator>());

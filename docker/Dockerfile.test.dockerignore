@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+**/data/
+.git/
+.vs/
+.scratch/
+k8s/
+ffmpeg/

@@ -1,0 +1,228 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using StorageDemo.Infrastructure.Media;
+
+namespace StorageDemo.Tests.Infrastructure;
+
+/// <summary>
+/// Real <c>ffmpeg</c> processes as SRT callers, shared by every test that needs one.
+///
+/// A listener can only be tested against something that actually speaks the handshake, and the
+/// fetched FFmpeg has SRT as a caller, so it is the sender. Nothing here knows what is being tested;
+/// it knows how to start a caller, how to tell whether one was turned away, and how to say what the
+/// callers complained about when a test fails.
+/// </summary>
+internal static class SrtSenders
+{
+    /// <summary>
+    /// FFmpeg's own line when a connection could not be opened, from <c>libsrt.c</c>. It is all a
+    /// test can lean on: FFmpeg's caller path never asks libsrt for the rejection reason, so a
+    /// refusal and a dead port read the same on stderr. Kept here so an FFmpeg that rewords it
+    /// breaks one place rather than three tests.
+    /// </summary>
+    private const string RefusalPrefix = "Connection to srt://";
+
+    private static readonly ConcurrentDictionary<int, StringBuilder> Stderr = new();
+
+    /// <summary>An encoder pushing into a listening port. Null presents no identifier at all.</summary>
+    public static Process StartSender(int port, string? streamId)
+        => Start(
+        [
+            "-hide_banner", "-loglevel", "error",
+            // Paced at wall-clock speed: SRT is a connection, and a burst that ends at once looks
+            // to the far end like a peer hanging up mid-handshake.
+            "-re",
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15",
+            "-c:v", "mpeg2video", "-b:v", "600k", "-g", "15",
+            "-f", "mpegts", Target(port, streamId),
+        ]);
+
+    /// <summary>
+    /// A caller that connects and then waits to be sent something. It is also the only way to get a
+    /// connected SRT peer that sends no application bytes at all: an encoder always writes a header
+    /// the moment the socket opens, and libsrt's caller side is not exposed to this test assembly.
+    /// </summary>
+    public static Process StartPlayer(int port, string streamId)
+        => Start(["-hide_banner", "-loglevel", "error", "-i", Target(port, streamId), "-f", "null", "-"]);
+
+    /// <summary>
+    /// Whether this caller was turned away rather than served: it gave up quickly and said so.
+    ///
+    /// Corroboration only. A caller that was accepted and then dropped complains in exactly the same
+    /// words, so whoever calls this must also assert that the accept handler never fired.
+    /// </summary>
+    public static async Task<bool> WasRefused(Process caller, TimeSpan? within = null)
+    {
+        using var deadline = new CancellationTokenSource(within ?? TimeSpan.FromSeconds(2));
+
+        try
+        {
+            await caller.WaitForExitAsync(deadline.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // Still running, so it got in. A rejection is immediate; there is nothing to wait for.
+            return false;
+        }
+
+        // The exit code says nothing useful and the last stderr line may still be in flight: the
+        // pipe is drained on another thread, and only the parameterless overload waits for it.
+        caller.WaitForExit();
+
+        var said = Said(caller);
+
+        return said.Contains(RefusalPrefix, StringComparison.Ordinal)
+            && said.Contains("failed", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Everything the callers complained about, for a failure message worth reading.</summary>
+    public static string Complaints(IEnumerable<Process> callers)
+    {
+        var said = callers
+            .Select(Said)
+            .Where(text => text.Length > 0)
+            .ToArray();
+
+        return said.Length == 0 ? "the callers said nothing" : string.Join(" | ", said);
+    }
+
+    public static void Kill(Process caller)
+    {
+        try
+        {
+            if (!caller.HasExited)
+            {
+                caller.Kill(entireProcessTree: true);
+            }
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        caller.Dispose();
+    }
+
+    /// <param name="describe">
+    /// What to say when it never came true. Worth passing: "the condition was false" sends the
+    /// next reader back to the source to work out which half of it failed.
+    /// </param>
+    public static async Task WaitUntilAsync(
+        Func<bool> condition,
+        TimeSpan timeout,
+        Func<string>? describe = null)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(100));
+        }
+
+        Assert.Fail($"{describe?.Invoke() ?? "the condition was still false"} after {timeout}");
+    }
+
+    /// <summary>
+    /// A free port from a low, fixed range rather than an ephemeral one. Windows reserves stretches
+    /// of the dynamic range, so a port can be handed out and then refuse an explicit bind moments
+    /// later, which looks exactly like a listener that will not start.
+    /// </summary>
+    private static int _nextPort = 9400;
+
+    public static int FreePort()
+    {
+        var start = Interlocked.Add(ref _nextPort, 10);
+
+        for (var port = start; port < start + 200; port++)
+        {
+            try
+            {
+                using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+
+                socket.Bind(new IPEndPoint(IPAddress.Any, port));
+
+                return port;
+            }
+            catch (SocketException)
+            {
+            }
+        }
+
+        throw new InvalidOperationException("No free port in the test range.");
+    }
+
+    private static string Target(int port, string? streamId)
+        => $"srt://127.0.0.1:{port}?mode=caller"
+            + (streamId is null ? string.Empty : $"&streamid={Escape(streamId)}");
+
+    /// <summary>
+    /// Only the hash, which is the one character of the Access Control envelope a URL would read as
+    /// the start of a fragment. FFmpeg 7 and later percent-decode the identifier before the
+    /// handshake; an older one passes <c>%23</c> straight through, and <c>StreamName</c> understands
+    /// that form too, so escaping this way works either side of that change.
+    /// </summary>
+    private static string Escape(string streamId)
+        => streamId.Replace("#", "%23", StringComparison.Ordinal);
+
+    private static Process Start(string[] arguments)
+    {
+        var startInfo = new ProcessStartInfo(Ffmpeg.ExecutablePath)
+        {
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            startInfo.Environment["LD_LIBRARY_PATH"] = Ffmpeg.Directory;
+        }
+
+        var caller = Process.Start(startInfo)!;
+
+        // Drained, not merely redirected. A pipe nobody reads fills and stops the caller, and the
+        // test then fails as "nothing was accepted" with the reason sitting unread in the pipe.
+        var complaints = new StringBuilder();
+        Stderr[caller.Id] = complaints;
+
+        caller.ErrorDataReceived += (_, line) =>
+        {
+            if (line.Data is not null)
+            {
+                lock (complaints)
+                {
+                    complaints.AppendLine(line.Data);
+                }
+            }
+        };
+
+        caller.BeginErrorReadLine();
+
+        return caller;
+    }
+
+    private static string Said(Process caller)
+    {
+        if (!Stderr.TryGetValue(caller.Id, out var text))
+        {
+            return string.Empty;
+        }
+
+        lock (text)
+        {
+            return text.ToString().Trim();
+        }
+    }
+}

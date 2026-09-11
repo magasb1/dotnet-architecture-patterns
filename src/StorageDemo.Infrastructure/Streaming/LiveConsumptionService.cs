@@ -3,30 +3,26 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using StorageDemo.Core.Streaming;
-using StorageDemo.Infrastructure.Media;
 
 namespace StorageDemo.Infrastructure.Streaming;
 
 /// <summary>
 /// The consumption port: SRT out, live only.
 ///
-/// Symmetric with ingest, and the same carousel serves it. A player calls this port and names the
-/// stream it wants in its stream identifier, exactly as an encoder names the stream it is sending.
-/// One address, any replica behind it, nothing to configure on the player beyond a URL.
+/// Symmetric with ingest, down to running the same kind of listener. A player calls this port and
+/// names the stream it wants in its stream identifier, exactly as an encoder names the stream it is
+/// sending. One address, any replica behind it, nothing to configure on the player beyond a URL.
 ///
 /// Its own port rather than a route on the API, so a deployment can expose one network to viewers
 /// and keep the other private. Reaching this port lets you watch live streams and nothing else,
 /// which is the whole reason the ports are split. Finished recordings and snapshots are documents
 /// and stay on the API.
 ///
-/// Two costs come with the symmetry and are worth stating plainly. The accept rate that limits
-/// ingest to a couple of connections a second limits viewers too, because it is the same libav
-/// listener with the same backlog of one. And a viewer reaching a replica that does not own the
-/// stream cannot be redirected, since SRT has no such thing, so that replica calls the owner and
-/// relays the bytes.
+/// One cost comes with the symmetry and is worth stating plainly: a viewer reaching a replica that
+/// does not own the stream cannot be redirected, since SRT has no such thing, so that replica calls
+/// the owner and relays the bytes.
 /// </summary>
 public sealed class LiveConsumptionService(
-    SrtAcceptLoop acceptLoop,
     LiveStreamCoordinator coordinator,
     LiveListeners listeners,
     IOptions<LiveOptions> options,
@@ -46,43 +42,47 @@ public sealed class LiveConsumptionService(
     {
         _stopping = stoppingToken;
 
-        if (!_options.Enabled || !FfmpegLibrary.InputProtocols().Contains("srt"))
+        // The same gate ingest sets its fault on, asked directly rather than read off that service,
+        // so neither port depends on which of the two started first.
+        if (!_options.Enabled || !Srt.IsAvailable)
         {
             return Task.CompletedTask;
         }
 
-        // The ingest service runs the self-test for both ports, since both go through the same
-        // capture. Waiting for its verdict keeps a broken replica from listening on either.
-        if (listeners.Fault is { Length: > 0 })
-        {
-            return Task.CompletedTask;
-        }
+        var listener = new SrtListener(
+            StreamIntent.Subscribe,
+            _options,
+            Admit,
+            OnAccepted,
+            logger,
+            listeners);
 
         return Task.Factory.StartNew(
-            () => acceptLoop.Run(
-                $"srt://{_options.IngestAddress}:{_options.ConsumptionPort}?mode=listener",
-                TimeSpan.FromSeconds(1),
-                StreamIntent.Subscribe,
-                OnAccepted,
-                stoppingToken),
+            () => listener.Run(_options.ConsumptionPort, stoppingToken),
             TaskCreationOptions.LongRunning);
     }
 
     /// <summary>
-    /// Takes an accepted viewer off the carousel. As on ingest, everything real happens elsewhere:
-    /// time spent here is time the consumption port is not listening.
+    /// Everything the listener could parse is admitted: Phase 1b refuses a name that is live and
+    /// held, Phase 4 refuses when the pod is full, and neither exists yet.
     /// </summary>
-    private void OnAccepted(AcceptedConnection connection)
+    private static int? Admit(Admission admission) => null;
+
+    /// <summary>
+    /// Takes an accepted viewer off the accept thread. As on ingest, everything real happens
+    /// elsewhere: time spent here is time the consumption port is not listening.
+    /// </summary>
+    private void OnAccepted(AcceptedSocket socket)
     {
-        var name = connection.Name;
+        var name = socket.Name;
 
         // The position rides in the identifier's user_from key, so returning to live is a new
         // connection rather than a control message and the connection stays one-way.
-        var from = StreamName.Position(connection.StreamId) ?? 0;
-        var transport = Handover(connection);
+        var from = StreamName.Position(socket.StreamId) ?? 0;
+        var viewer = new SrtSocketStream(socket.Release(), writable: true);
 
         _ = Task.Factory.StartNew(
-            () => ServeAsync(name, from, transport, _stopping),
+            () => ServeAsync(name, from, viewer, _stopping),
             TaskCreationOptions.LongRunning);
     }
 
@@ -100,9 +100,12 @@ public sealed class LiveConsumptionService(
     /// The timeline carries across each re-attach, so the player is never asked to accept
     /// timestamps jumping back to zero in the middle of one connection.
     /// </summary>
-    private async Task ServeAsync(string name, double from, IntPtr transport, CancellationToken stopping)
+    private async Task ServeAsync(
+        string name,
+        double from,
+        SrtSocketStream viewer,
+        CancellationToken stopping)
     {
-        var viewer = new AvioStream(transport, writable: true);
         var timeline = 0d;
         var waitingSince = DateTimeOffset.UtcNow;
 
@@ -247,8 +250,6 @@ public sealed class LiveConsumptionService(
 
         return new AvioStream(opened, writable: false);
     }
-
-    private static unsafe IntPtr Handover(AcceptedConnection connection) => (IntPtr)connection.Release();
 
     private static unsafe IntPtr OpenTransport(string url, string streamId)
     {

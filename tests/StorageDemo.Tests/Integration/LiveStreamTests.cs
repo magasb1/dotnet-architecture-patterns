@@ -23,6 +23,14 @@ public sealed class LiveStreamTests : IAsyncLifetime
 {
     private const string Token = "live-test-token";
 
+    /// <summary>
+    /// Two natives, two scripts, and a test needs whichever halves it uses. The listening ports are
+    /// libsrt's, so nothing here is accepted without it; the senders are still FFmpeg's SRT caller,
+    /// which <see cref="HasSrt"/> asks about. A test that both listens and sends needs both, and a
+    /// skip has to name the script that fixes the half that is missing.
+    /// </summary>
+    private const string NoLibsrt = "libsrt is not installed. Run scripts/fetch-libsrt.sh.";
+
     private readonly string _root = Path.Combine(
         Path.GetTempPath(),
         "storage-demo-live-tests",
@@ -116,7 +124,8 @@ public sealed class LiveStreamTests : IAsyncLifetime
     [Fact]
     public async Task Readiness_means_the_media_ports_are_accepting()
     {
-        Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
+        // Only libsrt. Nothing is sent here, and both ports are opened without FFmpeg being asked.
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
 
         var listeners = _factory.Services.GetRequiredService<LiveListeners>();
 
@@ -133,31 +142,34 @@ public sealed class LiveStreamTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// A replica that cannot name the streams it accepts takes itself out of the Service, rather
-    /// than swallowing encoders it would only ever serve unnamed.
+    /// A replica that cannot open a media port takes itself out of the Service, rather than
+    /// swallowing encoders it could never serve.
+    ///
+    /// The fault is set here rather than provoked. What sets it in production is libsrt being
+    /// absent, which is decided once at start-up and cannot be arranged mid-process, and a replica
+    /// that is genuinely without libsrt is already carrying the fault before this test runs. Setting
+    /// it directly is the only version of this that says the same thing either way.
     /// </summary>
     [Fact]
     public async Task A_replica_that_cannot_serve_media_is_not_ready()
     {
         var listeners = _factory.Services.GetRequiredService<LiveListeners>();
 
-        Assert.True(
-            await WaitAsync(
-                async () => (await _client.GetAsync("/health/ready")).IsSuccessStatusCode,
-                TimeSpan.FromSeconds(60)),
-            "the replica never became ready");
+        // Put back rather than cleared: on a host without libsrt the replica arrived here already
+        // faulted, and clearing it would leave the rest of the fixture claiming it can serve.
+        var existing = listeners.Fault;
 
-        listeners.Fault = "the stream identifier self-test failed";
+        listeners.Fault = "libsrt is not loaded";
 
         try
         {
             var response = await _client.GetAsync("/health/ready");
 
-            Assert.False(response.IsSuccessStatusCode, "a replica that cannot name streams stayed ready");
+            Assert.False(response.IsSuccessStatusCode, "a replica that cannot serve media stayed ready");
         }
         finally
         {
-            listeners.Fault = null;
+            listeners.Fault = existing;
         }
     }
 
@@ -209,6 +221,7 @@ public sealed class LiveStreamTests : IAsyncLifetime
     [Fact]
     public async Task An_encoder_that_names_itself_appears_and_can_be_recorded_and_snapshotted()
     {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
         Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
 
         const string name = "live/match-of-the-day";
@@ -274,6 +287,7 @@ public sealed class LiveStreamTests : IAsyncLifetime
     [Fact]
     public async Task A_long_recording_is_stored_in_segments_and_read_back_as_one_file()
     {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
         Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
 
         const string name = "long-recorder";
@@ -356,6 +370,7 @@ public sealed class LiveStreamTests : IAsyncLifetime
     [Fact]
     public async Task A_feed_that_stops_is_interrupted_first_and_gone_after_the_grace_period()
     {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
         Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
 
         const string name = "camera-that-leaves";
@@ -386,6 +401,7 @@ public sealed class LiveStreamTests : IAsyncLifetime
     [Fact]
     public async Task A_reconnect_under_the_same_name_resumes_the_same_stream()
     {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
         Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
 
         const string name = "camera-that-returns";

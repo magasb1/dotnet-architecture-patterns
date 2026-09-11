@@ -77,19 +77,23 @@ public sealed class LiveStreamCoordinator(
         => _local.TryGetValue(name, out var entry) ? entry.Harvester.Preview : null;
 
     /// <summary>
-    /// Takes an accepted connection off the carousel. Everything real happens on another thread,
+    /// Takes an accepted socket off the accept thread. Everything real happens on another thread,
     /// because every millisecond spent here is a millisecond the ingest port is not listening.
+    ///
+    /// A <see cref="SrtSocketStream"/> and not yet an <see cref="AvioReader"/>: the reader's
+    /// context is freed by the demultiplexer and by nothing else, so it is built only where
+    /// <c>demuxer.Run</c> is certain to be called. Everything up to that point carries the stream.
     /// </summary>
-    public void OnAccepted(AcceptedConnection connection)
+    public void OnAccepted(AcceptedSocket socket)
     {
-        var name = connection.Name;
-        var transport = Handover(connection);
+        var name = socket.Name;
+        var transport = new SrtSocketStream(socket.Release(), writable: false);
         var connectionId = Guid.NewGuid().ToString("N")[..8];
 
         _ = Task.Run(() => AttachAsync(name, transport, connectionId));
     }
 
-    private async Task AttachAsync(string name, IntPtr transport, string connectionId)
+    private async Task AttachAsync(string name, Stream transport, string connectionId)
     {
         LiveStreamEntry? entry = null;
 
@@ -103,7 +107,7 @@ public sealed class LiveStreamCoordinator(
                 // connection, so this one stands down rather than fighting for it.
                 logger.LogInformation("'{Name}' was claimed elsewhere while it was being attached", name);
 
-                Close(transport);
+                transport.Dispose();
 
                 return;
             }
@@ -119,32 +123,30 @@ public sealed class LiveStreamCoordinator(
         {
             logger.LogError(ex, "Attaching '{Name}' failed", name);
 
-            Close(transport);
+            transport.Dispose();
         }
     }
 
-    private unsafe void Feed(LiveStreamEntry entry, IntPtr transport, CancellationToken feed)
+    /// <summary>
+    /// Wraps the socket as a libav transport and demultiplexes it until the feed ends.
+    ///
+    /// The reader is built here, a line before the call that consumes it, and never earlier. Only
+    /// <see cref="StreamDemuxer.Run(AVIOContext*, StreamHub, CancellationToken)"/> frees an
+    /// <c>AVIOContext</c>, so one allocated on a path that can still bail - a claim lost while
+    /// attaching - would be leaked. Disposing the reader afterwards closes the socket and nothing
+    /// else, the context being already gone.
+    /// </summary>
+    private unsafe void Feed(LiveStreamEntry entry, Stream transport, CancellationToken feed)
     {
-        var outcome = demuxer.Run((AVIOContext*)transport, entry.Hub, feed);
+        using var reader = new AvioReader(transport);
+
+        var outcome = demuxer.Run(reader.Context, entry.Hub, feed);
 
         logger.LogInformation(
             "The feed for '{Name}' ({Connection}) ended: {Outcome}",
             entry.Name,
             entry.ConnectionId,
             outcome);
-    }
-
-    /// <summary>Takes the open transport off the accept thread; the demultiplexer closes it.</summary>
-    private static unsafe IntPtr Handover(AcceptedConnection connection) => (IntPtr)connection.Release();
-
-    private static unsafe void Close(IntPtr handle)
-    {
-        var transport = (AVIOContext*)handle;
-
-        if (transport is not null)
-        {
-            ffmpeg.avio_closep(&transport);
-        }
     }
 
     private LiveStreamEntry Create(string name) => Create(name, manual: false, manualUrl: null);
@@ -302,9 +304,9 @@ public sealed class LiveStreamCoordinator(
         LiveStreamEntry entry,
         CancellationToken cancellationToken)
     {
-        var segment = Newest(entry);
+        var packets = Newest(entry);
 
-        if (segment is null)
+        if (packets is null)
         {
             return entry.Harvester.Preview is { } preview
                 ? (preview, "Taken from the live preview, because this feed has sent no keyframe "
@@ -315,21 +317,21 @@ public sealed class LiveStreamCoordinator(
 
         using var container = new MemoryStream();
 
-        Mux(entry, segment, container);
+        Mux(entry, packets, container);
 
         container.Position = 0;
 
         return (await analyzer.LatestFrameAsync(container, "snapshot.ts", cancellationToken), null);
     }
 
-    private static Segment? Newest(LiveStreamEntry entry)
-        => entry.Hub.Layout is null ? null : entry.Hub.Buffer?.Newest();
+    private static MediaPacket[]? Newest(LiveStreamEntry entry)
+        => entry.Hub.Layout is null ? null : entry.Hub.NewestStartablePackets();
 
-    private static void Mux(LiveStreamEntry entry, Segment segment, Stream destination)
+    private static void Mux(LiveStreamEntry entry, MediaPacket[] packets, Stream destination)
     {
         using var muxer = new PacketMuxer(destination, entry.Hub.Layout!);
 
-        foreach (var packet in segment.Packets)
+        foreach (var packet in packets)
         {
             muxer.Write(packet);
         }
@@ -571,7 +573,7 @@ public sealed class LiveStreamCoordinator(
 
     private LiveStream Describe(LiveStreamEntry entry, LiveStreamState state)
     {
-        var buffer = entry.Hub.Buffer;
+        var buffer = entry.Hub.BufferState();
 
         return new LiveStream(
             entry.Name,
@@ -584,9 +586,9 @@ public sealed class LiveStreamCoordinator(
             entry.Hub.Packets,
             entry.Hub.Bytes,
             entry.Harvester.Preview is not null,
-            buffer?.NotStartableSince is null,
-            buffer?.CeilingBindingSince is not null,
-            buffer?.HeldSeconds ?? 0,
+            buffer.Startable,
+            buffer.CeilingBinding,
+            buffer.HeldSeconds,
             entry.Hub.Layout?.Describe(),
             entry.Recorder is { Finished: false } recorder ? recorder.Status : null,
             entry.ConnectionId,

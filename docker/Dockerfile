@@ -37,9 +37,16 @@ WORKDIR /app
 # The bundled FFmpeg links against these at load time, for hardware acceleration it will never use
 # inside a container. They are small, and the alternative is building FFmpeg per deployment. Note
 # that the image carries them: nothing here depends on what the host machine happens to have.
+#
+# libsrt is different: unlike FFmpeg it is a stable C ABI with a soname, so the distro build is as
+# good as any and there is nothing to match versions with. Windows has no such package, which is
+# why scripts/fetch-libsrt.sh copies a DLL next to the fetched FFmpeg there and this does not.
+# The base is Ubuntu noble, which ships 1.5.3 under libsrt.so.1.5 -- new enough for the listen
+# callback and the extended rejection codes.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libx11-6 libdrm2 libva2 libva-drm2 libvdpau1 libvpl2 \
+        libsrt1.5-openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root. The image carries no credentials; everything comes from the environment at runtime.

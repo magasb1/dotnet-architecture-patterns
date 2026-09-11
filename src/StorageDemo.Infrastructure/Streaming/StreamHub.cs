@@ -168,6 +168,37 @@ public sealed class StreamHub : IDisposable
     }
 
     /// <summary>
+    /// A copy of the newest position a decoder can start from, or null when there is none.
+    ///
+    /// A copy, and taken under the same lock publishing takes, because the newest segment is the
+    /// one still being written: a caller iterating it directly races the demultiplexer appending
+    /// to it, and the buffer says of itself that the hub serialises access. Reaching past that
+    /// into <see cref="Buffer"/> is what made a snapshot fail with "collection was modified"
+    /// roughly one time in thirty, and muxing takes long enough to make the window wide.
+    /// </summary>
+    public MediaPacket[]? NewestStartablePackets()
+    {
+        lock (_gate)
+        {
+            return Buffer?.Newest() is { } segment ? [.. segment.Packets] : null;
+        }
+    }
+
+    /// <summary>
+    /// What the buffer holds, read in one lock so the three answers describe one moment and
+    /// neither of the first two indexes a list the demultiplexer is appending to.
+    /// </summary>
+    public (double HeldSeconds, bool Startable, bool CeilingBinding) BufferState()
+    {
+        lock (_gate)
+        {
+            return Buffer is { } buffer
+                ? (buffer.HeldSeconds, buffer.NotStartableSince is null, buffer.CeilingBindingSince is not null)
+                : (0, true, false);
+        }
+    }
+
+    /// <summary>
     /// Takes one packet from the demultiplexer: into the buffer, then out to every subscriber.
     /// </summary>
     public void Publish(MediaPacket packet, long referencePts)

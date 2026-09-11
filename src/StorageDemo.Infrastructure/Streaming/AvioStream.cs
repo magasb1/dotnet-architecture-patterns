@@ -5,9 +5,10 @@ namespace StorageDemo.Infrastructure.Streaming;
 /// <summary>
 /// An open libav transport, as an ordinary .NET stream.
 ///
-/// It exists so that everything downstream of the hub keeps writing to a <see cref="Stream"/> and
-/// never learns what is on the other end. The recorder writes to a file, and a viewer writes to an
-/// SRT socket, through the same muxer and the same code.
+/// It exists so that a libav transport can be read by code that only knows <see cref="Stream"/>.
+/// One caller is left: relaying a viewer from the replica that owns its stream, which dials that
+/// replica's consumption port with libav's SRT caller. Everything accepted on a port of ours is an
+/// <see cref="SrtSocketStream"/> instead.
 ///
 /// Reads and writes on a live transport block, so this is only ever used from a thread that is
 /// already dedicated to one connection.
