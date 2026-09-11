@@ -17,12 +17,11 @@
 Scaling to a thousand streams. The plan, the reasoning and the research behind each of these is in
 `.scratch/scale-to-1000/plan.md`; the phase numbers below are its.
 
-- [ ] Verify Phase 1 on Windows. Only Linux has ever run it: `vcpkg install libsrt:x64-windows`,
-      then `scripts/fetch-libsrt.sh`, then `dotnet test`. Watch that the resolver finds srt.dll
-      beside the FFmpeg natives rather than falling through, and that the test timings hold
+- [x] Verify Phase 1 and 2 on Windows: 194 passed, 0 failed, 8 skipped (Postgres only). The
+      resolver found srt.dll beside the FFmpeg natives, which is the branch Linux never takes
 - [x] Stress the snapshot race fix: 100 runs under constrained CPU, zero failures, against a rate
       of roughly one in eight before it
-- [ ] Phase 2: one SRT latency option applied to both listeners, and a one-second GOP in the
+- [x] Phase 2: one SRT latency option applied to both listeners, and a one-second GOP in the
       reference senders. The join-latency floor is the encoder's keyframe interval
 - [ ] Phase 1b: a live name is locked. A second publisher of a name that is live and held is
       refused at the handshake, rather than taking it over

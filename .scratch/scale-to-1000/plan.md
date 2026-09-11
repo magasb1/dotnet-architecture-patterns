@@ -49,8 +49,9 @@ still only a plan.
 | | State |
 | --- | --- |
 | Phase 0, the load rig | Written. Never run against a real cluster, so none of its numbers exist yet |
-| Phase 1, own the listener | Built, and passing in the Linux container |
-| Phase 1b through 7 | Planned only |
+| Phase 1, own the listener | Built, and passing on Linux and Windows |
+| Phase 2, latency | Built, and passing on Windows |
+| Phase 1b, 3 through 7 | Planned only |
 
 **What is actually verified.** `docker/Dockerfile.test` runs the suite on Linux with libsrt from
 apt: 191 passed, 0 failed, 8 skipped, the 8 being the pre-existing Postgres tests. All eleven SRT
@@ -59,16 +60,23 @@ this phase existed to remove. A rejection code was observed reaching the caller,
 Phases 1b and 4 are built on. And `srt_close` was shown to be what unblocks a blocked read, the
 one behaviour the research could not settle from documentation.
 
+**Windows runs it too, now.** libsrt 1.5.6 built through vcpkg, `scripts/fetch-libsrt.sh` put it
+beside the FFmpeg natives, and the full suite is 194 passed, 0 failed, 8 skipped, the 8 being
+Postgres. That exercised the one path Linux never takes: the resolver's first branch, finding the
+library next to the application rather than falling through to the system. The three latency tests
+ran there for the first time, so the negotiation is confirmed rather than reasoned.
+
+**The race fix is verified**: 100 runs of the snapshot test under constrained CPU with no failure,
+against a rate of roughly one in eight before it.
+
 **What is owed.**
 
-- **Windows has never run any of it.** Eleven tests skip there until libsrt is built, which needs
-  the MSVC C++ workload. Two things only Windows can check: that the resolver finds `srt.dll`
-  beside the FFmpeg natives rather than falling through, and the test timings, which have only
-  ever been measured on Linux.
 - **The load rig has never been pointed at anything.** Phase 0's five baseline numbers are all
   unmeasured, including the one that sizes pods.
-- **The race fix wants its stress run.** The snapshot race was fixed at the hub; confirming it no
-  longer reproduces under a constrained container is the last open thread from Phase 1.
+- **Nothing has run on more than one replica.** Every cross-pod behaviour in this plan is still
+  argued rather than observed: the name lock across pods, the viewer that lands on the wrong pod,
+  a stream moving when its owner dies. Docker Desktop's Kubernetes would exercise the first two
+  and would not reproduce load-balancer behaviour faithfully.
 
 **Two things Phase 1 left behind, both small and both recorded in code.** `SrtSocketStream`'s
 receive timeout can be lengthened now that the close is proven to unblock a read, and
