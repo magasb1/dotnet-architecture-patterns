@@ -73,9 +73,13 @@ public sealed class LiveStreamsController(
     /// Creates a stream by request, for a protocol that cannot name itself. It shares one
     /// namespace and one claim with automatic streams: a manual stream is simply one that claimed
     /// its name early, and an encoder presenting that name is the same conflict as any other.
+    ///
+    /// A live name is locked, so asking for one somebody else is publishing is a conflict rather
+    /// than a take-over. An encoder meets the same rule as a refused handshake.
     /// </summary>
     [HttpPost("manual")]
     [ProducesResponseType(StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<LiveStream>> CreateManual(
         CreateManualStreamRequest request,
         [FromHeader(Name = "X-Storage-Token")] string? token,
@@ -93,6 +97,10 @@ public sealed class LiveStreamsController(
         catch (Exception ex) when (ex is NotSupportedException or ArgumentException)
         {
             return BadRequest(ex.Message);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(ex.Message);
         }
     }
 

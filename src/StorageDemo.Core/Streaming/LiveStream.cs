@@ -40,8 +40,9 @@ public sealed record RecordingStatus(
 /// </summary>
 /// <param name="Owner">
 /// The replica holding the connection. Only the owner has the bytes, so requests reaching another
-/// replica are forwarded to it. Writing a different owner here is how a name is taken over: the
-/// previous owner reads it on its next heartbeat and stands down.
+/// replica are forwarded to it. Writing a different owner here is how a name moves, and it is
+/// allowed only once the name is free - the feed interrupted, or the owner no longer heartbeating.
+/// The replica losing it reads this on its next heartbeat and stands down.
 /// </param>
 /// <param name="OwnerAddress">Where that replica's API can be reached, recorded when it claimed the name.</param>
 /// <param name="ConsumptionAddress">
@@ -114,4 +115,21 @@ public static class LiveStreamStaleness
 {
     public static bool IsGone(LiveStream stream, TimeSpan grace)
         => DateTimeOffset.UtcNow - stream.Heartbeat > grace;
+
+    /// <summary>
+    /// Whether the replica that owns this entry is still there, on a much shorter fuse than
+    /// <see cref="IsGone"/>.
+    ///
+    /// The two windows answer different questions and are deliberately not the same number. What a
+    /// viewer sees is decided by the grace period: a tile that vanishes and returns is worse than
+    /// one showing a state, so an entry stays listed as interrupted for thirty seconds. Who may
+    /// publish the name is decided here: a dead pod's encoders are already reconnecting, and making
+    /// them wait out the grace period would cost half a minute of black screen to protect a pod
+    /// that is not coming back.
+    ///
+    /// Three beats, because one missed heartbeat is a scheduling hiccup and three is a pod that has
+    /// stopped. At a two-second beat a name frees about six seconds after its owner dies.
+    /// </summary>
+    public static bool OwnerAlive(LiveStream stream, TimeSpan beat)
+        => DateTimeOffset.UtcNow - stream.Heartbeat <= beat * 3;
 }

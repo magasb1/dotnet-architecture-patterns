@@ -37,6 +37,10 @@ public interface ILiveStreamService
     /// It sits in the registry waiting for bytes and is indistinguishable from an automatic stream
     /// once a demultiplexer exists.
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The name is live on another replica. A live name is locked, and a pulled stream is subject to
+    /// the same rule as an encoder that presents it at the handshake.
+    /// </exception>
     Task<LiveStream> CreateManualAsync(string name, string url, CancellationToken cancellationToken = default);
 
     /// <summary>

@@ -487,12 +487,22 @@ for telling one attempt from the next, but nothing looks a stream up by it.
 | Preview, snapshot, record | Forwarded to the owner over HTTP | The bytes exist in one place |
 | A viewer on the wrong replica | Relayed from the owner over SRT | SRT has no redirect |
 
-**The newest connection wins a contested name.** A replica finding the name already held takes it
-anyway and records itself as owner; the previous owner discovers on its next heartbeat that it has
-lost the claim, shuts its hub down and closes any recording as a complete document. Refusing the
-newcomer was rejected because it makes recovery wait on a timeout this service does not control: an
-encoder actively pushing bytes is more real than a socket that has not yet noticed its peer is gone,
-and SRT takes seconds to work that out.
+**A live name is locked.** While `demo` is live and its owner is heartbeating, a second publisher of
+`demo` is refused during the SRT handshake with `SRT_REJX_CONFLICT`, before a connection exists and
+without the stream on air noticing anything. The name is free when the feed is interrupted, when the
+owner has stopped heartbeating for three beats, or when nobody owns it; whoever claims a free name
+resumes the same stream, and the replica losing it stands down on its next heartbeat.
+
+Two places enforce it, because the handshake callback runs on libsrt's receiver thread and blocking
+it would stall packet processing for every socket on the port. It therefore answers from a copy of
+the registry the heartbeat refreshes once a beat, and the claim behind it re-checks against the
+registry itself and closes the socket if the copy was out of date.
+
+What it costs, since the earlier design chose the opposite for a reason: a force-killed pod holds its
+names for about six seconds, so an encoder reconnecting inside that window is refused once and
+retries; and an encoder that reconnects before its old socket has timed out is refused until
+`FeedTimeoutSeconds` declares the old feed interrupted. Neither is a security measure - an impostor
+arriving while the real encoder is down is admitted, and a passphrase is what would stop it.
 
 **Interrupted is a state.** When a feed stops arriving the stream stays claimed, stays listed, and
 keeps its hub, buffer and any recording alive for a grace period of thirty seconds. A recording
@@ -507,8 +517,9 @@ and the per-pod ingest Services together.
 Two things are easily conflated and only one is needed. **Per-flow stickiness is required**, because
 an SRT connection is a UDP flow whose packets must all reach the same pod; that is ordinary
 connection tracking and every load balancer in play does it without being configured to.
-**Stickiness across reconnects is not required**, because the newest connection wins the name. No
-affinity configuration, no session tables, nothing to get wrong.
+**Stickiness across reconnects is not required**, because a reconnect may land on any replica: the
+name is free the moment the old feed is interrupted, and an encoder that arrives before it is refused
+and retries. No affinity configuration, no session tables, nothing to get wrong.
 
 What a replica disappearing actually costs a producer and a viewer is measured rather than guessed,
 in [docs/replica-failover.md](docs/replica-failover.md).

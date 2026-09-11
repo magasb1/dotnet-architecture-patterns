@@ -32,7 +32,21 @@ public sealed class LiveStreamCoordinator(
     IOptions<MediaOptions> mediaOptions,
     ILogger<LiveStreamCoordinator> logger) : ILiveStreamService, IAsyncDisposable
 {
+    /// <summary>
+    /// How often the registry is refreshed and the local streams reconsidered. Short next to the
+    /// grace period, so an interruption is noticed well inside it, and it is also the unit
+    /// <see cref="LiveStreamStaleness.OwnerAlive"/> counts in.
+    /// </summary>
+    public static readonly TimeSpan Beat = TimeSpan.FromSeconds(2);
+
     private readonly ConcurrentDictionary<string, LiveStreamEntry> _local = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The registry as it looked at the last heartbeat, which is the only form the handshake can
+    /// read. See <see cref="AdmitPublisher"/>.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, LiveStream> _known = new(StringComparer.Ordinal);
+
     private readonly LiveOptions _options = options.Value;
     private readonly CancellationTokenSource _shutdown = new();
 
@@ -77,6 +91,28 @@ public sealed class LiveStreamCoordinator(
         => _local.TryGetValue(name, out var entry) ? entry.Harvester.Preview : null;
 
     /// <summary>
+    /// Whether a publisher presenting this name may connect, answered on libsrt's receiver thread.
+    ///
+    /// A name is held while its owner is alive and its feed is live, and nobody else may publish it.
+    /// Free means the feed is interrupted, the owner has stopped heartbeating, or nothing owns the
+    /// name at all; a free name is admitted and, if it was interrupted, resumes the same stream.
+    ///
+    /// Answered from <see cref="_known"/> and not from the registry, because this runs on the thread
+    /// carrying every packet for every socket on the ingest port: one Redis round trip here stalls
+    /// packet processing for the whole port. The cache is therefore up to one beat stale, which
+    /// leaves a window where two replicas each admit the same name. <see cref="ClaimAsync"/> closes
+    /// it.
+    ///
+    /// Only the ingest port asks. A viewer is not a publisher and is never refused by this rule.
+    /// </summary>
+    public int? AdmitPublisher(Admission admission)
+        => _known.TryGetValue(admission.Name, out var held)
+            && held.State == LiveStreamState.Live
+            && LiveStreamStaleness.OwnerAlive(held, Beat)
+                ? Srt.SRT_REJX_CONFLICT
+                : null;
+
+    /// <summary>
     /// Takes an accepted socket off the accept thread. Everything real happens on another thread,
     /// because every millisecond spent here is a millisecond the ingest port is not listening.
     ///
@@ -103,11 +139,17 @@ public sealed class LiveStreamCoordinator(
 
             if (!await ClaimAsync(entry, cancellationToken: CancellationToken.None))
             {
-                // Another replica took the name between the accept and the claim. It is the newer
-                // connection, so this one stands down rather than fighting for it.
-                logger.LogInformation("'{Name}' was claimed elsewhere while it was being attached", name);
+                // The handshake cache said the name was free and the registry says otherwise, which
+                // is the one-beat window two replicas can both admit in. Closing the socket is all
+                // this side can do: the connection already exists, so there is no rejection code
+                // left to send, and the encoder sees a drop and retries.
+                logger.LogInformation(
+                    "'{Name}' is held elsewhere, so the connection accepted here is being closed",
+                    name);
 
                 transport.Dispose();
+
+                await DiscardAsync(entry);
 
                 return;
             }
@@ -166,13 +208,20 @@ public sealed class LiveStreamCoordinator(
     }
 
     /// <summary>
-    /// Records this replica as the owner of the name.
+    /// Records this replica as the owner of the name, or refuses because somebody else still holds
+    /// it.
     ///
-    /// The newest connection wins. A replica finding the name already held takes it anyway; the
-    /// previous owner discovers on its next heartbeat that it has lost the claim, shuts its hub
-    /// down and closes any recording as a complete document. Refusing the newcomer was rejected
-    /// because it makes recovery wait on a timeout this service does not control: an encoder
-    /// actively pushing bytes is more real than a socket that has not yet noticed its peer is gone.
+    /// A live name is locked. While the owner is alive and its feed is live nobody else may publish
+    /// that name, and this is the authoritative half of that rule: the handshake answers from a
+    /// cache that is up to one beat old, so two replicas can both admit the same name, and exactly
+    /// one of them gets past here. A name whose feed is interrupted, or whose owner has stopped
+    /// heartbeating, is free and is taken - the replica losing it stands down on its next heartbeat.
+    ///
+    /// The design on record said the opposite, that the newest connection wins, on the grounds that
+    /// an encoder actively pushing bytes is more real than a socket that has not noticed its peer is
+    /// gone. The repository owner reversed it, and the cost is stated rather than hidden: a dead
+    /// pod's names stay held for about three beats, and an encoder that reconnects before its old
+    /// socket has timed out is refused until the feed timeout declares the old one interrupted.
     ///
     /// The claim is the owner field of the registry entry, and the distributed lock serialises the
     /// moment of taking it rather than being held for the stream's life. See the map: the design
@@ -192,7 +241,18 @@ public sealed class LiveStreamCoordinator(
 
             if (existing is not null
                 && existing.Owner != Owner
-                && !LiveStreamStaleness.IsGone(existing, Grace))
+                && existing.State == LiveStreamState.Live
+                && LiveStreamStaleness.OwnerAlive(existing, Beat))
+            {
+                logger.LogInformation(
+                    "'{Name}' is live on {Owner}, so it is not taken here",
+                    entry.Name,
+                    existing.Owner);
+
+                return false;
+            }
+
+            if (existing is not null && existing.Owner != Owner && !LiveStreamStaleness.IsGone(existing, Grace))
             {
                 logger.LogInformation(
                     "Taking '{Name}' over from {Previous}, which will stand down on its next heartbeat",
@@ -213,6 +273,19 @@ public sealed class LiveStreamCoordinator(
         }
     }
 
+    /// <summary>
+    /// Throws away an entry this replica turned out not to own. The hub and harvester were built by
+    /// <see cref="Create"/> before the claim was asked for, and without this they would sit here
+    /// unowned and unfed until the heartbeat noticed.
+    /// </summary>
+    private async Task DiscardAsync(LiveStreamEntry entry)
+    {
+        if (_local.TryRemove(new KeyValuePair<string, LiveStreamEntry>(entry.Name, entry)))
+        {
+            await entry.DisposeAsync();
+        }
+    }
+
     public async Task<LiveStream> CreateManualAsync(
         string name,
         string url,
@@ -229,7 +302,14 @@ public sealed class LiveStreamCoordinator(
         // and an encoder presenting that name is the same conflict as any other.
         var entry = _local.GetOrAdd(parsed, _ => Create(parsed, manual: true, manualUrl: url));
 
-        await ClaimAsync(entry, cancellationToken);
+        if (!await ClaimAsync(entry, cancellationToken))
+        {
+            await DiscardAsync(entry);
+
+            // The same lock an encoder meets at the handshake. A pulled stream has no handshake to
+            // be refused at, so the refusal is the answer to the request that asked for it.
+            throw new InvalidOperationException($"'{parsed}' is already live on another replica.");
+        }
 
         var feed = await entry.TakeOverAsync(Guid.NewGuid().ToString("N")[..8]);
         var running = entry;
@@ -492,8 +572,8 @@ public sealed class LiveStreamCoordinator(
 
     /// <summary>
     /// One pass of the heartbeat: republish what is running here, stand down where this replica
-    /// has lost a name, retire streams whose grace period has expired, and close recordings that
-    /// have reached their end.
+    /// has lost a name, retire streams whose grace period has expired, close recordings that have
+    /// reached their end, and take a copy of the registry for the handshake to read.
     /// </summary>
     public async Task TickAsync(CancellationToken cancellationToken)
     {
@@ -507,6 +587,37 @@ public sealed class LiveStreamCoordinator(
             {
                 logger.LogWarning(ex, "The heartbeat for '{Name}' failed", entry.Name);
             }
+        }
+
+        await RefreshKnownAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The one registry read the handshake depends on, taken last so that what this pass just
+    /// published about its own streams is in the copy rather than a beat behind it.
+    ///
+    /// A whole listing every beat, which is what makes the callback a dictionary lookup. It is also
+    /// the ceiling on this design: at a thousand streams it is a thousand entries deserialised every
+    /// two seconds on every replica.
+    ///
+    /// ponytail: the registry has no "what changed" and adding one would mean a second Redis
+    /// structure to keep honest. If the listing ever shows up in a profile, publish claims on the
+    /// change feed that already exists and keep the listing as the periodic repair.
+    /// </summary>
+    private async Task RefreshKnownAsync(CancellationToken cancellationToken)
+    {
+        var streams = await registry.ListAsync(cancellationToken);
+
+        foreach (var stream in streams)
+        {
+            _known[stream.Name] = stream;
+        }
+
+        // Names the listing no longer carries are gone from the registry, and leaving them here
+        // would lock a name nothing owns until the process restarted.
+        foreach (var name in _known.Keys.Except(streams.Select(stream => stream.Name), StringComparer.Ordinal))
+        {
+            _known.TryRemove(name, out _);
         }
     }
 
@@ -528,8 +639,9 @@ public sealed class LiveStreamCoordinator(
 
         if (shared is not null && shared.Owner != Owner && !LiveStreamStaleness.IsGone(shared, Grace))
         {
-            // Displaced. The newest connection won the name somewhere else, so everything here
-            // shuts down and any recording closes as a complete document rather than moving.
+            // Displaced. The name was free when the other replica took it - this feed had stopped,
+            // or this pod had stopped saying it was alive - so everything here shuts down and any
+            // recording closes as a complete document rather than moving.
             logger.LogInformation("'{Name}' now belongs to {Owner}; standing down", entry.Name, shared.Owner);
 
             _local.TryRemove(entry.Name, out _);

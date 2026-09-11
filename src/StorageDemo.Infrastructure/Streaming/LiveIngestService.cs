@@ -18,12 +18,6 @@ public sealed class LiveIngestService(
     IOptions<LiveOptions> options,
     ILogger<LiveIngestService> logger) : BackgroundService
 {
-    /// <summary>
-    /// How often the registry is refreshed and the local streams reconsidered. Short next to the
-    /// grace period, so an interruption is noticed well inside it.
-    /// </summary>
-    private static readonly TimeSpan Beat = TimeSpan.FromSeconds(2);
-
     private readonly LiveOptions _options = options.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -65,7 +59,7 @@ public sealed class LiveIngestService(
         var listener = new SrtListener(
             StreamIntent.Publish,
             _options,
-            Admit,
+            coordinator.AdmitPublisher,
             coordinator.OnAccepted,
             logger,
             listeners);
@@ -79,14 +73,13 @@ public sealed class LiveIngestService(
     }
 
     /// <summary>
-    /// Everything the listener could parse is admitted: Phase 1b refuses a name that is live and
-    /// held, Phase 4 refuses when the pod is full, and neither exists yet.
+    /// The same beat the coordinator counts heartbeats in, and the same pass refreshes the copy of
+    /// the registry the handshake reads, so a name is locked here within one beat of being claimed
+    /// anywhere.
     /// </summary>
-    private static int? Admit(Admission admission) => null;
-
     private async Task HeartbeatAsync(CancellationToken stoppingToken)
     {
-        using var beats = new PeriodicTimer(Beat);
+        using var beats = new PeriodicTimer(LiveStreamCoordinator.Beat);
 
         while (await Safe(() => beats.WaitForNextTickAsync(stoppingToken).AsTask()))
         {

@@ -63,8 +63,11 @@ public sealed class LiveConsumptionService(
     }
 
     /// <summary>
-    /// Everything the listener could parse is admitted: Phase 1b refuses a name that is live and
-    /// held, Phase 4 refuses when the pod is full, and neither exists yet.
+    /// Everything the listener could parse is admitted.
+    ///
+    /// The name lock is deliberately not applied here: it stops a second publisher taking a live
+    /// name, and a viewer takes nothing. Refusing viewers of a live stream would be exactly backwards.
+    /// Phase 4's capacity limit will not apply here either, for the same reason. A viewer is cheap.
     /// </summary>
     private static int? Admit(Admission admission) => null;
 

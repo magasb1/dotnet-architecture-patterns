@@ -71,9 +71,10 @@ public sealed class LiveStreamEntry : IAsyncDisposable
     /// <summary>
     /// Hands the entry a new connection, cancelling whatever was feeding it.
     ///
-    /// The newest connection wins here for the same reason it wins across replicas: an encoder
-    /// actively pushing bytes is more real than a socket that has not yet noticed its peer is gone,
-    /// and SRT takes seconds to work that out.
+    /// The cancellation is a guard rather than a take-over. A live name is locked now, so a second
+    /// connection only reaches here once the feed it replaces has already stopped and there is
+    /// nothing left to cancel. It stays because the alternative to a no-op cancel is two feeds
+    /// writing into one hub, and that would be discovered as corrupted output.
     /// </summary>
     public async Task<CancellationToken> TakeOverAsync(string connectionId)
     {

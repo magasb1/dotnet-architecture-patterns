@@ -93,8 +93,11 @@ it. A viewer's own connection is held open across a change of owner, so what a m
 somebody watching is the gap in the feed rather than a reconnect.
 
 **Claim.** How a replica becomes the owner of a name, taken on a distributed lock and renewed by the
-heartbeat. Names are one namespace shared by automatic and manual streams. A contested name goes to
-the newest connection, and the displaced owner learns it lost the claim on its next heartbeat.
+heartbeat. Names are one namespace shared by automatic and manual streams. A live name is locked:
+while `demo` is live and its owner is heartbeating, a second publisher of `demo` is refused at the
+handshake rather than taking it over. The name is free again when the feed is interrupted, when the
+owner has stopped heartbeating for three beats, or when nobody owns it, and whoever claims it then
+resumes the same stream; the replica losing it learns so on its next heartbeat.
 
 **Interrupted.** A stream whose feed has stopped arriving but whose grace period has not expired. It
 is still claimed, still shown, and its hub, buffer and any recording are all still alive. A reconnect

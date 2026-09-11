@@ -8,6 +8,7 @@ using StorageDemo.Api.Controllers;
 using StorageDemo.Core.Streaming;
 using StorageDemo.Infrastructure.Media;
 using StorageDemo.Infrastructure.Streaming;
+using StorageDemo.Tests.Infrastructure;
 
 namespace StorageDemo.Tests.Integration;
 
@@ -395,8 +396,70 @@ public sealed class LiveStreamTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// A live name is locked: while <c>demo</c> is live, nobody else may publish <c>demo</c>.
+    ///
+    /// Both halves matter and the second is the one worth the test. A refusal that silently
+    /// interrupted the incumbent would be worse than the take-over it replaces, so the first
+    /// publisher is checked for still being the same connection and still delivering afterwards.
+    ///
+    /// The wait before the second sender is the handshake cache, not slack: the callback runs on
+    /// libsrt's receiver thread and cannot read the registry, so it answers from a copy taken once
+    /// a beat, and the name is locked within a beat of being claimed rather than instantly.
+    /// </summary>
+    [Fact]
+    public async Task A_second_publisher_of_a_live_name_is_refused_and_the_first_is_undisturbed()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
+
+        const string name = "contested-camera";
+
+        Push(name);
+
+        var first = await WaitForStreamAsync(name, TimeSpan.FromSeconds(40));
+
+        Assert.NotNull(first);
+
+        await Task.Delay(TimeSpan.FromSeconds(3));
+
+        var before = await Get(name);
+
+        Assert.NotNull(before);
+
+        // Started through the shared helper rather than through Push, because this one's stderr is
+        // the evidence and only that helper drains it.
+        var second = SrtSenders.StartSender(_ingestPort, $"#!::r={name},m=publish");
+        _senders.Add(second);
+
+        Assert.True(
+            await SrtSenders.WasRefused(second, TimeSpan.FromSeconds(10)),
+            $"the second publisher was not turned away: {SrtSenders.Complaints([second])}");
+
+        Assert.True(
+            await WaitAsync(
+                async () => await Get(name) is { Packets: var packets } && packets > before.Packets,
+                TimeSpan.FromSeconds(15)),
+            "the first publisher stopped delivering once the second was refused");
+
+        var after = await Get(name);
+
+        Assert.NotNull(after);
+        Assert.Equal(LiveStreamState.Live, after.State);
+
+        // The same connection throughout. A new identifier here would mean the refused publisher
+        // had been let in and taken the stream over after all.
+        Assert.Equal(before.ConnectionId, after.ConnectionId);
+        Assert.Equal(before.StartedAt, after.StartedAt);
+    }
+
+    /// <summary>
     /// A reconnect under the same name resumes the same stream rather than creating a second one.
     /// That is what makes the name the identity rather than an incidental label.
+    ///
+    /// It is also where the name lock lets go. The second <c>Push</c> is a different process
+    /// presenting a name this replica already holds, and it is admitted because the feed is
+    /// interrupted: the lock follows the feed, not the entry, which is why an encoder that drops can
+    /// always come back.
     /// </summary>
     [Fact]
     public async Task A_reconnect_under_the_same_name_resumes_the_same_stream()

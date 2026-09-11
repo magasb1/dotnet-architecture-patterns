@@ -13,3 +13,5 @@ ffmpeg/
 
 # Other
 scratch/
+# Agent worktrees, created per isolated subagent run.
+.claude/
