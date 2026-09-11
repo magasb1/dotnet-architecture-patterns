@@ -68,8 +68,14 @@ metadata:
   namespace: storage-demo
 spec:
   # Streams spread across replicas because the load balancer spreads connections, and each replica
-  # owns some streams and holds everything for them. The useful autoscaling signal is therefore
-  # streams owned per replica rather than processor load: an idle stream still costs a buffer.
+  # owns some streams and holds everything for them. Processor load is the wrong signal to scale
+  # on, because an idle stream still costs a buffer.
+  #
+  # Streams owned is not the right one either, which is a correction rather than a subtlety. At 250
+  # streams this service reported 250 of them live and contented while a fifth of the media was
+  # actually arriving, so a count reads full health at the moment every stream is broken. A signal
+  # that can tell those apart is still an open question; until there is one, this number is set by
+  # hand from the sizing below.
   replicas: 2
   strategy:
     rollingUpdate:
@@ -186,14 +192,30 @@ spec:
             # Two failures rather than three, so a replica that stops accepting leaves the Service
             # in about ten seconds and encoders are pushed somewhere that works.
             failureThreshold: 2
+          # Sized for 60 streams at 4 Mbit/s, which is the measured knee of libsrt's single receive
+          # thread at camera rates. Change the stream count or the bitrate and both numbers move;
+          # the arithmetic is below rather than in someone's head.
+          #
+          # These were 200m and 512Mi with a 1Gi limit, which was a guess and was wrong by about an
+          # order of magnitude: that limit OOM-kills at roughly 20 camera-rate streams, against a
+          # design that assumes 250. Measured in .scratch/scale-to-1000/baseline.md.
+          #
+          #   memory  ~= 2.25 x Live__BufferWindowSeconds x bitrate x streams
+          #            = 2.25 x 30 s x 0.5 MB/s x 60      ~= 2.0 GB, measured 2.86 GiB with overhead
+          #   cpu     ~= 0.017 x streams                  (two threads each: our demultiplexer and
+          #            + 0.8                               libsrt's per-socket timestamp thread)
+          #            + 0.5                              (the receive thread)
+          #                                               (the preview, until Phase 8 moves it out)
+          #            ~= 2.3 cores
           resources:
             requests:
-              cpu: 200m
-              # Bounded by the per-stream buffer ceiling times the streams this replica owns, which
-              # is what makes this a calculation rather than a guess.
-              memory: 512Mi
+              cpu: "2"
+              memory: 3Gi
             limits:
-              memory: 1Gi
+              # Memory only, deliberately. A CPU limit means CFS throttling, and a throttled media
+              # pipeline does not run slower, it drops packets and stutters. The request is what
+              # reserves the cores; nothing should cap them.
+              memory: 4Gi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
