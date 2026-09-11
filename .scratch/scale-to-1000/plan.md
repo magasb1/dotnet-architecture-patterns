@@ -48,10 +48,17 @@ still only a plan.
 
 | | State |
 | --- | --- |
-| Phase 0, the load rig | Written. Never run against a real cluster, so none of its numbers exist yet |
+| Phase 0, the load rig | Built and run against one container. Numbers in `baseline.md` |
 | Phase 1, own the listener | Built, and passing on Linux and Windows |
 | Phase 2, latency | Built, and passing on Windows |
-| Phase 1b, 3 through 7 | Planned only |
+| Phase 1b, 3 through 8 | Planned only |
+
+**The baseline changed the plan rather than confirming it.** Four things, all in `baseline.md`
+and folded into the phases below: Phase 4's rule for sizing a pod has no solution and is rewritten;
+a gauge of streams owned is blind to overload, which the API reported as 250 contented streams
+while delivering a fifth of the media; memory is a function of bitrate and not of the buffer
+ceiling; and the unconditional preview decode, not the receive thread, is the dominant cost at
+scale, which is now Phase 8 and may be the largest single win available.
 
 **What is actually verified.** `docker/Dockerfile.test` runs the suite on Linux with libsrt from
 apt: 191 passed, 0 failed, 8 skipped, the 8 being the pre-existing Postgres tests. All eleven SRT
@@ -735,6 +742,26 @@ shared framework and nothing else:
 | `live.streams.owned` | ObservableUpDownCounter, which is what the docs prescribe for the size of a set | The autoscaler |
 | `live.accepts` | Counter, tag `port` | Phase 0's rig, after |
 | `live.rejects` | Counter, tag `reason` | Whoever is wondering why an encoder cannot connect |
+| `live.bytes.demuxed` | Counter, tag `name` | The overload signal below. Without it none of the others can tell health from collapse |
+
+**Owning a stream is not the same as serving it, and the baseline proved the difference matters.**
+At 250 streams the API reported 250 live, every one in the live state with packets and bytes
+rising, while the service was demultiplexing a fifth of the media that was being sent, with
+319,000 kernel UDP input errors in fifteen seconds and 236 Mbit/s arriving to deliver 26. A gauge
+of streams owned would have read full health at the moment every stream was broken, and an
+autoscaler reading it would have done nothing.
+
+So capacity cannot be inferred from a count. The honest signal is delivered bitrate against
+expected, which means a stream has to carry what it ought to be receiving, and that is not
+something the service knows today: nothing declares a stream's expected rate, and an encoder's
+own bitrate is not reported anywhere the listener can see it. The cheapest usable proxy is the
+derivative of `live.bytes.demuxed` per stream against its own recent history, so a stream that
+falls to a fifth of what it was delivering a minute ago is visibly degraded even though nobody
+ever declared what it should be.
+
+That is a design question this plan has not answered, and it is the one thing standing between
+Phase 4 and an autoscaler that can be trusted. It belongs on the map rather than in this section,
+because the answer may be that a stream declares its rate at claim time.
 
 `dotnet-counters monitor -n <process> --counters StorageDemo.Live` reads these with no package.
 
@@ -763,10 +790,37 @@ encoder does land elsewhere; and `sessionAffinity` must stay `None`, since `Clie
 UDP and would pin the retry to the full pod. SRT keepalives every second keep a flow inside the
 conntrack UDP timeouts, so an idle connection is never re-hashed underneath itself.
 
-Pod sizing follows from Phase 0's last row. libsrt runs one receive thread per bound UDP port per
-process, so a pod's ingress is bounded by one core however many the pod has. Set `MaxStreams`
-where that thread sits at about 70 percent and set the memory request to `MaxStreams` times the
-buffer ceiling. Both are then calculations, which is what the manifest's comment already promises.
+**Pod sizing, rewritten against the measurements in `baseline.md`.** The rule this plan first gave,
+set `MaxStreams` where the receive thread sits at about 70 percent, has no solution: the knee is
+around 60 percent of one core and 70 is never reached at any load. Past the knee the thread's
+share *falls*, because what it cannot do becomes kernel UDP drops and a retransmit storm rather
+than more processor. Sizing on a number that moves the wrong way under overload cannot work.
+
+The ceiling is a joint budget of open sockets and packet rate, roughly
+
+```
+streams/175 + pps/45000 < 1
+```
+
+which is neither a stream count nor a throughput. Twenty streams carrying 300 Mbit/s sit at a
+third of the thread; seventy-five streams carrying the same 313 Mbit/s collapse. So `MaxStreams`
+is set per deployment from the expected per-stream bitrate. Measured knees: about 150 streams at
+half a megabit, about 60 at a camera-like four megabits, fewer than 20 at fifteen.
+
+Memory is two to two and a half times `BufferWindowSeconds` times bitrate per stream, measured at
+9.4 MB at half a megabit and 39 MB at four. The original prediction, `MaxStreams` times the 96 MiB
+buffer ceiling, over-predicts tenfold below about 25 Mbit/s a stream, because the ceiling is a cap
+that low-bitrate streams never approach.
+
+**`k8s/live/deployment.yaml` is short by roughly an order of magnitude on both**, which makes it a
+Phase 4 deliverable rather than a note. It requests 200m and 512Mi against a measured 2.5 to 3.4
+cores and 1.38 GiB for 150 low-bitrate streams, and its 1Gi limit OOM-kills at around 100 test
+streams or 20 camera streams. Its comment promises the numbers are a calculation; they now are
+one, so it should carry the formula rather than the guess.
+
+**Threads are a third bound**, about 2.2 per stream and 549 at 250 streams: one long-running
+demultiplexer each plus libsrt's own per-socket timestamp thread. Nothing to do about it yet, but
+it caps `MaxStreams` independently of processor and memory.
 
 ### Tests
 
@@ -867,6 +921,45 @@ owner's address, then `GET {owner}/api/live/peer/view/{name}` for the bytes. Ing
 its manifest goes in `k8s/workers/` and its only dependency on this service is those two routes.
 
 ---
+
+## Phase 8: The preview is the dominant cost, and nothing can switch it off
+
+Not in the original plan. The baseline found it, and at a thousand streams it is the largest
+single cost in the service.
+
+Every stream decodes keyframes and JPEG-encodes a preview unconditionally, watched or not:
+`LiveStreamEntry` attaches a `FrameDecoder` and a `Harvester` in its constructor, and the harvester
+encodes on a cadence forever. That is 250 to 440 percent of a core in the measured container, far
+more than the receive thread everything else in this plan worries about, and there is no per-stream
+way to turn it off.
+
+It is also exactly contrary to the design's own argument. The fan-out ticket says the packet tier
+is "what keeps a stream cheap when nobody is watching" and that a stream is "decoded only at the
+rate its subscribers ask for". Today every stream has a permanent frame subscriber, so no stream is
+ever cheap.
+
+The user's shape makes this worth fixing rather than tolerating: a thousand streams, a handful
+watched, the rest available on demand. A preview refreshed every two seconds for 990 streams
+nobody is looking at is the definition of work done for nobody.
+
+The shape of the fix, cheapest first, to be decided rather than assumed:
+
+- **Decode on demand with a short keep-alive.** The harvester attaches when someone asks for a
+  preview and detaches a minute after the last request. A grid of tiles polls, so the streams being
+  looked at stay warm and the rest cost nothing. The first request for a cold stream waits up to
+  one keyframe interval, which is the same wait a viewer already pays to join.
+- **A cadence that backs off** when nobody has asked, rather than attaching and detaching.
+  Simpler, but it never reaches zero and 990 streams at one frame a minute is still 990 decodes.
+- **A per-stream setting**, which pushes the decision onto whoever configures a camera and will be
+  wrong by default.
+
+The first is the one that matches the design's own claim about the packet tier. Its cost is that
+a preview can be up to a keyframe interval stale on first request, which the snapshot path already
+accepts and documents.
+
+This should be measured before it is built. The baseline's container figures say the preview
+dominates; confirming that by disabling the harvester and re-running the same ramp is an hour's
+work and would size the prize exactly.
 
 ## Documentation, as each phase lands
 

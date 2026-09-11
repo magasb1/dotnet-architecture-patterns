@@ -25,10 +25,15 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
       reference senders. The join-latency floor is the encoder's keyframe interval
 - [ ] Phase 1b: a live name is locked. A second publisher of a name that is live and held is
       refused at the handshake, rather than taking it over
-- [ ] Phase 0 baseline: five numbers, including the one that decides how many streams a pod takes.
-      Needs somewhere to point the load rig
+- [x] Phase 0 baseline on one container: see `.scratch/scale-to-1000/baseline.md`. Accept rate is
+      at least 20/s and the rig was always the limit, not the service
 - [ ] Phase 3: the in-cluster viewer hop becomes HTTP, deleting the SRT relay and AvioStream
-- [ ] Phase 4: refuse at the handshake when the pod is full, and a streams-owned gauge to scale on
+- [ ] Phase 8: decode the preview on demand. Unconditional keyframe decode and JPEG encode per
+      stream is 250-440% of a core, the largest cost in the service, and cannot be switched off
+- [ ] Decide the overload signal. At 250 streams the API reported 250 healthy while a fifth of the
+      media arrived, so a streams-owned gauge cannot tell health from collapse. Blocks Phase 4
+- [ ] Phase 4: refuse at the handshake when the pod is full, a gauge to scale on, and honest CPU
+      and memory in k8s/live/deployment.yaml, which is short by about tenfold on both
 - [ ] Phase 5: optional SRT passphrase, enforced during the handshake
 - [ ] Phase 6: pulled streams survive their pod, claimed by the heartbeat under the existing lock
 - [ ] Lengthen SrtSocketStream's receive timeout, now that srt_close is proven to unblock a read
