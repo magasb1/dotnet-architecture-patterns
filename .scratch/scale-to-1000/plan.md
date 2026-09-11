@@ -41,6 +41,55 @@ so, and the plan carries that uncertainty rather than hiding it.
 | `srt-latency-and-ffmpeg-caller.md` | Phases 0, 2, 3 | Latency negotiation is per direction so `SRTO_LATENCY` is needed, the 60 ms floor, `SRTO_MAXBW` defaults to unlimited, FFmpeg never reports a rejection reason and never retries, and Kestrel has no HTTP/1.1 trailers |
 | `k8s-autoscaling-and-metrics.md` | Phase 4 | The Prometheus exporter is still prerelease, the gauge should be an up-down counter, pod-deletion-cost steers scale-down, and a retry from a new source port is re-balanced under every default |
 
+## Where this stands
+
+Phases 0 and 1 are built and committed on `srt-listener-libsrt`. Everything below Phase 1b is
+still only a plan.
+
+| | State |
+| --- | --- |
+| Phase 0, the load rig | Written. Never run against a real cluster, so none of its numbers exist yet |
+| Phase 1, own the listener | Built, and passing in the Linux container |
+| Phase 1b through 7 | Planned only |
+
+**What is actually verified.** `docker/Dockerfile.test` runs the suite on Linux with libsrt from
+apt: 191 passed, 0 failed, 8 skipped, the 8 being the pre-existing Postgres tests. All eleven SRT
+tests executed. Twenty senders started together were all accepted in 211 ms, which is the ceiling
+this phase existed to remove. A rejection code was observed reaching the caller, which is what
+Phases 1b and 4 are built on. And `srt_close` was shown to be what unblocks a blocked read, the
+one behaviour the research could not settle from documentation.
+
+**What is owed.**
+
+- **Windows has never run any of it.** Eleven tests skip there until libsrt is built, which needs
+  the MSVC C++ workload. Two things only Windows can check: that the resolver finds `srt.dll`
+  beside the FFmpeg natives rather than falling through, and the test timings, which have only
+  ever been measured on Linux.
+- **The load rig has never been pointed at anything.** Phase 0's five baseline numbers are all
+  unmeasured, including the one that sizes pods.
+- **The race fix wants its stress run.** The snapshot race was fixed at the hub; confirming it no
+  longer reproduces under a constrained container is the last open thread from Phase 1.
+
+**Two things Phase 1 left behind, both small and both recorded in code.** `SrtSocketStream`'s
+receive timeout can be lengthened now that the close is proven to unblock a read, and
+`AvioReader.Context`'s `ponytail:` comment argues from a situation that no longer holds.
+
+## Next
+
+In order, and the first two are small.
+
+1. **Windows verification**, when the C++ workload lands. Not a phase, but it gates trusting any
+   of this on a developer machine.
+2. **Phase 2, latency.** One option, three tests, and it is the constraint the owner named. Small
+   enough to do while waiting for anything else.
+3. **Phase 1b, the name lock.** The behaviour change the owner asked for, and the first real use
+   of refusing at the handshake. Bigger than it looks because of the two-place enforcement and the
+   heartbeat cache.
+4. **Phase 0's baseline**, once there is a cluster to point it at. Everything after this is judged
+   against those numbers, and Phase 4 cannot size a pod without the last of them.
+5. **Phase 3, the in-cluster hop**, which also deletes `AvioStream`.
+6. Then 4, 5, 6 in order. Phase 7 is nothing to build.
+
 ## Order
 
 Phase 1 first. Phases 4 and 5 are impossible without it, and Phases 2 and 3 are tuning around it.
