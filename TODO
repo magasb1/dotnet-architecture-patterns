@@ -23,13 +23,20 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
       of roughly one in eight before it
 - [x] Phase 2: one SRT latency option applied to both listeners, and a one-second GOP in the
       reference senders. The join-latency floor is the encoder's keyframe interval
-- [ ] Phase 1b: a live name is locked. A second publisher of a name that is live and held is
+- [x] Phase 1b: a live name is locked. A second publisher of a name that is live and held is
       refused at the handshake, rather than taking it over
+- [ ] Verify Phase 1b on real pods, via the k3s rig in docs/replica-failover.md. It is the only
+      built behaviour never run on more than one replica, and it is about two of them
 - [x] Phase 0 baseline on one container: see `.scratch/scale-to-1000/baseline.md`. Accept rate is
       at least 20/s and the rig was always the limit, not the service
 - [ ] Phase 3: the in-cluster viewer hop becomes HTTP, deleting the SRT relay and AvioStream
-- [ ] Phase 8: decode the preview on demand. Unconditional keyframe decode and JPEG encode per
-      stream is 250-440% of a core, the largest cost in the service, and cannot be switched off
+- [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and
+      returns detections and the preview. Detection runs on every stream, so decoding on demand
+      answers nothing; KLV needs no decode at all and must not argue for any
+- [ ] Benchmark RF-DETR on the target GPU before sizing the worker tier: frames per second per GPU
+      at a useful batch size, and whether NVDEC or the model saturates first
+- [ ] Separate detection rate from tracking rate. Pattern of life needs stable identities, which is
+      a tracker property; detecting every frame on every stream is the most expensive option there is
 - [ ] Decide the overload signal. At 250 streams the API reported 250 healthy while a fifth of the
       media arrived, so a streams-owned gauge cannot tell health from collapse. Blocks Phase 4
 - [ ] Phase 4: refuse at the handshake when the pod is full, a gauge to scale on, and honest CPU

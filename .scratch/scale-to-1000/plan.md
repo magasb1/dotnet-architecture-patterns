@@ -43,15 +43,16 @@ so, and the plan carries that uncertainty rather than hiding it.
 
 ## Where this stands
 
-Phases 0 and 1 are built and committed on `srt-listener-libsrt`. Everything below Phase 1b is
-still only a plan.
+Phases 0, 1, 1b and 2 are built and committed on `srt-listener-libsrt`. Everything else is still
+only a plan.
 
 | | State |
 | --- | --- |
 | Phase 0, the load rig | Built and run against one container. Numbers in `baseline.md` |
 | Phase 1, own the listener | Built, and passing on Linux and Windows |
+| Phase 1b, the name lock | Built, and passing on Windows. Never run on real pods |
 | Phase 2, latency | Built, and passing on Windows |
-| Phase 1b, 3 through 8 | Planned only |
+| Phase 3 through 8 | Planned only |
 
 **The baseline changed the plan rather than confirming it.** Four things, all in `baseline.md`
 and folded into the phases below: Phase 4's rule for sizing a pod has no solution and is rewritten;
@@ -91,19 +92,16 @@ receive timeout can be lengthened now that the close is proven to unblock a read
 
 ## Next
 
-In order, and the first two are small.
-
-1. **Windows verification**, when the C++ workload lands. Not a phase, but it gates trusting any
-   of this on a developer machine.
-2. **Phase 2, latency.** One option, three tests, and it is the constraint the owner named. Small
-   enough to do while waiting for anything else.
-3. **Phase 1b, the name lock.** The behaviour change the owner asked for, and the first real use
-   of refusing at the handshake. Bigger than it looks because of the two-place enforcement and the
-   heartbeat cache.
-4. **Phase 0's baseline**, once there is a cluster to point it at. Everything after this is judged
-   against those numbers, and Phase 4 cannot size a pod without the last of them.
-5. **Phase 3, the in-cluster hop**, which also deletes `AvioStream`.
-6. Then 4, 5, 6 in order. Phase 7 is nothing to build.
+1. **Verify Phase 1b on real pods.** It is the only built behaviour that has never run on more
+   than one replica, and its whole point is what happens between two of them. The k3s rig in
+   `docs/replica-failover.md` is the cheapest way to see it.
+2. **Decide the overload signal**, which Phase 4 cannot be trusted without. See Phase 4.
+3. **Phase 8, the worker tier.** The largest cost in the service and the one the owner's actual
+   workload turns on, since detection runs on every stream. Benchmark RF-DETR on the target GPU
+   before sizing anything.
+4. **Phase 3, the in-cluster hop**, which also deletes `AvioStream` and gives the worker tier the
+   route it subscribes through.
+5. Then 4, 5 and 6 in order.
 
 ## Order
 
@@ -119,8 +117,13 @@ After Phase 1 every other phase ships on its own.
 4  Capacity                refuse at the handshake when full; a gauge to scale on
 5  Passphrase              optional; three lines once Phase 1 exists
 6  Pulled streams          leases, so a pull survives its pod
-7  Processing              nothing to build; the seam is Phase 3's route
+7  Processing              the seam workers attach to; Phase 3's route
+8  Worker tier             ingest stops decoding; one decode per stream, on a GPU
 ```
+
+Phase 8 arrived late, from the baseline and from the owner correcting an assumption in it, and it
+is now the phase the workload actually turns on. Everything from Phase 3 onward exists partly to
+serve it.
 
 ---
 
@@ -922,44 +925,91 @@ its manifest goes in `k8s/workers/` and its only dependency on this service is t
 
 ---
 
-## Phase 8: The preview is the dominant cost, and nothing can switch it off
+## Phase 8: The ingest pod stops decoding, and a worker tier decodes once
 
-Not in the original plan. The baseline found it, and at a thousand streams it is the largest
-single cost in the service.
+Not in the original plan. The baseline found that every stream decodes keyframes and JPEG-encodes
+a preview whether or not anyone is watching, at 250 to 440 percent of a core, more than everything
+else in this plan worries about. The first draft of this phase said to decode the preview on
+demand. **The repository owner corrected that**: detection and tracking have to run on every
+stream, so there will always be a frame subscriber and "on demand" answers nothing.
 
-Every stream decodes keyframes and JPEG-encodes a preview unconditionally, watched or not:
-`LiveStreamEntry` attaches a `FrameDecoder` and a `Harvester` in its constructor, and the harvester
-encodes on a cadence forever. That is 250 to 440 percent of a core in the measured container, far
-more than the receive thread everything else in this plan worries about, and there is no per-stream
-way to turn it off.
+The right move is not to decode less. It is to decode somewhere else, exactly once.
 
-It is also exactly contrary to the design's own argument. The fan-out ticket says the packet tier
-is "what keeps a stream cheap when nobody is watching" and that a stream is "decoded only at the
-rate its subscribers ask for". Today every stream has a permanent frame subscriber, so no stream is
-ever cheap.
+### What each tier does
 
-The user's shape makes this worth fixing rather than tolerating: a thousand streams, a handful
-watched, the rest available on demand. A preview refreshed every two seconds for 990 streams
-nobody is looking at is the definition of work done for nobody.
+**The ingest pod never decodes.** It accepts, demultiplexes, buffers, records, serves viewers and
+extracts KLV. All of that is packet work.
 
-The shape of the fix, cheapest first, to be decided rather than assumed:
+**A worker tier decodes once per stream and returns two things**, detections and a preview
+thumbnail. The preview stops being a second decode in the ingest pod and becomes a by-product of
+the decode detection already pays for, which is what the design claimed all along: "a stream is
+decoded once however many things want pictures".
 
-- **Decode on demand with a short keep-alive.** The harvester attaches when someone asks for a
-  preview and detaches a minute after the last request. A grid of tiles polls, so the streams being
-  looked at stay warm and the rest cost nothing. The first request for a cold stream waits up to
-  one keyframe interval, which is the same wait a viewer already pays to join.
-- **A cadence that backs off** when nobody has asked, rather than attaching and detaching.
-  Simpler, but it never reaches zero and 990 streams at one frame a minute is still 990 decodes.
-- **A per-stream setting**, which pushes the decision onto whoever configures a camera and will be
-  wrong by default.
+Three reasons it belongs in its own tier rather than in the ingest pod. The ingest pod is bounded
+by libsrt's single receive thread at around sixty camera-rate streams, while decode is bounded by
+cores or a GPU, and tying the two together means scaling the scarcer one to satisfy the other.
+Detection wants a GPU and ingest does not, so co-locating them buys a GPU for every ingest replica.
+And one decode serving both detection and the preview is only possible if they are in the same
+process.
 
-The first is the one that matches the design's own claim about the packet tier. Its cost is that
-a preview can be up to a keyframe interval stale on first request, which the snapshot path already
-accepts and documents.
+The cost is that every stream leaves the ingest pod a second time, so internal traffic roughly
+doubles. At camera rates that is a few gigabits inside a cluster, which is ordinary, and it is the
+price of scaling two very different resources independently.
 
-This should be measured before it is built. The baseline's container figures say the preview
-dominates; confirming that by disabling the harvester and re-running the same ramp is an hour's
-work and would size the prize exactly.
+### KLV costs nothing, and must not be confused with detection
+
+MISB metadata rides as its own elementary stream on its own stream index. Extracting it is reading
+packets from that index and never touching a decoder, which is what the fan-out ticket meant by "a
+KLV extractor would be a subscriber on a different stream index". At a thousand streams this is
+close to free and it must not be allowed to argue for decoding anything.
+
+**But the worker needs the KLV alongside the video.** Geo-locating a detection from a moving
+platform needs position and sensor pointing from MISB 0601, aligned to the frame by presentation
+timestamp. So a worker subscribes to the whole transport and takes both indexes, and the alignment
+is designed in rather than bolted on afterwards.
+
+### The rate is the bill
+
+Detection rate is the most expensive decision in this phase, and it is not the same as tracking
+rate. Pattern of life needs identities that stay stable, which is a tracking property, and a
+motion-model tracker running at full frame rate between reduced-rate detections is the standard way
+to get it. RF-DETR is transformer-based and end-to-end, so its cost is per frame with no cheap
+shortcut: a thousand streams at twenty-five detections a second is twenty-five thousand inferences
+a second, and at five it is five thousand.
+
+So **detection rate is a per-stream setting, not a constant**, and the tracker runs at full rate.
+A stream that genuinely needs every frame says so, rather than every stream paying for the one that
+does. `FrameDecoder`'s existing `DecodeRate` of keyframes-or-everything is too coarse for this and
+becomes a frames-per-second figure.
+
+### Two things that decide whether the GPU is used well
+
+**Decode and inference share the GPU.** Frames go from NVDEC into device memory and into the model
+without crossing PCIe. This is why the worker decodes rather than having decode live anywhere else.
+
+**Batches are filled across streams.** A DETR-family model gains a lot from batching, and a worker
+holding many streams can fill one batch from several cameras in the same tick.
+
+### Development is CPU, and that is a seam question
+
+The target cluster has GPUs; development does not. RF-DETR on a CPU is not a throughput story at
+all, so what development needs is the seam rather than the model: the detector is pluggable, a stub
+or a tiny variant runs locally on a couple of streams, and the real model is a deployment concern.
+That also keeps the tests honest, since they can assert the pipeline end to end without a GPU.
+
+### What to measure before building
+
+The running preview measurement gives the number that justifies moving decode out: what it costs
+inside the ingest pod today. After that, and before sizing anything, RF-DETR wants benchmarking on
+the actual target GPU at the actual resolution, because published figures rarely survive a real
+pipeline. The two numbers that matter are frames per second per GPU at a useful batch size, and
+whether NVDEC or the model saturates first.
+
+### What this does not change
+
+The packet tier, the hub, the rolling buffer, recordings and viewers are all untouched. This phase
+removes a frame subscriber from the ingest pod and adds a packet subscriber somewhere else, which
+is the seam working as designed rather than a change to it.
 
 ## Documentation, as each phase lands
 
