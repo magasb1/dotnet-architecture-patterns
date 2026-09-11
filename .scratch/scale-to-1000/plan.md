@@ -58,8 +58,16 @@ only a plan.
 and folded into the phases below: Phase 4's rule for sizing a pod has no solution and is rewritten;
 a gauge of streams owned is blind to overload, which the API reported as 250 contented streams
 while delivering a fifth of the media; memory is a function of bitrate and not of the buffer
-ceiling; and the unconditional preview decode, not the receive thread, is the dominant cost at
-scale, which is now Phase 8 and may be the largest single win available.
+ceiling; and the unconditional preview decode looked like the dominant cost at scale, which became
+Phase 8.
+
+**That last one was wrong, and `preview-cost.md` is the correction.** Isolating the preview put it
+at about a fifth of the pod, 0.7 of a core at 100 streams and 0.9 at 150, measured two independent
+ways that agree. What actually dominates is two threads per stream at about 1.7 percent of a core
+between them, the demultiplexer this service starts per feed and libsrt's own per-socket timestamp
+thread, which is linear and more than twice the preview. Phase 8 survives on its other argument,
+that detection must decode every stream anyway and belongs on a GPU, but it is no longer the
+largest win and its priority drops.
 
 **What is actually verified.** `docker/Dockerfile.test` runs the suite on Linux with libsrt from
 apt: 191 passed, 0 failed, 8 skipped, the 8 being the pre-existing Postgres tests. All eleven SRT
@@ -96,12 +104,35 @@ receive timeout can be lengthened now that the close is proven to unblock a read
    than one replica, and its whole point is what happens between two of them. The k3s rig in
    `docs/replica-failover.md` is the cheapest way to see it.
 2. **Decide the overload signal**, which Phase 4 cannot be trusted without. See Phase 4.
-3. **Phase 8, the worker tier.** The largest cost in the service and the one the owner's actual
-   workload turns on, since detection runs on every stream. Benchmark RF-DETR on the target GPU
-   before sizing anything.
-4. **Phase 3, the in-cluster hop**, which also deletes `AvioStream` and gives the worker tier the
+3. **Raise the pod's memory limit**, which `baseline.md` shows OOM-kills at around 20 camera-rate
+   streams against a plan that assumes 250. The cheapest fix on this list by a distance.
+4. **Attack the per-stream thread cost**, which `preview-cost.md` found is what actually dominates:
+   about 1.7 percent of a core per stream across two threads, linear, and 2.3 cores at 150 streams.
+   One of the two is ours. See "The per-stream cost" below.
+5. **Phase 8, the worker tier.** Still right, because detection has to decode every stream and that
+   belongs on a GPU, but it is worth a fifth of the pod rather than the largest win, and it does not
+   raise per-pod capacity. Benchmark RF-DETR on the target GPU before sizing anything.
+6. **Phase 3, the in-cluster hop**, which also deletes `AvioStream` and gives the worker tier the
    route it subscribes through.
-5. Then 4, 5 and 6 in order.
+7. Then 4, 5 and 6 in order.
+
+### The per-stream cost
+
+`preview-cost.md` profiled by thread and found the shape of the bill, which is not what either
+earlier document assumed. Two threads per stream, roughly 0.87 percent of a core each:
+
+- **The demultiplexer this service starts per feed**, one long-running thread apiece. Ours, and
+  therefore the only one that can be argued with.
+- **libsrt's per-socket timestamp thread.** Not ours and not removable.
+
+Together 1.7 percent of a core per stream, linear, which is 2.3 cores at 150 streams and more than
+twice the preview. Plus the single receive thread at 60 to 80 percent.
+
+One hypothesis worth testing before anything is designed: `StreamDemuxer.Pump` allocates a fresh
+`byte[]` for every packet it reads. At a thousand streams that is on the order of half a million
+allocations a second, all of them short-lived, and pooling them is a small change with a clear
+before-and-after. Whether it accounts for a meaningful share of that 0.87 percent is unmeasured,
+and measuring it is the next thing to do rather than the fix.
 
 ## Order
 
@@ -928,10 +959,19 @@ its manifest goes in `k8s/workers/` and its only dependency on this service is t
 ## Phase 8: The ingest pod stops decoding, and a worker tier decodes once
 
 Not in the original plan. The baseline found that every stream decodes keyframes and JPEG-encodes
-a preview whether or not anyone is watching, at 250 to 440 percent of a core, more than everything
-else in this plan worries about. The first draft of this phase said to decode the preview on
+a preview whether or not anyone is watching. The first draft of this phase said to decode it on
 demand. **The repository owner corrected that**: detection and tracking have to run on every
 stream, so there will always be a frame subscriber and "on demand" answers nothing.
+
+**A second correction, from `preview-cost.md`.** This phase was first justified by the preview
+being the dominant cost, taken from the baseline. It is not. Isolated, it is about a fifth of the
+pod and roughly 0.8 of a core, against two threads per stream that cost more than twice that.
+Turning it off did not move the receive thread at all, so **this phase does not raise the number
+of streams a pod can hold**. What it does buy is a fifth of the pod's processor and 15 to 30
+percent of its memory back from work nobody asked for, and stability at the knee: at 150 streams
+the preview's extra core was the difference between delivering the media and silently delivering
+two thirds of it. That, plus detection needing the decode on a GPU regardless, is the case for
+building it. It is not the case for building it first.
 
 The right move is not to decode less. It is to decode somewhere else, exactly once.
 

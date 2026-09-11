@@ -30,6 +30,10 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
 - [x] Phase 0 baseline on one container: see `.scratch/scale-to-1000/baseline.md`. Accept rate is
       at least 20/s and the rig was always the limit, not the service
 - [ ] Phase 3: the in-cluster viewer hop becomes HTTP, deleting the SRT relay and AvioStream
+- [ ] Raise k8s/live/deployment.yaml's memory limit. 1Gi OOM-kills at about 20 camera-rate streams
+      against a plan that assumes 250. Cheapest fix on this list
+- [ ] Measure whether pooling StreamDemuxer.Pump's per-packet byte[] moves the per-stream thread
+      cost. Two threads per stream at ~1.7% of a core is what actually dominates, not the preview
 - [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and
       returns detections and the preview. Detection runs on every stream, so decoding on demand
       answers nothing; KLV needs no decode at all and must not argue for any
