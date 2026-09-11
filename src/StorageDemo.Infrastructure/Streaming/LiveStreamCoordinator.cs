@@ -329,6 +329,11 @@ public sealed class LiveStreamCoordinator(
 
     private static void Mux(LiveStreamEntry entry, MediaPacket[] packets, Stream destination)
     {
+        // ponytail: the layout is read in a second lock acquisition, so a reconnect landing
+        // between the copy and this line would mux old packets against a newer layout. It cannot
+        // crash - retired layouts are kept alive until the hub is disposed - and the worst case is
+        // one malformed snapshot during a reconnect that reconfigured the encoder. Take both under
+        // one lock if that ever shows up as a real complaint.
         using var muxer = new PacketMuxer(destination, entry.Hub.Layout!);
 
         foreach (var packet in packets)

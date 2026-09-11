@@ -12,3 +12,27 @@
 - [x] Multi-node shape: StatefulSet, headless DNS, per-pod ingest services (k8s/live/)
 - [ ] SRT needs an FFmpeg built with libsrt; point Media__LibraryPath at one
 - [ ] Local UDP ingest is blocked by this machine's inbound filtering (see README)
+- [x] Own the SRT listener: libsrt directly, deleting the accept carousel and the log-line capture
+
+Scaling to a thousand streams. The plan, the reasoning and the research behind each of these is in
+`.scratch/scale-to-1000/plan.md`; the phase numbers below are its.
+
+- [ ] Verify Phase 1 on Windows. Only Linux has ever run it: `vcpkg install libsrt:x64-windows`,
+      then `scripts/fetch-libsrt.sh`, then `dotnet test`. Watch that the resolver finds srt.dll
+      beside the FFmpeg natives rather than falling through, and that the test timings hold
+- [x] Stress the snapshot race fix: 100 runs under constrained CPU, zero failures, against a rate
+      of roughly one in eight before it
+- [ ] Phase 2: one SRT latency option applied to both listeners, and a one-second GOP in the
+      reference senders. The join-latency floor is the encoder's keyframe interval
+- [ ] Phase 1b: a live name is locked. A second publisher of a name that is live and held is
+      refused at the handshake, rather than taking it over
+- [ ] Phase 0 baseline: five numbers, including the one that decides how many streams a pod takes.
+      Needs somewhere to point the load rig
+- [ ] Phase 3: the in-cluster viewer hop becomes HTTP, deleting the SRT relay and AvioStream
+- [ ] Phase 4: refuse at the handshake when the pod is full, and a streams-owned gauge to scale on
+- [ ] Phase 5: optional SRT passphrase, enforced during the handshake
+- [ ] Phase 6: pulled streams survive their pod, claimed by the heartbeat under the existing lock
+- [ ] Lengthen SrtSocketStream's receive timeout, now that srt_close is proven to unblock a read
+- [ ] Rewrite the README's "About SRT" section and CONTEXT.md's "Claim": both still describe the
+      accept carousel, the log-line capture and newest-connection-wins
+- [ ] docs/design/server-side-stream-ingest.md is linked from the README and is not in the repo
