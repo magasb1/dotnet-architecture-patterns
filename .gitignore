@@ -10,3 +10,7 @@ data/
 
 # Fetched by scripts/fetch-ffmpeg.sh, not committed: it is ~200 MB of binaries.
 ffmpeg/
+
+# Other
+scratch/
+docs/
