@@ -24,10 +24,41 @@ data:
   # Every replica polling the bucket is wasteful; one pass every two minutes is plenty.
   StorageMonitor__IntervalSeconds: "120"
 
-  # Live streaming. Off here: switch it on only once the ingest ports are actually exposed, which
-  # is what k8s/statefulset.yaml does. The token belongs in the Secret next to the others.
+  # Live streaming. Off here: k8s/live/deployment.yaml switches it on and exposes the two media
+  # ports. The token belongs in the Secret next to the others.
   Live__Enabled: "false"
+
+  # Only manual streams name a transport, and only these are allowed. Automatic ingest needs no
+  # list: it is one port and one protocol, and nobody chooses a URL.
   Live__AllowedSchemes: "udp,srt"
+
+  # Thirty seconds of recent stream per replica-owned stream, bounded by a per-stream byte ceiling
+  # so one careless encoder cannot evict the service. Memory per replica is this times the streams
+  # it owns, which is what makes the request in the Deployment a calculation rather than a guess.
+  Live__BufferWindowSeconds: "30"
+  Live__BufferByteCeiling: "100663296"
+
+  # How long an interrupted stream is kept before it is considered gone: still claimed, still
+  # shown, hub and buffer and any recording all still alive. Long enough to cover an encoder
+  # reconnecting onto another replica after a pod is replaced.
+  Live__GracePeriodSeconds: "30"
+
+  # Dead time between a camera connecting and its stream being on air, which after a reconnect is
+  # what somebody watching experiences as downtime. libav's own defaults are five seconds and five
+  # megabytes; MPEG-TS repeats its tables every hundred milliseconds, so this is generous for a
+  # camera that presents everything at once. Raise it for one that starts its audio late: the
+  # symptom is a stream, and recordings from it, with no sound.
+  Live__ProbeSeconds: "1"
+  Live__ProbeBytes: "1048576"
+
+  # How much of a recording is written to a pod's disk before it is stored and the file deleted.
+  # This is what bounds disk for a recording of any length, and how much is lost if the pod goes:
+  # everything up to the last completed segment is already in storage.
+  Live__RecordingPartMinutes: "5"
+
+  # The ceiling on one recording, so a camera nobody stops still ends somewhere. It bounds the
+  # document rather than the disk, which segments already bound.
+  Live__MaxRecordingMinutes: "720"
 ---
 apiVersion: v1
 kind: Secret

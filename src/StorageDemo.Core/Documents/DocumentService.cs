@@ -23,7 +23,8 @@ public sealed class DocumentService(
         string fileName,
         Stream content,
         string? contentType,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, string>? metadata = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
         ArgumentNullException.ThrowIfNull(content);
@@ -44,6 +45,7 @@ public sealed class DocumentService(
             ContentType = contentType,
             Size = counted.BytesRead,
             CreatedAt = DateTimeOffset.UtcNow,
+            Metadata = metadata ?? new Dictionary<string, string>(),
         };
 
         try
@@ -105,7 +107,14 @@ public sealed class DocumentService(
         MediaAnalysis analysis;
         try
         {
-            await using var stored = await fileStorage.OpenReadAsync(storageKey, cancellationToken);
+            // A segmented document is probed through its first piece rather than its whole self.
+            // Codecs, dimensions and a thumbnail are all in the first few seconds, and reading six
+            // hours back out of storage to learn them would cost more than everything else here
+            // put together. Duration comes from whoever wrote it, which knows better anyway.
+            var document = await repository.GetAsync(id, cancellationToken);
+            var key = document is { Segmented: true } ? document.Parts[0].Key : storageKey;
+
+            await using var stored = await fileStorage.OpenReadAsync(key, cancellationToken);
             if (stored is null)
             {
                 return StoredAnalysis.None;
@@ -147,12 +156,35 @@ public sealed class DocumentService(
     public Task<IReadOnlyList<Document>> GetAllAsync(CancellationToken cancellationToken = default)
         => repository.GetAllAsync(cancellationToken);
 
+    public SegmentedDocument BeginSegmented(
+        string fileName,
+        string? contentType,
+        IReadOnlyDictionary<string, string>? metadata = null)
+        => new(
+            fileStorage,
+            repository,
+            changeFeed,
+            logger,
+            SanitizeFileName(fileName),
+            contentType,
+            metadata ?? new Dictionary<string, string>());
+
     public async Task<DocumentContent?> DownloadAsync(Guid id, CancellationToken cancellationToken = default)
     {
         var document = await repository.GetAsync(id, cancellationToken);
         if (document is null)
         {
             return null;
+        }
+
+        if (document.Segmented)
+        {
+            // Joined on the way out, so nothing downstream has to know it was written in pieces.
+            // Seekable, which is what lets a player scrub a six hour recording without fetching it.
+            return new DocumentContent(
+                new PartedStream(fileStorage, document.Parts, cancellationToken),
+                document.FileName,
+                document.ContentType);
         }
 
         var stream = await fileStorage.OpenReadAsync(document.StorageKey, cancellationToken);
@@ -194,7 +226,14 @@ public sealed class DocumentService(
             return;
         }
 
+        // A segmented document has no object at its own key; its bytes are the pieces. Deleting
+        // the key anyway is harmless and idempotent, and deleting the pieces is the real work.
         await fileStorage.DeleteAsync(document.StorageKey, cancellationToken);
+
+        foreach (var part in document.Parts)
+        {
+            await fileStorage.DeleteAsync(part.Key, cancellationToken);
+        }
 
         if (document.ThumbnailKey is not null)
         {

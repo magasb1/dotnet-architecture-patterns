@@ -29,45 +29,101 @@ service Documents {
 
   rpc GetProviders(google.protobuf.Empty) returns (ProviderResponse);
 
-  // Live sessions running anywhere in the cluster, not only on the replica answering this call.
+  // Live streams on air anywhere in the cluster, not only on the replica answering this call.
   rpc ListLive(google.protobuf.Empty) returns (LiveListResponse);
 
-  // The latest preview frame of a running stream. NOT_FOUND before the first frame arrives.
-  rpc DownloadLivePreview(LiveSessionId) returns (stream Chunk);
+  // The current preview of a stream: the picture now, not a poster frame. NOT_FOUND before the
+  // first one has been decoded.
+  rpc DownloadLivePreview(LiveStreamName) returns (stream Chunk);
+
+  // Takes a picture now and stores it as a document. A person pressing the button and a detector
+  // firing are the same caller.
+  rpc SnapshotLive(LiveStreamName) returns (DocumentId);
+
+  // Starts a recording, or extends the one already running. It continues whether or not any
+  // client is connected, and becomes a document when it ends.
+  rpc RecordLive(RecordLiveRequest) returns (LiveRecordingMessage);
+
+  rpc StopLiveRecording(LiveStreamName) returns (google.protobuf.Empty);
 }
 
-message LiveSessionId {
-  string id = 1;
+// Streams are addressed by name. The name is the identity: a feed that drops and reconnects under
+// the same name is the same stream resuming, so no opaque identifier would survive to be used here.
+message LiveStreamName {
+  string name = 1;
 }
 
-message LiveSessionMessage {
+message RecordLiveRequest {
+  string name = 1;
+
+  // Zero means the server's default. A clip is a recording whose stop time was set at the start.
+  double seconds = 2;
+}
+
+message LiveRecordingMessage {
   string id = 1;
-  string name = 2;
-  string direction = 3;
-  string state = 4;
-  string url = 5;
+  google.protobuf.Timestamp started_at = 2;
+  google.protobuf.Timestamp ends_at = 3;
+  int64 bytes = 4;
 
-  // Where a player should pull this stream. Empty when the server has not been told its own
-  // public address, since a URL a viewer cannot reach is worse than none.
-  string playback_url = 6;
+  // The recorder could not keep up, so the document is real but short.
+  bool truncated = 5;
+}
 
-  bool has_preview = 7;
-  int64 packets = 8;
-  int64 bytes = 9;
-  google.protobuf.Timestamp started_at = 10;
+message LiveStreamMessage {
+  string name = 1;
 
-  // The replica holding the socket. Shown so an operator can tell where a stream actually is.
-  string owner = 11;
+  // "Live" or "Interrupted". An interrupted stream is still claimed and still shown: a tile that
+  // vanishes and returns is worse than one showing a state.
+  string state = 2;
+
+  bool has_preview = 3;
+  int64 packets = 4;
+  int64 bytes = 5;
+  google.protobuf.Timestamp started_at = 6;
+
+  // The replica holding the connection. Shown so an operator can tell where a stream actually is.
+  string owner = 7;
+
+  // Codecs and dimensions, as the sender presented them.
+  string layout = 8;
+
+  // False while no keyframe has arrived recently enough to start from. Every pre-roll is then
+  // empty and every snapshot second-hand, and the fix is at the encoder.
+  bool startable = 9;
+
+  // The buffer's byte ceiling is evicting before its time window, which silently shortens every
+  // pre-roll taken from this stream.
+  bool ceiling_binding = 10;
+
+  double buffered_seconds = 11;
+
+  // Set while a recording is running. It is on the stream rather than in the document list,
+  // because a document appears only when there is a file.
+  LiveRecordingMessage recording = 12;
+
+  // Created by request rather than by an encoder naming itself. Indistinguishable afterwards.
+  bool manual = 13;
 }
 
 message LiveListResponse {
-  repeated LiveSessionMessage sessions = 1;
+  repeated LiveStreamMessage streams = 1;
 
   // Transports the loaded FFmpeg can carry, such as udp or srt.
   repeated string transports = 2;
 
   // False when live streaming is switched off, so a client can hide the whole idea.
   bool enabled = 3;
+
+  // Where to pull a live stream from. Empty when the server has not been told its own public
+  // address, in which case a client that reached this server can build one from the host it used
+  // and the port below. Configuration wins when it is there, because only it knows about a load
+  // balancer or an ingress in front.
+  string consumption_url = 4;
+
+  // The port viewers connect to, so a client can fall back to the host it already reached rather
+  // than showing nothing because nobody configured an address.
+  int32 consumption_port = 5;
 }
 
 message DocumentId {
@@ -134,4 +190,9 @@ message ChangeEvent {
 message ProviderResponse {
   string storage = 1;
   string database = 2;
+
+  // Where this server's REST surface can be reached, when it has been told. A client uses it to
+  // play a long recording by streaming and seeking rather than downloading hours of it first.
+  // Empty means the client downloads, which is right for ordinary files.
+  string content_base_url = 3;
 }

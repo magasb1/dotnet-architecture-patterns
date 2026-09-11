@@ -5,8 +5,29 @@ using StackExchange.Redis;
 using StorageDemo.Infrastructure.Database.PostgreSql;
 using StorageDemo.Infrastructure.FileStorage.FileSystem;
 using StorageDemo.Infrastructure.FileStorage.S3;
+using StorageDemo.Infrastructure.Streaming;
 
 namespace StorageDemo.Infrastructure.HealthChecks;
+
+/// <summary>
+/// Readiness for a service whose purpose is being live: is this replica accepting media?
+///
+/// Storage and a database being reachable say nothing about whether an encoder pointed at this pod
+/// will get a stream. A pod whose ingest port is not accepting is worse than one that is plainly
+/// absent, because the Service keeps sending encoders to it. Reporting the listener is what lets
+/// Kubernetes take it out until it can serve, and put it back the moment it can.
+///
+/// Healthy when live streaming is switched off, since then there is nothing here to gate.
+/// </summary>
+public sealed class LiveIngestHealthCheck(LiveListeners listeners) : IHealthCheck
+{
+    public Task<HealthCheckResult> CheckHealthAsync(
+        HealthCheckContext context,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(listeners.NotServing() is { } why
+            ? HealthCheckResult.Unhealthy($"Not serving media: {why}.")
+            : HealthCheckResult.Healthy("Media ports are accepting."));
+}
 
 /// <summary>Readiness only. Liveness stays free of external dependencies on purpose.</summary>
 public sealed class FileSystemHealthCheck(FileSystemStorage storage) : IHealthCheck

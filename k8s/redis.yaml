@@ -51,6 +51,14 @@ spec:
             limits:
               memory: 256Mi
           securityContext:
+            # Started as the image's own redis user rather than as root dropping to it. Its
+            # entrypoint uses setpriv to make that switch, which needs a capability this drops,
+            # so a container that starts as root here fails before redis ever runs.
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            seccompProfile:
+              type: RuntimeDefault
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:

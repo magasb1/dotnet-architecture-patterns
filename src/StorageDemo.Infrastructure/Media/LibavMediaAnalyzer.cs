@@ -20,10 +20,6 @@ public sealed class LibavMediaAnalyzer(
     IOptions<MediaOptions> options,
     ILogger<LibavMediaAnalyzer> logger) : IMediaAnalyzer
 {
-    /// <summary>swscale's flag for bilinear scaling. The bindings expose the colourspace
-    /// constants but not the algorithm ones, so it is spelled out here.</summary>
-    private const int Bilinear = 2;
-
     private readonly MediaOptions _options = options.Value;
 
     public bool CanAnalyze(string? contentType, string fileName)
@@ -48,15 +44,33 @@ public sealed class LibavMediaAnalyzer(
             || type.StartsWith("audio/", StringComparison.OrdinalIgnoreCase);
     }
 
-    public async Task<MediaAnalysis> AnalyzeAsync(
+    public Task<MediaAnalysis> AnalyzeAsync(
         Stream content,
         string fileName,
         string? contentType,
         CancellationToken cancellationToken = default)
+        => OnAFileAsync(content, fileName, Analyze, cancellationToken);
+
+    public Task<byte[]?> LatestFrameAsync(
+        Stream content,
+        string fileName,
+        CancellationToken cancellationToken = default)
+        => OnAFileAsync(content, fileName, LatestFrame, cancellationToken);
+
+    /// <summary>
+    /// Spills the content to a temp file and runs libav over it off the request thread.
+    ///
+    /// The file is not an optimisation to remove later: libav seeks its input, an upload and an
+    /// in-memory mux both hand back a forward-only stream, and decoding is blocking CPU work.
+    /// </summary>
+    private async Task<T> OnAFileAsync<T>(
+        Stream content,
+        string fileName,
+        Func<string, T> work,
+        CancellationToken cancellationToken)
     {
         FfmpegLibrary.EnsureLoaded();
 
-        // libav seeks, and an upload does not, so the bytes land in a temp file first.
         var workingDirectory = Path.Combine(Path.GetTempPath(), "storagedemo-media");
         Directory.CreateDirectory(workingDirectory);
 
@@ -71,8 +85,7 @@ public sealed class LibavMediaAnalyzer(
                 await content.CopyToAsync(temp, cancellationToken);
             }
 
-            // Decoding is blocking, CPU-bound work; it does not belong on a request thread.
-            return await Task.Run(() => Analyze(sourcePath), cancellationToken);
+            return await Task.Run(() => work(sourcePath), cancellationToken);
         }
         finally
         {
@@ -84,6 +97,134 @@ public sealed class LibavMediaAnalyzer(
             {
                 // A leftover temp file is not worth failing an upload over.
             }
+        }
+    }
+
+    /// <summary>
+    /// The last picture in the media, at source resolution.
+    ///
+    /// Distinct from the thumbnail above, which is the picture a fixed number of seconds in. A
+    /// preview and a snapshot ask "what does this look like now"; a poster frame asks "what does
+    /// this piece of media look like". Answering both with one verb is what let a live preview
+    /// serve a fixed frame for minutes while every component reported success.
+    /// </summary>
+    private unsafe byte[]? LatestFrame(string path)
+    {
+        AVFormatContext* format = null;
+
+        if (ffmpeg.avformat_open_input(&format, path, null, null) < 0)
+        {
+            return null;
+        }
+
+        AVCodecContext* codec = null;
+        AVFrame* frame = null;
+        AVFrame* latest = null;
+        AVPacket* packet = null;
+
+        try
+        {
+            if (ffmpeg.avformat_find_stream_info(format, null) < 0)
+            {
+                return null;
+            }
+
+            AVCodec* decoder = null;
+            var streamIndex = ffmpeg.av_find_best_stream(
+                format,
+                AVMediaType.AVMEDIA_TYPE_VIDEO,
+                -1,
+                -1,
+                &decoder,
+                0);
+
+            if (streamIndex < 0 || decoder is null)
+            {
+                return null;
+            }
+
+            codec = ffmpeg.avcodec_alloc_context3(decoder);
+            if (codec is null
+                || ffmpeg.avcodec_parameters_to_context(codec, format->streams[streamIndex]->codecpar) < 0
+                || ffmpeg.avcodec_open2(codec, decoder, null) < 0)
+            {
+                return null;
+            }
+
+            frame = ffmpeg.av_frame_alloc();
+            latest = ffmpeg.av_frame_alloc();
+            packet = ffmpeg.av_packet_alloc();
+
+            if (frame is null || latest is null || packet is null)
+            {
+                return null;
+            }
+
+            while (ffmpeg.av_read_frame(format, packet) >= 0)
+            {
+                try
+                {
+                    if (packet->stream_index != streamIndex
+                        || ffmpeg.avcodec_send_packet(codec, packet) < 0)
+                    {
+                        continue;
+                    }
+
+                    KeepFrames(codec, frame, latest);
+                }
+                finally
+                {
+                    ffmpeg.av_packet_unref(packet);
+                }
+            }
+
+            // Whatever the decoder is still holding at end of input is the newest picture there is.
+            ffmpeg.avcodec_send_packet(codec, null);
+            KeepFrames(codec, frame, latest);
+
+            return latest->width > 0
+                ? JpegEncoder.Encode(latest, maxEdge: 0, _options.SnapshotQuality)
+                : null;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Reading the latest frame failed");
+            return null;
+        }
+        finally
+        {
+            if (packet is not null)
+            {
+                ffmpeg.av_packet_free(&packet);
+            }
+
+            if (latest is not null)
+            {
+                ffmpeg.av_frame_free(&latest);
+            }
+
+            if (frame is not null)
+            {
+                ffmpeg.av_frame_free(&frame);
+            }
+
+            if (codec is not null)
+            {
+                ffmpeg.avcodec_free_context(&codec);
+            }
+
+            ffmpeg.avformat_close_input(&format);
+        }
+    }
+
+    /// <summary>Drains the decoder, leaving the newest picture in <paramref name="latest"/>.</summary>
+    private static unsafe void KeepFrames(AVCodecContext* codec, AVFrame* frame, AVFrame* latest)
+    {
+        while (ffmpeg.avcodec_receive_frame(codec, frame) == 0)
+        {
+            // Moved rather than copied: this runs once per decoded frame of a whole segment.
+            ffmpeg.av_frame_unref(latest);
+            ffmpeg.av_frame_move_ref(latest, frame);
         }
     }
 
@@ -364,7 +505,7 @@ public sealed class LibavMediaAnalyzer(
 
             if (moved && Decode(format, codec, packet, frame, streamIndex))
             {
-                return Encode(frame);
+                return JpegEncoder.Encode(frame, _options.ThumbnailSize, _options.ThumbnailQuality);
             }
 
             if (moved)
@@ -378,7 +519,7 @@ public sealed class LibavMediaAnalyzer(
 
             if (Decode(format, codec, packet, frame, streamIndex))
             {
-                return Encode(frame);
+                return JpegEncoder.Encode(frame, _options.ThumbnailSize, _options.ThumbnailQuality);
             }
 
             logger.LogDebug("No frame could be decoded for a thumbnail");
@@ -409,15 +550,25 @@ public sealed class LibavMediaAnalyzer(
         }
     }
 
+    /// <summary>
+    /// Moves to the poster frame: <see cref="MediaOptions.VideoFrameSeconds"/> into the media,
+    /// measured from where the media actually starts.
+    ///
+    /// Relative, not absolute. A recording cut from a rolling buffer begins at whatever timestamp
+    /// the encoder had reached, which is a large number, and an absolute target below that clamps
+    /// to the first frame. Every such document would then show its opening frame and report
+    /// success, which is precisely the failure that hid the live preview freeze for months.
+    /// </summary>
     private unsafe bool Seek(
         AVFormatContext* format,
         AVStream* stream,
         int streamIndex,
         AVCodecContext* codec)
     {
-        var timestamp = (long)(_options.VideoFrameSeconds / ffmpeg.av_q2d(stream->time_base));
+        var offset = (long)(_options.VideoFrameSeconds / ffmpeg.av_q2d(stream->time_base));
+        var start = stream->start_time != ffmpeg.AV_NOPTS_VALUE ? stream->start_time : 0;
 
-        if (ffmpeg.av_seek_frame(format, streamIndex, timestamp, ffmpeg.AVSEEK_FLAG_BACKWARD) < 0)
+        if (ffmpeg.av_seek_frame(format, streamIndex, start + offset, ffmpeg.AVSEEK_FLAG_BACKWARD) < 0)
         {
             return false;
         }
@@ -466,171 +617,6 @@ public sealed class LibavMediaAnalyzer(
 
         return ffmpeg.avcodec_receive_frame(codec, frame) == 0;
     }
-
-    /// <summary>Scales the frame into the box and encodes it as a single JPEG.</summary>
-    private unsafe byte[]? Encode(AVFrame* source)
-    {
-        if (source->width <= 0 || source->height <= 0)
-        {
-            return null;
-        }
-
-        var encoder = ffmpeg.avcodec_find_encoder(AVCodecID.AV_CODEC_ID_MJPEG);
-        if (encoder is null)
-        {
-            logger.LogWarning("The bundled libav has no MJPEG encoder, so thumbnails are unavailable");
-            return null;
-        }
-
-        // Ask the encoder what it accepts rather than assuming. JPEG's full-range 4:2:0 is what
-        // every mjpeg encoder offers first, but reading it beats hardcoding a deprecated constant.
-        var target = PreferredPixelFormat(encoder);
-
-        var (width, height) = Fit(source->width, source->height, _options.ThumbnailSize);
-
-        AVFrame* scaled = null;
-        SwsContext* scaler = null;
-        AVCodecContext* codec = null;
-        AVPacket* packet = null;
-
-        try
-        {
-            scaled = ffmpeg.av_frame_alloc();
-            if (scaled is null)
-            {
-                return null;
-            }
-
-            scaled->format = (int)target;
-            scaled->width = width;
-            scaled->height = height;
-
-            if (ffmpeg.av_frame_get_buffer(scaled, 32) < 0)
-            {
-                return null;
-            }
-
-            scaler = ffmpeg.sws_getContext(
-                source->width,
-                source->height,
-                (AVPixelFormat)source->format,
-                width,
-                height,
-                target,
-                Bilinear,
-                null,
-                null,
-                null);
-
-            if (scaler is null)
-            {
-                return null;
-            }
-
-            ffmpeg.sws_scale(
-                scaler,
-                source->data.ToArray(),
-                source->linesize.ToArray(),
-                0,
-                source->height,
-                scaled->data.ToArray(),
-                scaled->linesize.ToArray());
-
-            codec = ffmpeg.avcodec_alloc_context3(encoder);
-            if (codec is null)
-            {
-                return null;
-            }
-
-            codec->width = width;
-            codec->height = height;
-            codec->pix_fmt = target;
-
-            // A single still, so the time base is a formality the encoder still requires.
-            codec->time_base = new AVRational { num = 1, den = 1 };
-
-            // Fixed quality rather than a bitrate target: one frame has no bitrate.
-            codec->flags |= ffmpeg.AV_CODEC_FLAG_QSCALE;
-            codec->global_quality = ffmpeg.FF_QP2LAMBDA * _options.ThumbnailQuality;
-
-            if (ffmpeg.avcodec_open2(codec, encoder, null) < 0)
-            {
-                return null;
-            }
-
-            scaled->pts = 0;
-            scaled->quality = codec->global_quality;
-
-            if (ffmpeg.avcodec_send_frame(codec, scaled) < 0)
-            {
-                return null;
-            }
-
-            // Tell the encoder that was the only frame, so it emits the picture now.
-            ffmpeg.avcodec_send_frame(codec, null);
-
-            packet = ffmpeg.av_packet_alloc();
-            if (packet is null || ffmpeg.avcodec_receive_packet(codec, packet) < 0 || packet->size <= 0)
-            {
-                return null;
-            }
-
-            var bytes = new byte[packet->size];
-            Marshal.Copy((IntPtr)packet->data, bytes, 0, packet->size);
-
-            return bytes;
-        }
-        finally
-        {
-            if (packet is not null)
-            {
-                ffmpeg.av_packet_free(&packet);
-            }
-
-            if (codec is not null)
-            {
-                ffmpeg.avcodec_free_context(&codec);
-            }
-
-            if (scaler is not null)
-            {
-                ffmpeg.sws_freeContext(scaler);
-            }
-
-            if (scaled is not null)
-            {
-                ffmpeg.av_frame_free(&scaled);
-            }
-        }
-    }
-
-    private static unsafe AVPixelFormat PreferredPixelFormat(AVCodec* encoder)
-    {
-        void* configs = null;
-        var count = 0;
-
-        var queried = ffmpeg.avcodec_get_supported_config(
-            null,
-            encoder,
-            AVCodecConfig.AV_CODEC_CONFIG_PIX_FORMAT,
-            0,
-            &configs,
-            &count);
-
-        return queried >= 0 && configs is not null && count > 0
-            ? ((AVPixelFormat*)configs)[0]
-            : AVPixelFormat.AV_PIX_FMT_YUVJ420P;
-    }
-
-    /// <summary>Fits inside a square box without distorting, and keeps both sides even.</summary>
-    private static (int Width, int Height) Fit(int width, int height, int box)
-    {
-        var scale = Math.Min(1.0, Math.Min((double)box / width, (double)box / height));
-
-        return (Even((int)Math.Round(width * scale)), Even((int)Math.Round(height * scale)));
-    }
-
-    private static int Even(int value) => Math.Max(2, value % 2 == 0 ? value : value - 1);
 
     private static unsafe string? ToString(byte* value)
         => value is null ? null : Marshal.PtrToStringAnsi((IntPtr)value);

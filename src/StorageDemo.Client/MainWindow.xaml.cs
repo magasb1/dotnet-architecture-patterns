@@ -40,6 +40,21 @@ public partial class MainWindow : Window
 
     private readonly ICollectionView _view;
 
+    /// <summary>The SRT address the server hands out for its consumption port, when it knows one.</summary>
+    private string _consumptionUrl = string.Empty;
+
+    /// <summary>Where the server's REST surface is, when it knows. Empty means download instead.</summary>
+    private string _contentBaseUrl = string.Empty;
+
+    /// <summary>
+    /// Above this, a video is streamed and seeked rather than downloaded first.
+    ///
+    /// A camera recording is hours long and gigabytes big; waiting for all of it before the first
+    /// frame is not watching it. Below this a download is the better trade, because it is quick
+    /// and every later view of the same file is instant.
+    /// </summary>
+    private const long StreamRatherThanDownloadBytes = 64L * 1024 * 1024;
+
     /// <summary>False until the constructor has finished wiring everything up.</summary>
     private readonly bool _ready;
 
@@ -134,6 +149,7 @@ public partial class MainWindow : Window
         try
         {
             var providers = await _api.GetProvidersAsync(_connection.Token);
+            _contentBaseUrl = providers.ContentBaseUrl;
             ProviderText.Text = $"{address}   storage: {providers.Storage}   database: {providers.Database}";
             _servers.Remember(address);
         }
@@ -377,13 +393,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        var running = live.Sessions.ToDictionary(session => session.Id, StringComparer.Ordinal);
+        _consumptionUrl = ConsumptionAddress(live);
+
+        var running = live.Streams.ToDictionary(stream => stream.Name, StringComparer.Ordinal);
 
         foreach (var stale in _streams.Where(item => !running.ContainsKey(item.Id)).ToList())
         {
             if (ReferenceEquals(StreamList.SelectedItem, stale))
             {
-                // The stream being watched has ended; stop playing something that is over.
+                // The stream being watched is gone; stop playing something that is over.
                 StopPlayback();
                 StreamList.SelectedItem = null;
             }
@@ -392,28 +410,39 @@ public partial class MainWindow : Window
             SetStatus($"Live stream ended: {stale.FileName}");
         }
 
-        foreach (var session in live.Sessions)
+        foreach (var stream in live.Streams)
         {
-            var existing = _streams.FirstOrDefault(item => item.Id == session.Id);
+            var existing = _streams.FirstOrDefault(item => item.Id == stream.Name);
 
             if (existing is null)
             {
-                var item = DocumentItem.ForLive(session);
+                var item = DocumentItem.ForLive(stream);
 
                 // Newest first: the stream that just started is the one being looked for.
                 _streams.Insert(0, item);
                 _ = LoadLivePreviewAsync(item);
 
-                SetStatus($"Live stream started: {session.Name}");
+                SetStatus($"Live stream started: {stream.Name}");
                 continue;
             }
 
-            existing.Apply(session);
+            var wasInterrupted = existing.IsInterrupted;
 
-            // Refetched every tick, not just the first time. The server decodes a new frame from
-            // the recording on the same cadence, so a tile that kept its first frame would show a
-            // stream that has been running for an hour as it looked in its first second.
-            if (session.HasPreview)
+            existing.Apply(stream);
+
+            // A tile that vanishes and returns is worse than one showing a state, and after a
+            // resume it would be the same stream on both sides of the gap.
+            if (wasInterrupted != existing.IsInterrupted)
+            {
+                SetStatus(existing.IsInterrupted
+                    ? $"Live stream interrupted: {stream.Name}"
+                    : $"Live stream resumed: {stream.Name}");
+            }
+
+            // Refetched every tick, not just the first time. The server keeps a fresh picture on
+            // the same cadence, so a tile that kept its first frame would show a stream that has
+            // been running for an hour as it looked in its first second.
+            if (stream.HasPreview)
             {
                 _ = LoadLivePreviewAsync(existing);
             }
@@ -421,6 +450,7 @@ public partial class MainWindow : Window
             if (ReferenceEquals(StreamList.SelectedItem, existing))
             {
                 ShowMetadata(existing);
+                UpdateLiveButtons();
             }
         }
 
@@ -451,6 +481,45 @@ public partial class MainWindow : Window
             // A preview is decoration; the tile keeps its icon.
         }
     }
+
+    /// <summary>
+    /// Where this server's consumption port is.
+    ///
+    /// Configuration wins, because only it knows about a load balancer or an ingress in front. With
+    /// nothing configured, the host this client already reached plus the port the server reports is
+    /// a better answer than refusing to play: it is right for a local run and for Compose, which is
+    /// where nobody has configured anything.
+    /// </summary>
+    private string ConsumptionAddress(LiveListResponse live)
+    {
+        if (live.ConsumptionUrl is { Length: > 0 } configured)
+        {
+            return configured;
+        }
+
+        if (live.ConsumptionPort <= 0 || _api is null || !Uri.TryCreate(_api.Address, UriKind.Absolute, out var server))
+        {
+            return string.Empty;
+        }
+
+        return $"srt://{server.Host}:{live.ConsumptionPort}";
+    }
+
+    /// <summary>
+    /// Where a player pulls a live stream: the consumption port, over SRT. The stream it wants is
+    /// named separately, as a demuxer option rather than in this URL; see
+    /// <see cref="FlyleafEngine.TuneFor"/> for why that distinction matters.
+    /// </summary>
+    private string? PlaybackUrl()
+        => string.IsNullOrWhiteSpace(_consumptionUrl)
+            ? null
+            : $"{_consumptionUrl.TrimEnd('/')}?mode=caller";
+
+    /// <summary>
+    /// The stream identifier naming what to pull, in the SRT Access Control convention: the same
+    /// shape an encoder presents on the way in, with the intent reversed.
+    /// </summary>
+    private static string Identifier(DocumentItem item) => $"#!::r={item.Id},m=request";
 
     /// <summary>Keeps the grid in name order without re-sorting and rebuilding the whole list.</summary>
     private void InsertSorted(DocumentItem item)
@@ -552,6 +621,7 @@ public partial class MainWindow : Window
 
         StopPlayback();
         HideAllPreviews();
+        UpdateLiveButtons();
 
         if (Selected is not { } item)
         {
@@ -567,24 +637,41 @@ public partial class MainWindow : Window
 
         if (item.IsLive)
         {
-            PreviewTitle.Text = $"{item.FileName}   (live from {item.Live!.Owner})";
-            ShowMetadata(item);
+            PreviewTitle.Text = item.IsInterrupted
+                ? $"{item.FileName}   (interrupted, from {item.Live!.Owner})"
+                : $"{item.FileName}   (live from {item.Live!.Owner})";
 
-            if (string.IsNullOrWhiteSpace(item.Live.PlaybackUrl))
+            ShowMetadata(item);
+            UpdateLiveButtons();
+
+            if (PlaybackUrl() is not { } url)
             {
-                // The server has not been told its own public address, so it cannot hand out a URL
-                // a player could reach. Saying so beats a player failing on an empty address.
-                ShowFallback("This server has no public address configured, so the stream cannot be played from here.");
+                // The server has not been told its own consumption address, so it cannot hand out
+                // one a player could reach. Saying so beats a player failing on an empty address.
+                ShowFallback(
+                    "This server has no consumption address configured, so the stream cannot be "
+                    + "played from here. Set Live:PublicConsumptionUrl.");
+
                 return;
             }
 
-            // Played straight from the URL: no download, and the player follows the live edge.
-            StartPlayback(item.Live.PlaybackUrl);
+            // Played straight from the SRT address: no download, and the player joins at the live
+            // edge because that is where the server starts it.
+            StartPlayback(url, live: true, Identifier(item));
             return;
         }
 
         PreviewTitle.Text = $"{item.FileName}   ({DocumentItem.HumanSize(item.Size)})";
         ShowMetadata(item);
+
+        // A long recording is streamed rather than fetched. The content endpoint serves byte
+        // ranges and a recording written in pieces is seekable end to end, so scrubbing through
+        // six hours costs one ranged read rather than six hours of downloading.
+        if (StreamUrl(item) is { } streaming)
+        {
+            StartPlayback(streaming);
+            return;
+        }
 
         try
         {
@@ -599,6 +686,19 @@ public partial class MainWindow : Window
             ShowFallback($"Could not open {item.FileName}: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// Where to stream a document from, or null when downloading it is the better answer.
+    ///
+    /// Null unless the server has been told its own address, since a URL a player cannot reach is
+    /// worse than a slow download.
+    /// </summary>
+    private string? StreamUrl(DocumentItem item)
+        => item.Kind is DocumentKind.Video or DocumentKind.Audio
+            && item.Size >= StreamRatherThanDownloadBytes
+            && _contentBaseUrl is { Length: > 0 }
+                ? $"{_contentBaseUrl.TrimEnd('/')}/api/documents/{item.Id}/content"
+                : null;
 
     private void ShowMetadata(DocumentItem item)
     {
@@ -643,7 +743,7 @@ public partial class MainWindow : Window
     /// Plays the cached copy rather than streaming from the API, so scrubbing lands instantly
     /// instead of waiting on a range request per drag.
     /// </summary>
-    private void StartPlayback(string path)
+    private void StartPlayback(string path, bool live = false, string? streamId = null)
     {
         try
         {
@@ -653,7 +753,14 @@ public partial class MainWindow : Window
             {
                 _player = new Player();
                 PlayerHost.Player = _player;
+
+                // Opening is asynchronous and reports failure through this and nowhere else.
+                // Without it a stream the player cannot reach, or a codec it cannot decode, is a
+                // black rectangle and no explanation at all.
+                _player.OpenCompleted += OnOpenCompleted;
             }
+
+            FlyleafEngine.TuneFor(_player, live, streamId);
         }
         catch (Exception ex)
         {
@@ -676,6 +783,31 @@ public partial class MainWindow : Window
 
         _positionTimer.Start();
         PlayPauseButton.Content = "Pause";
+    }
+
+    /// <summary>
+    /// Says why playback did not start, on the UI thread.
+    ///
+    /// The player raises this from its own thread, and a failure is the one case where the video
+    /// area stays empty, so it is also the one case where saying nothing is worst.
+    /// </summary>
+    private void OnOpenCompleted(object? sender, OpenCompletedArgs e)
+    {
+        if (e.Success)
+        {
+            return;
+        }
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            var reason = string.IsNullOrWhiteSpace(e.Error) ? "the player gave no reason" : e.Error;
+
+            PlayerHost.Visibility = Visibility.Collapsed;
+            PlayerControls.Visibility = Visibility.Collapsed;
+
+            ShowFallback($"Could not play {e.Url}: {reason}");
+            SetStatus($"Playback failed: {reason}");
+        });
     }
 
     private void StopPlayback()
@@ -949,6 +1081,91 @@ public partial class MainWindow : Window
     }
 
     private async void OnRefresh(object sender, RoutedEventArgs e) => await RefreshAsync();
+
+    /// <summary>
+    /// Starts a recording, or stops the one running.
+    ///
+    /// It reaches back into the server's buffer, so what lands begins a few seconds before this
+    /// click: an event already under way when somebody noticed it is still caught. A second click
+    /// while one is running stops it; a further trigger from anywhere else would extend it rather
+    /// than start a second file.
+    /// </summary>
+    private async void OnRecord(object sender, RoutedEventArgs e)
+    {
+        if (_api is null || Selected is not { IsLive: true } item)
+        {
+            return;
+        }
+
+        try
+        {
+            if (item.IsRecording)
+            {
+                await _api.StopLiveRecordingAsync(item.Id, _connection.Token);
+                SetStatus($"Stopping the recording of {item.FileName}; it becomes a document when it ends.");
+            }
+            else
+            {
+                // Zero means the server's default duration. It keeps running whether or not this
+                // client is here, so nothing has to be held open.
+                var recording = await _api.RecordLiveAsync(item.Id, 0, _connection.Token);
+
+                SetStatus(recording is null
+                    ? $"{item.FileName} could not be recorded."
+                    : $"Recording {item.FileName} until "
+                        + $"{recording.EndsAt.ToDateTimeOffset().LocalDateTime:HH:mm:ss}.");
+            }
+
+            await RefreshLiveAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Recording failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Stores a full-resolution picture of the stream as a document. Decoded fresh on the server
+    /// rather than lifted from the tile, which is both smaller and several seconds older.
+    /// </summary>
+    private async void OnSnapshot(object sender, RoutedEventArgs e)
+    {
+        if (_api is null || Selected is not { IsLive: true } item)
+        {
+            return;
+        }
+
+        try
+        {
+            var id = await _api.SnapshotLiveAsync(item.Id, _connection.Token);
+
+            SetStatus(id is null
+                ? $"{item.FileName} had nothing to capture."
+                : $"Snapshot of {item.FileName} stored.");
+
+            if (id is not null)
+            {
+                await RefreshAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Snapshot failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Both buttons act on a stream, so they are off for a document, and the record button says
+    /// which way it will act.
+    /// </summary>
+    private void UpdateLiveButtons()
+    {
+        var stream = Selected is { IsLive: true } item ? item : null;
+
+        RecordButton.IsEnabled = stream is not null;
+        SnapshotButton.IsEnabled = stream is not null;
+        RecordButton.Content = stream?.IsRecording == true ? "Stop recording" : "Record";
+    }
 
     private async void OnDelete(object sender, RoutedEventArgs e)
     {

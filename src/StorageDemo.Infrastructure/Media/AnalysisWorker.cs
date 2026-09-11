@@ -85,7 +85,10 @@ public sealed class AnalysisWorker(
                 Size = current.Size,
                 CreatedAt = current.CreatedAt,
                 ThumbnailKey = analysis.ThumbnailKey,
-                Metadata = analysis.Metadata,
+
+                // The probe's findings, plus anything the uploader knew that a probe cannot work
+                // out. A recording knows which stream it came from; ffmpeg never will.
+                Metadata = Merge(current.Metadata, analysis.Metadata),
             },
             cancellationToken);
 
@@ -100,5 +103,20 @@ public sealed class AnalysisWorker(
             current.Id,
             current.StorageKey,
             current.FileName));
+    }
+
+    /// <summary>The uploader's own entries win, because it knows things the probe cannot read.</summary>
+    private static Dictionary<string, string> Merge(
+        IReadOnlyDictionary<string, string> supplied,
+        IReadOnlyDictionary<string, string> probed)
+    {
+        var merged = new Dictionary<string, string>(probed);
+
+        foreach (var (key, value) in supplied)
+        {
+            merged[key] = value;
+        }
+
+        return merged;
     }
 }

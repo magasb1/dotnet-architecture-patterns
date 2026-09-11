@@ -193,52 +193,55 @@ public sealed class DocumentsGrpcService(
         }
 
         response.Transports.AddRange(live.Transports);
+        response.ConsumptionUrl = liveOptions.Value.PublicConsumptionUrl ?? string.Empty;
+        response.ConsumptionPort = liveOptions.Value.ConsumptionPort;
 
-        foreach (var session in await live.SessionsAsync(context.CancellationToken))
+        foreach (var stream in await live.StreamsAsync(context.CancellationToken))
         {
-            // Finished sessions linger briefly in the registry so an operator can see how they
-            // ended. A client showing "what is on air" does not want them.
-            if (session.IsFinished)
+            var message = new LiveStreamMessage
             {
-                continue;
+                Name = stream.Name,
+                State = stream.State.ToString(),
+                HasPreview = stream.HasPreview,
+                Packets = stream.Packets,
+                Bytes = stream.Bytes,
+                StartedAt = Timestamp.FromDateTimeOffset(stream.StartedAt),
+                Owner = stream.Owner,
+                Layout = stream.Layout ?? string.Empty,
+                Startable = stream.Startable,
+                CeilingBinding = stream.CeilingBinding,
+                BufferedSeconds = stream.BufferedSeconds,
+                Manual = stream.Manual,
+            };
+
+            if (stream.Recording is { } recording)
+            {
+                message.Recording = ToMessage(recording);
             }
 
-            response.Sessions.Add(new LiveSessionMessage
-            {
-                Id = session.Id.ToString(),
-                Name = session.Name,
-                Direction = session.Direction.ToString(),
-                State = session.State.ToString(),
-                Url = session.Url,
-                PlaybackUrl = session.PlaybackUrl ?? string.Empty,
-                HasPreview = session.HasThumbnail,
-                Packets = session.Packets,
-                Bytes = session.Bytes,
-                StartedAt = Timestamp.FromDateTimeOffset(session.StartedAt),
-                Owner = session.Owner,
-            });
+            response.Streams.Add(message);
         }
 
         return response;
     }
 
     public override async Task DownloadLivePreview(
-        LiveSessionId request,
+        LiveStreamName request,
         IServerStreamWriter<Chunk> responseStream,
         ServerCallContext context)
     {
-        if (!liveOptions.Value.Enabled || !Guid.TryParse(request.Id, out var id))
+        if (!liveOptions.Value.Enabled)
         {
-            throw new RpcException(new Status(StatusCode.NotFound, "No such live session."));
+            throw new RpcException(new Status(StatusCode.NotFound, "No such live stream."));
         }
 
-        var preview = live.Thumbnail(id);
+        var preview = live.Preview(request.Name);
 
         if (preview is null)
         {
-            // Owned by another replica, or no frame yet. The REST endpoint proxies across
+            // Owned by another replica, or nothing decoded yet. The REST endpoint proxies across
             // replicas; this one deliberately does not, so a client falls back to its icon.
-            throw new RpcException(new Status(StatusCode.NotFound, "No preview for this session."));
+            throw new RpcException(new Status(StatusCode.NotFound, "No preview for this stream."));
         }
 
         await responseStream.WriteAsync(
@@ -246,11 +249,75 @@ public sealed class DocumentsGrpcService(
             context.CancellationToken);
     }
 
+    public override async Task<DocumentId> SnapshotLive(LiveStreamName request, ServerCallContext context)
+    {
+        RequireLive();
+
+        var id = await live.SnapshotAsync(request.Name, context.CancellationToken)
+            ?? throw new RpcException(new Status(
+                StatusCode.NotFound,
+                "That stream is not running on this replica, or it has nothing to capture."));
+
+        return new DocumentId { Id = id.ToString() };
+    }
+
+    public override async Task<LiveRecordingMessage> RecordLive(
+        RecordLiveRequest request,
+        ServerCallContext context)
+    {
+        RequireLive();
+
+        var duration = request.Seconds > 0 ? TimeSpan.FromSeconds(request.Seconds) : (TimeSpan?)null;
+
+        var status = await live.RecordAsync(request.Name, duration, context.CancellationToken)
+            ?? throw new RpcException(new Status(
+                StatusCode.NotFound,
+                "That stream is not running on this replica."));
+
+        return ToMessage(status);
+    }
+
+    public override async Task<Empty> StopLiveRecording(LiveStreamName request, ServerCallContext context)
+    {
+        RequireLive();
+
+        await live.StopRecordingAsync(request.Name, context.CancellationToken);
+
+        return new Empty();
+    }
+
+    private void RequireLive()
+    {
+        if (!liveOptions.Value.Enabled)
+        {
+            throw new RpcException(new Status(StatusCode.NotFound, "Live streaming is disabled."));
+        }
+    }
+
+    private static LiveRecordingMessage ToMessage(StorageDemo.Core.Streaming.RecordingStatus recording)
+    {
+        var message = new LiveRecordingMessage
+        {
+            Id = recording.Id.ToString(),
+            StartedAt = Timestamp.FromDateTimeOffset(recording.StartedAt),
+            Bytes = recording.Bytes,
+            Truncated = recording.Truncated,
+        };
+
+        if (recording.EndsAt is { } endsAt)
+        {
+            message.EndsAt = Timestamp.FromDateTimeOffset(endsAt);
+        }
+
+        return message;
+    }
+
     public override Task<ProviderResponse> GetProviders(Empty request, ServerCallContext context)
         => Task.FromResult(new ProviderResponse
         {
             Storage = providers.Storage,
             Database = providers.Database,
+            ContentBaseUrl = providers.ContentBaseUrl ?? string.Empty,
         });
 
     private static Guid ParseId(string id)

@@ -4,6 +4,9 @@
     <!-- Threading TestContext.Current.CancellationToken through every assertion is noise here. -->
     <NoWarn>$(NoWarn);xUnit1051</NoWarn>
     <OutputType>Exe</OutputType>
+    <!-- The streaming tests read from libav's own structures, which is the only honest way to
+         prove the accept carousel actually accepted anything. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <Using Include="Xunit" />

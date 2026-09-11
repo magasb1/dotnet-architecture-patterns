@@ -26,9 +26,21 @@ public sealed class FakeFileStorage : IFileStorage
     }
 
     public Task<Stream?> OpenReadAsync(string key, CancellationToken ct = default)
-        => Task.FromResult(Objects.TryGetValue(key, out var bytes)
-            ? (Stream?)new MemoryStream(bytes)
-            : null);
+        => OpenReadAsync(key, 0, ct);
+
+    public Task<Stream?> OpenReadAsync(string key, long offset, CancellationToken ct = default)
+    {
+        if (!Objects.TryGetValue(key, out var bytes))
+        {
+            return Task.FromResult<Stream?>(null);
+        }
+
+        // Reading past the end is an empty read rather than a failure, which is what both real
+        // providers do and what a reader at the very end of a document relies on.
+        var from = (int)Math.Clamp(offset, 0, bytes.Length);
+
+        return Task.FromResult<Stream?>(new MemoryStream(bytes, from, bytes.Length - from));
+    }
 
     public Task DeleteAsync(string key, CancellationToken ct = default)
     {
@@ -83,6 +95,13 @@ public sealed class FakeMediaAnalyzer : IMediaAnalyzer
         return Task.FromResult(new MediaAnalysis(
             Metadata,
             ProduceThumbnail ? ThumbnailBytes : null));
+    }
+
+    public Task<byte[]?> LatestFrameAsync(Stream content, string fileName, CancellationToken ct = default)
+    {
+        Analyzed.Add(fileName);
+
+        return Task.FromResult(ProduceThumbnail ? ThumbnailBytes : null);
     }
 }
 

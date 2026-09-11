@@ -10,6 +10,16 @@ public interface IFileStorage
 
     Task<Stream?> OpenReadAsync(string key, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Reads an object from <paramref name="offset"/> bytes in.
+    ///
+    /// Deliberately not multipart upload's read-side twin: this is one ranged read, which both a
+    /// filesystem and an object store do natively and neither has to emulate. It exists so that
+    /// seeking into a document written in pieces opens the piece that holds the position instead
+    /// of reading and discarding everything before it.
+    /// </summary>
+    Task<Stream?> OpenReadAsync(string key, long offset, CancellationToken cancellationToken = default);
+
     /// <summary>Idempotent: deleting a missing key succeeds.</summary>
     Task DeleteAsync(string key, CancellationToken cancellationToken = default);
 

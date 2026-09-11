@@ -63,7 +63,9 @@ involved.
 ### Scenario D: Kubernetes
 
 ```bash
-kubectl apply -f k8s/
+kubectl apply -f k8s/           # documents only
+kubectl apply -f k8s/live/      # and live streaming: two media Services, and a Deployment
+                                # carrying their ports, re-applied over the one above
 kubectl -n storage-demo port-forward svc/storage-demo 5082:5080
 ```
 
@@ -121,6 +123,11 @@ opens a file, a socket or a database is not. `MagicBytesValidator` needs the ASP
 reference, which is exactly why upload sniffing lives in `Api`.
 
 ## The two abstractions
+
+The shape of this, in three pictures, is in
+[docs/storage-and-persistence.drawio](docs/storage-and-persistence.drawio): the interface it
+deliberately is not, the six ports with their two implementations each, and what changes between a
+laptop and a cluster.
 
 ```csharp
 public interface IFileStorage           // object storage: save, open, delete, exists, list
@@ -186,40 +193,221 @@ two together or neither; a mismatch fails at startup with "Loading FFmpeg librar
 
 ## Live streaming
 
-> **Being redesigned.** What follows describes what is built today, where a stream is requested
-> before it exists. The replacement, where an encoder connects unannounced and names itself, is
-> designed in [docs/design/server-side-stream-ingest.md](docs/design/server-side-stream-ingest.md).
+An encoder connects to one address, names itself, and the stream exists from that moment. Nothing
+is requested first, nothing is written to disk unless somebody asks for it, and recordings and
+snapshots continue whether or not any client is watching.
 
+The design and the reasoning behind every decision are in
+[docs/design/server-side-stream-ingest.md](docs/design/server-side-stream-ingest.md); the
+vocabulary it uses is defined in [CONTEXT.md](CONTEXT.md). For the shape of it in three pictures,
+including what makes it scale in Kubernetes and what does not, open
+[docs/video-server.drawio](docs/video-server.drawio).
 
-Streams go both ways, as MPEG-TS over a UDP-family transport, remuxed rather than re-encoded:
-packets are copied from one container to the other with their timestamps rescaled, so a session
-costs almost no CPU.
+### Three ports, one sentence each
+
+| Port | Reaching it lets you |
+| --- | --- |
+| Ingest, SRT on 9000 | push a stream, and nothing else |
+| Consumption, SRT on 9010 | watch live streams, and nothing else |
+| API, 8080 and 5080 | everything else |
+
+That is the whole reason they are separate: each can be exposed to a different network, and the
+firewall statement stays short enough to be useful. Finished recordings and snapshots are documents
+and stay on the API.
+
+### Pushing a stream
+
+The encoder names the stream in the SRT stream identifier. Two forms are accepted, because two
+forms are what real encoders emit:
+
+```bash
+# The SRT Access Control convention. '#' must be written %23 inside a URL.
+ffmpeg -re -i clip.mp4 -c copy -f mpegts 'srt://127.0.0.1:9001?mode=caller&streamid=%23!::r=live/camera1,m=publish'
+
+# A bare name, which is what OBS and Teradek produce: their boxes are one free-text field.
+ffmpeg -re -i clip.mp4 -c copy -f mpegts 'srt://127.0.0.1:9001?mode=caller&streamid=camera1'
+```
+
+`-re` matters. SRT is a connection, so a burst that ends immediately is not a stream and the
+receiver sees the far end hang up mid-handshake.
+
+Names are validated and **rejected**, never cleaned up. The name is the identity, so two names
+normalising to the same string would let one encoder take over another's stream. Letters, digits,
+dot, dash, underscore and slash, up to 128 of them.
+
+The quickest way to see it work is the sender in the Compose stack, which just pushes and
+reconnects on its own:
+
+```bash
+docker compose -f docker/docker-compose.yml --profile live up -d srt-sender
+```
+
+**To push something real**, `Restream.ps1` in the repository root takes any source ffmpeg can read
+and stands in for a camera:
+
+```powershell
+.\Restream.ps1 .\clip.mp4 live/camera1 -Loop        # a file, played round and round
+.\Restream.ps1 rtsp://192.168.1.50/stream1 carpark  # a camera that speaks RTSP
+.\Restream.ps1 https://example.com/feed.m3u8 motorway
+```
+
+It remultiplexes rather than re-encodes, so a large feed costs almost no processor; pass
+`-Transcode` for a source whose codecs a transport stream cannot carry. It uses the FFmpeg in
+`ffmpeg/win-x64/` because that is the one with SRT, refuses a name the service would reject rather
+than letting the connection be dropped silently, and reconnects on its own until you stop it.
+
+### Watching a stream
+
+A viewer connects to the consumption port the same way an encoder connects to ingest: one address,
+the stream named in the identifier.
+
+```bash
+# A bare name. Works on every FFmpeg, and is what to use unless you need a position.
+ffplay -analyzeduration 1000000 -probesize 1000000 -fflags nobuffer \
+  'srt://127.0.0.1:9011?mode=caller&streamid=live/camera1'
+
+# Twenty seconds back, resolved to the nearest position a decoder can start from, so what arrives
+# is at least twenty seconds and usually a little more.
+ffplay 'srt://127.0.0.1:9011?mode=caller&streamid=%23!::r=live/camera1,user_from=20,m=request'
+```
+
+**Prefer the bare name from a command line.** The convention's form begins with `#`, which starts a
+fragment in a URL and so has to be written `%23` there, and FFmpeg versions disagree about when they
+decode it:
+
+| FFmpeg | What the service receives |
+| --- | --- |
+| Before 7.0 | the literal `%23!::...`, which the service rewrites and accepts |
+| 7.x | nothing: the `#` is restored before the query is split, so it truncates there |
+| 8.1 | the identifier, decoded correctly |
+
+A bare name has no `#` and sidesteps all of it. Anything that needs the envelope, such as a rollback
+position, should pass the identifier as a protocol option rather than in a URL, which is what the
+service and the desktop client both do.
+
+**Those probe flags are most of a viewer's join time.** libav reads five seconds of a transport
+stream before deciding what is in it, and for a camera that is dead time on every join and every
+reconnect. Capping it takes a join from about eight seconds to two, measured in
+[docs/replica-failover.md](docs/replica-failover.md). The desktop client sets the same limits for
+live playback and drops them again for a stored recording, which wants libav's own judgement back.
+
+Raise them for a camera that starts its audio late: a probe that ends before the audio track
+appears yields a stream that plays without sound.
+
+Rollback is bounded by the buffer, available whether or not anything is recording, and never served
+from a recording. Returning to live is a new connection rather than a control message, which keeps
+the connection one-way and stateless.
+
+The desktop client keeps streams and documents in separate tabs, streams first. A stream is a tile
+with a LIVE badge carrying a preview the server keeps current, and selecting it plays from the
+consumption port. An interrupted stream is dimmed rather than removed: a tile that vanishes and
+returns is worse than one showing a state.
+
+### Recording and snapshots
+
+Both are taken server-side and continue whether or not any client is connected, so closing the
+client does not stop a recording that is running.
 
 ```
-POST   /api/live/ingest      {"name":"match","url":"udp://0.0.0.0:9000"}   listen, record, store
-POST   /api/live/egress      {"documentId":"...","url":"udp://host:9000"}  send a document out
-GET    /api/live                                                          transports and sessions
-GET    /api/live/{id}/stream                                              watch it while it runs
-GET    /api/live/{id}/thumbnail                                           latest preview frame
-DELETE /api/live/{id}                                                     ask the owner to stop
+GET    /api/live                                       transports and streams on air
+GET    /api/live/stream/{name}                         one stream
+GET    /api/live/preview/{name}                        the picture now
+POST   /api/live/snapshot/{name}                       store a full-resolution picture as a document
+POST   /api/live/record/{name}    {"seconds":30}       start, or extend what is running
+DELETE /api/live/record/{name}                         end it now
+POST   /api/live/manual  {"name":"...","url":"..."}    a stream for a protocol that cannot name itself
+DELETE /api/live/stream/{name}                         drop the connection and end the stream
 ```
 
-gRPC carries the read side for the desktop client, `ListLive` and `DownloadLivePreview`, so the
-client needs only its one connection. Starting and stopping stay on REST.
+The verb comes before the name in every route, which reads oddly and is deliberate: a stream name
+may contain slashes, so it has to be the trailing catch-all.
 
-**In:** the service listens, records what arrives, and when the stream ends hands the recording to
-the ordinary upload path. It becomes a document with a thumbnail and metadata like any other file,
-because it goes through the same `IDocumentService`. It records to disk first: a live stream has no
-length until it ends, and the storage abstraction wants a stream it can read to completion.
+**A trigger is a trigger.** A person pressing record and a detector firing are one caller on one
+path, which is what makes detection genuinely free to add later rather than a second code path.
 
-**Out:** a stored document is multiplexed to a destination. Both directions are the same remux
-loop, so the transport is only ever the scheme on the URL.
+**Every recording begins in the buffer.** A trigger at a moment yields a capture starting about
+five seconds before it, so an event already under way when it was noticed is still caught. One
+recording runs at a time per stream, and a further trigger extends its end rather than starting a
+near-duplicate.
+
+**A recording is written in parts and stored as it goes, and read back as one file.** A camera
+recording for six hours cannot wait until it ends to be stored: the bytes would sit on one pod's
+disk the whole time and die with it. So a few minutes are muxed to a local file, uploaded through
+the ordinary storage path as an ordinary object, and the local file deleted.
+
+| | |
+| --- | --- |
+| Disk and memory while recording | one part, whatever the total length |
+| Lost if the pod goes | at most the part in progress |
+| Visible to whoever opens it | one document, one name, one size, one download |
+
+None of that reaches the document list. The parts are joined on the way out and the
+joined stream is seekable end to end, so a player scrubs through six hours with one ranged read
+rather than fetching the lot. The document appears with the first part and grows, so a recording
+still running can already be opened and watched.
+
+Nothing here needs multipart upload or anything else only S3 has: each part is one ordinary
+write, and both providers stay equal. That is the constraint the whole repository exists to
+demonstrate, and it is why this is parts rather than a single streaming upload.
+
+Parts live under `recordings/` rather than `documents/`, exactly as thumbnails do. Under the
+scanned prefix, the storage monitor would import each one as a document of its own and a recording
+would appear as a list of five-minute files.
+
+**A snapshot is a fresh decode**, not the preview. The preview is decoded at keyframes only, so it
+is stale by up to a keyframe interval; a snapshot is a deliberate act performed once, and one
+decode is nothing next to being twelve seconds wrong about the moment somebody meant to capture.
+
+**A stream never becomes a document by itself.** Documents come only from snapshots and recordings
+someone asked for, which is what makes unattended ingest safe to leave running.
+
+### How it is built
+
+One demultiplexer per stream feeds one hub, and packets flow one way through it.
+
+- **The packet tier is the fan-out.** Subscribers receive demultiplexed packets filtered by stream
+  index, with no decoding anywhere near them. The recorder, the viewer and a future KLV extractor
+  all live here, which is what keeps a stream cheap when nobody is watching.
+- **The frame tier hangs off it.** One decoder is a packet subscriber and republishes pictures, so
+  a stream is decoded once however many things want them, at the rate its subscribers ask for.
+  Today that is keyframes only, for the preview.
+- **The buffer is held as segments**, each beginning where a decoder can start. Joining a viewer,
+  rolling back and cutting a recording's pre-roll are all one operation: choose a segment.
+- **Every consumer that writes bytes owns its own muxer.** A recording started at ten past and a
+  viewer who joined at twelve past have different timelines and different first packets.
+
+Backpressure differs by consumer, because overflow does not mean the same thing for everyone. A
+viewer that falls behind skips forward to live, because a viewer must never accumulate delay. A
+recorder that overflows stops and marks its document truncated, because dropping packets would
+write a hole into a file that claims to be a recording.
 
 ### About SRT
 
-SRT is a build choice, not a code one. FFmpeg exposes `srt://` as just another protocol to the same
-muxer, so the code here already accepts it. What decides whether it works is whether the loaded
-libraries were compiled with libsrt.
+SRT is a build choice, not a code one, and the whole ingest design rests on what the bundled libav
+can actually do. That was established empirically rather than assumed; see
+[.scratch/server-side-ingest/issues/01-srt-listener-streamid.md](.scratch/server-side-ingest/issues/01-srt-listener-streamid.md).
+
+**A libav SRT listener accepts exactly one caller and then closes the listening socket.** Many
+concurrent streams on one port are still possible, because libsrt multiplexes its sockets over one
+shared UDP port per process and libav sets the reuse-address option, so the listener is re-opened
+immediately after each accept while earlier connections keep running. Both media ports run one of
+these carousels.
+
+Three consequences are load-bearing and are not going away:
+
+- **The identifier is only reachable through a log line.** FFmpeg reads it on accept and logs it at
+  verbose level without storing it anywhere the application can reach. A custom log callback
+  captures it without raising the global log level, and a **boot-time self-test** confirms the
+  capture still works and fails loudly if it does not. Upgrade FFmpeg and that is what tells you.
+- **The backlog is one**, giving roughly two or three accepts a second, on each port. Senders and
+  players must retry, which encoders do by nature.
+- **The name arrives after accept, never before.** Nothing can be refused by name; an unwanted
+  connection is accepted and then dropped. Any rule about who may push has to act during the
+  handshake instead, which is why an SRT passphrase is the stronger authentication candidate.
+
+Calling libsrt directly was investigated and rejected: it is statically linked into libavformat and
+not re-exported, so going direct means vendoring another binary for every platform and running a
+second SRT stack beside the one already loaded.
 
 **Two builds are in play.** The NuGet package is LGPL and has no libsrt, so it is replaced by one
 that does:
@@ -234,150 +422,115 @@ scripts/fetch-ffmpeg.sh   # then rebuild
 ```
 
 It drops an FFmpeg 8.1 GPL shared build into `ffmpeg/win-x64/`, which the build overlays over the
-packaged one. The folder is gitignored: 190 MB of binaries do not belong in a repository. Skip the
-script and everything still builds and runs, minus SRT, so a fresh clone needs no setup.
+packaged one. The folder is gitignored: 190 MB of binaries do not belong in a repository. Without
+it everything still builds and runs, minus live streaming, so a fresh clone needs no setup.
 
 The version is pinned deliberately. The FFmpeg.AutoGen bindings target one ABI, and 8.1 carries the
 same library majors as 8.0 (avcodec 62, avutil 60, avformat 62). A 9.x build loads and then fails on
-the first call, so the two move together.
-
-Asking for `srt://` on a build without it gets a refusal naming the protocols that are available,
-rather than a numeric failure from inside libav. `GET /api/live` reports the same list, so a caller
-never has to guess.
-
-`Media__LibraryPath` points libav somewhere else entirely, for a build kept outside the repository:
-
-```
-Media__LibraryPath=D:\ffmpeg-full-shared\bin
-```
-
-**It has to be a shared build.** Since the libraries are loaded into this process, there have to be
-libraries: `avcodec-62.dll` and friends on Windows, `libavcodec.so.62` elsewhere. A static build
-ships `ffmpeg.exe` and `ffprobe.exe` and nothing else, so there is nothing to load. Most
-ready-made installs are static, including the Chocolatey one, which is why pointing this at
-`where ffmpeg` usually will not work. Look for a download whose name says "shared".
-
-The setting is checked at startup and refuses a directory with no libraries in it, naming the
-reason, rather than starting and then failing on the first thumbnail.
-
-Using the machine's FFmpeg is therefore possible but not what this repository does: it reintroduces
-exactly the dependency bundling removed. Fetching a shared libsrt build into the application's own
-output keeps the property that nothing depends on what the host happens to have, at the cost of a
-GPL-flavoured licence, which for a demo is not a constraint.
+the first call, so the two move together. `Media__LibraryPath` points libav somewhere else entirely,
+and **it has to be a shared build**: a static build ships `ffmpeg.exe` and `ffprobe.exe` and nothing
+to load. Most ready-made installs are static, including the Chocolatey one, which is why pointing
+this at `where ffmpeg` usually will not work.
 
 ### Running it
 
-Live streaming is **off unless configured**, because these endpoints make the service open sockets
-and send data to an address the caller chooses:
+Live streaming is **off unless configured**, because switching it on opens a port anybody who can
+reach it may push a stream into:
 
 ```
 Live__Enabled=true
-Live__Token=<secret>        # required in X-Storage-Token on every call
-Live__AllowedSchemes=udp,rtp,srt
+Live__Token=<secret>        # required in X-Storage-Token on every API call
+Live__IngestPort=9000
+Live__ConsumptionPort=9010
+Live__ProbeSeconds=1        # how long libav may spend working out what a camera is sending
+Live__ProbeBytes=1048576    # and how much it may read doing it
+Live__RecordingPartMinutes=5   # how much of a recording a pod holds at a time
+Live__MaxRecordingMinutes=720     # the ceiling on one recording
+
+Documents__PublicBaseUrl=http://127.0.0.1:8081   # where a client streams a long recording from
 ```
 
-The scheme allowlist is the part that matters. Without it, `file:///etc/passwd` as an ingest URL
-would turn "start a stream" into "read anything on this disk", and an egress URL would turn the
-service into a way to post bytes to an arbitrary host.
+`ProbeSeconds` and `ProbeBytes` are dead time between a camera connecting and its stream being on
+air. libav's own defaults are five seconds and five megabytes; MPEG-TS repeats its tables every
+hundred milliseconds, so a second is generous for a camera that presents everything at once. Raise
+them for one that starts its audio late.
 
-**The quickest way to see it work** is the sender that ships with the Compose stack. It starts a
-session, then pushes a test pattern into it over SRT, and reconnects on its own:
+`RecordingPartMinutes` is what bounds a pod's disk for a recording of any length, and how much
+is lost if the pod goes. `Documents__PublicBaseUrl` is how the desktop client knows where to stream
+a long recording from; without it the client downloads instead, which is right for ordinary files
+and painful for a six hour one.
 
-```bash
-docker compose -f docker/docker-compose.yml --profile live up -d srt-sender
-```
+**Readiness is about the media ports**, not only about storage and a database. A replica whose
+ingest port is not accepting, whose stream identifier self-test failed, or whose FFmpeg has no SRT
+takes itself out of the Service rather than swallowing encoders it cannot serve.
 
-It is off unless asked for, since a permanently running stream is not what every `up` should mean.
-Alpine's ffmpeg is built with libsrt, so nothing has to be built for it. `docker/srt-sender.sh` is
-about thirty lines and shows the shape of a real contribution feed: the service listens, the encoder
-calls it.
-
-```bash
-curl -X POST http://127.0.0.1:8081/api/live/ingest \
-  -H 'X-Storage-Token: local-demo-token' -H 'Content-Type: application/json' \
-  -d '{"name":"demo","url":"srt://0.0.0.0:9000?mode=listener"}'
-
-ffmpeg -re -i clip.mp4 -c copy -f mpegts 'srt://127.0.0.1:9001?mode=caller'
-```
-
-`-re` matters. SRT is a connection, so a burst that ends immediately is not a stream and the
-receiver sees the far end hang up mid-handshake.
-
-Plain UDP works the same way, with any encoder or with the ffmpeg that ships in the image:
-
-```bash
-curl -X POST http://127.0.0.1:8081/api/live/ingest \
-  -H 'X-Storage-Token: local-demo-token' -H 'Content-Type: application/json' \
-  -d '{"name":"demo","url":"udp://0.0.0.0:9000"}'
-
-ffmpeg -re -i clip.mp4 -c copy -f mpegts 'udp://127.0.0.1:9001?pkt_size=1316'
-```
-
-Compose publishes UDP 9001 upward, one per replica.
+Compose publishes both upward, offset by one from the container ports so a local `dotnet run` and
+the stack can coexist: ingest on 9001, consumption on 9011.
 
 **If a stream never arrives**, check the machine before the code. Inbound UDP to an unknown
 executable is blocked by default on Windows, loopback included on some managed devices, and the
-symptom is a session that stays in `Waiting` with no packets while the port shows as bound. It
-reproduces without this application at all: run one ffmpeg as a receiver and push to it with
-another. Allow the API through the firewall, or run the Compose stack, where the listener is inside
-a container.
+symptom is a port that shows as bound with nothing ever accepted. Allow the API through the
+firewall, or run the Compose stack, where the listener is inside a container.
 
-### Watching a stream
+### Streams and replicas
 
-The desktop client keeps streams and documents in separate tabs, streams first. They are different
-things: a stream is happening now and disappears when it stops, a document is a file that stays, and
-the sorting, filtering and actions that apply to one make no sense for the other.
-
-A running stream is a tile with a LIVE badge, carrying a preview frame the server decodes from the
-recording every few seconds. Selecting it plays the stream straight from `GET /api/live/{id}/stream`,
-which serves the recording as it is written rather than a download of whatever existed when the
-request arrived. When the stream stops, the tile goes.
-
-For that to work the server has to know its own public address, since the URL it hands out has to
-be one the viewer can actually reach:
-
-```
-Live__PublicBaseUrl=http://127.0.0.1:8081
-```
-
-Without it the client says so plainly instead of handing the player an address that goes nowhere.
-
-The muxer writes through rather than buffering, which is what makes the preview and the playback
-live at all. Left to itself, libav holds a recording in memory until the muxer closes, so a viewer
-sees nothing until the stream has already ended.
-
-### Sessions and replicas
-
-A session owns a socket, so it belongs to the replica that started it. Everything else about it is
-shared, which is what lets any replica answer for a stream it is not running:
+The registry is keyed by **name**, not by an opaque identifier, which is what lets a reconnect
+resume rather than create. A connection identifier survives as a per-connection detail for logs and
+for telling one attempt from the next, but nothing looks a stream up by it.
 
 | Concern | Where it lives | Why |
 | --- | --- | --- |
-| The socket and the recording | The one replica | Cannot be anywhere else |
-| Session list, state, stats | Shared registry, in-memory or Redis | Any replica may be asked |
-| Stopping | A flag the owner acts on | Only the owner can close the socket |
-| Preview and playback | Proxied to the owner | The bytes exist in one place |
+| The connection, the buffer, any recording | The one replica that owns it | Cannot be anywhere else |
+| Which streams exist, their state and stats | Shared registry, in-memory or Redis | Any replica may be asked |
+| Who owns a name | The owner field of the registry entry | It is the claim |
+| Preview, snapshot, record | Forwarded to the owner over HTTP | The bytes exist in one place |
+| A viewer on the wrong replica | Relayed from the owner over SRT | SRT has no redirect |
 
-That split is what decides the deployment shape. **Inbound media has to be pod-addressable**,
-because a load balancer spreading MPEG-TS datagrams across replicas gives each of them a fraction
-of a stream and none of them a decodable one. **Everything else does not**, because a replica that
-receives a request for someone else's stream reads through to the owner over the headless Service.
+**The newest connection wins a contested name.** A replica finding the name already held takes it
+anyway and records itself as owner; the previous owner discovers on its next heartbeat that it has
+lost the claim, shuts its hub down and closes any recording as a complete document. Refusing the
+newcomer was rejected because it makes recovery wait on a timeout this service does not control: an
+encoder actively pushing bytes is more real than a socket that has not yet noticed its peer is gone,
+and SRT takes seconds to work that out.
 
-`k8s/live/statefulset.yaml` is that shape: a StatefulSet for stable pod names, a headless Service
-for pod-to-pod DNS, and one Service per pod for the ingest port. Apply it instead of
-`deployment.yaml` and `service.yaml`, never alongside.
+**Interrupted is a state.** When a feed stops arriving the stream stays claimed, stays listed, and
+keeps its hub, buffer and any recording alive for a grace period of thirty seconds. A recording
+keeps running and records the silence. After that the stream is gone and leaves nothing behind: the
+documents it produced are its trace.
 
-- **k3s on one node:** the per-pod Services are `NodePort`, so a sender uses `node-ip:30901`.
-- **Cilium across nodes:** make them `LoadBalancer` with addresses from an LB-IPAM pool, and keep
-  `externalTrafficPolicy: Local` to preserve the sender's address and avoid a second hop.
+`k8s/live/deployment.yaml` is a **Deployment**, not a StatefulSet, with two Services. Stable pod
+identity existed only so a sender could be pointed at a particular pod, and nothing does that any
+more: a replica records its own address when it claims a name. That deletes the headless Service
+and the per-pod ingest Services together.
 
-A single shared Service with `sessionAffinity: ClientIP`, or Cilium's Maglev hashing, mostly works
-for a steady sender and is not what I would build on: affinity lapses on conntrack timeout, rehashes
-when replicas change, and tells the caller nothing about which pod took the stream. SRT survives
-that better than raw UDP because it re-handshakes; plain MPEG-TS over UDP does not.
+Two things are easily conflated and only one is needed. **Per-flow stickiness is required**, because
+an SRT connection is a UDP flow whose packets must all reach the same pod; that is ordinary
+connection tracking and every load balancer in play does it without being configured to.
+**Stickiness across reconnects is not required**, because the newest connection wins the name. No
+affinity configuration, no session tables, nothing to get wrong.
+
+What a replica disappearing actually costs a producer and a viewer is measured rather than guessed,
+in [docs/replica-failover.md](docs/replica-failover.md).
 
 Local runs need none of this. With `Messaging__Provider=InMemory` the registry is a dictionary,
-there are no peers to proxy to, and the whole thing works with nothing installed.
+there is nowhere to forward to, and the two ports are just two ports. The cluster shape is
+configuration, not a different program.
+
+### Accepted limits
+
+Each of these is a deliberate trade, not an oversight.
+
+- A displaced owner closes its recording rather than moving it, so a flapping encoder leaves
+  several documents. What was already recorded is kept: parts are stored as they complete, so
+  only the part in progress is lost.
+- A recording still running is visible in the document list and grows. That reverses the original
+  design, which held a document back until there was a whole file; a part that has been stored
+  is not half-written, and for a camera the alternative was losing everything before a restart.
+- Viewers of one stream all funnel through its owner, so adding replicas does nothing for a single
+  popular stream. Correct for contribution, where streams outnumber viewers; wrong for
+  distributing one stream to an audience.
+- The stream identifier is captured from a log line, guarded by a boot-time self-test.
+- Nothing can be refused by name; only accepted and dropped.
 
 ## Why uploads feel instant
 
@@ -516,7 +669,9 @@ StorageMonitor__WebhookToken=local-demo-token
 
 gRPC is the primary surface (`protos/documents.proto`): `List`, `Get`, `Download` and
 `DownloadThumbnail` (server streaming), `Upload` (client streaming), `Delete`, `Watch` (server
-streaming) and `GetProviders`.
+streaming) and `GetProviders`. It also carries what the desktop client needs of live streaming:
+`ListLive`, `DownloadLivePreview`, `SnapshotLive`, `RecordLive` and `StopLiveRecording`, so the
+client needs only its one connection.
 
 REST covers the same ground for curl and Swagger:
 
@@ -528,15 +683,11 @@ GET    /api/documents/{id}/content    add ?download=true to force a save dialog
 GET    /api/documents/{id}/thumbnail  404 when the type has no preview
 DELETE /api/documents/{id}
 GET    /health/live                   process only, no external dependencies
-GET    /health/ready                  storage and database reachable
+GET    /health/ready                  storage, database, and the media ports accepting
 ```
 
-REST, Swagger and the health probes are on port 8080; gRPC is on 5080. The live streaming control
-plane is REST only, deliberately: it is a handful of administrative calls, and the stream itself
-travels over neither protocol. See "Live streaming".
-
-```
-```
+REST, Swagger and the health probes are on port 8080; gRPC is on 5080. Media travels over neither:
+it arrives on the ingest port and leaves on the consumption port, both SRT. See "Live streaming".
 
 Uploads and downloads stream end to end. Nothing buffers a whole file.
 

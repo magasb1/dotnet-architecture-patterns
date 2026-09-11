@@ -4,11 +4,27 @@ public sealed record DocumentContent(Stream Stream, string FileName, string? Con
 
 public interface IDocumentService
 {
+    /// <param name="metadata">
+    /// What the caller knows and the media probe cannot work out: which live stream a recording
+    /// came from, the presentation timestamp a snapshot was taken at, whether a recording was
+    /// truncated. Kept alongside what the probe finds, and kept when the probe runs again.
+    /// </param>
     Task<Document> UploadAsync(
         string fileName,
         Stream content,
         string? contentType,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, string>? metadata = null);
+
+    /// <summary>
+    /// Starts a document that will be written a piece at a time, for something too long to hold
+    /// whole before storing it. Each piece goes through the ordinary storage path as it completes;
+    /// whoever opens the document gets the pieces joined, and can seek anywhere in them.
+    /// </summary>
+    SegmentedDocument BeginSegmented(
+        string fileName,
+        string? contentType,
+        IReadOnlyDictionary<string, string>? metadata = null);
 
     Task<DocumentContent?> DownloadAsync(Guid id, CancellationToken cancellationToken = default);
 

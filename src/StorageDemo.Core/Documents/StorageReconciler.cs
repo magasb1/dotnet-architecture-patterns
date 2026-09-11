@@ -28,7 +28,11 @@ public sealed class StorageReconciler(
         string prefix,
         CancellationToken cancellationToken = default)
     {
+        // Documents written in pieces are left alone. Their bytes live outside the prefix being
+        // scanned, so this pass can neither find them nor judge them: it would see no object at
+        // their storage key and remove a recording that is perfectly intact, or still running.
         var known = (await repository.GetAllAsync(cancellationToken))
+            .Where(d => !d.Segmented)
             .ToDictionary(d => d.StorageKey, StringComparer.Ordinal);
 
         var seen = new HashSet<string>(StringComparer.Ordinal);

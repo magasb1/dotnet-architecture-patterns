@@ -32,6 +32,21 @@ public sealed class DocumentConfiguration : IEntityTypeConfiguration<Document>
                     metadata => DocumentMetadata.Serialize(metadata)!.GetHashCode(),
                     metadata => DocumentMetadata.Deserialize(DocumentMetadata.Serialize(metadata))));
 
+        // The pieces of a document written a piece at a time, in order. One jsonb value rather
+        // than a child table: nothing queries into them, they are always read with their document,
+        // and a table would buy a join for no benefit.
+        builder.Property(d => d.Parts)
+            .HasColumnType("jsonb")
+            .HasConversion(
+                parts => DocumentMetadata.SerializeParts(parts),
+                json => DocumentMetadata.DeserializeParts(json),
+                new ValueComparer<IReadOnlyList<DocumentPart>>(
+                    (left, right) => DocumentMetadata.SerializeParts(left) == DocumentMetadata.SerializeParts(right),
+                    parts => DocumentMetadata.SerializeParts(parts).GetHashCode(),
+                    parts => DocumentMetadata.DeserializeParts(DocumentMetadata.SerializeParts(parts))));
+
+        builder.Ignore(d => d.Segmented);
+
         builder.HasIndex(d => d.StorageKey).IsUnique();
     }
 }

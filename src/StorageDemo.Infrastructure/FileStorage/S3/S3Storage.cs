@@ -68,11 +68,34 @@ public sealed class S3Storage(IAmazonS3 client, IOptions<S3StorageOptions> optio
         }
     }
 
-    public async Task<Stream?> OpenReadAsync(string key, CancellationToken cancellationToken = default)
+    public Task<Stream?> OpenReadAsync(string key, CancellationToken cancellationToken = default)
+        => OpenReadAsync(key, 0, cancellationToken);
+
+    public async Task<Stream?> OpenReadAsync(
+        string key,
+        long offset,
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            var response = await client.GetObjectAsync(_bucket, Normalize(key), cancellationToken);
+            if (offset <= 0)
+            {
+                var whole = await client.GetObjectAsync(_bucket, Normalize(key), cancellationToken);
+
+                return whole.ResponseStream;
+            }
+
+            // An open-ended range, which is a plain GET with a Range header rather than anything
+            // S3 has that a filesystem does not. Reading from an offset is table stakes for both.
+            var response = await client.GetObjectAsync(
+                new GetObjectRequest
+                {
+                    BucketName = _bucket,
+                    Key = Normalize(key),
+                    ByteRange = new ByteRange(offset, long.MaxValue),
+                },
+                cancellationToken);
+
             return response.ResponseStream;
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)

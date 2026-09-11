@@ -57,6 +57,10 @@ spec:
         runAsNonRoot: true
         runAsUser: 64198
         fsGroup: 64198
+        # Required by the restricted Pod Security standard, which some clusters enforce by
+        # default. Without it the pod is refused and the Deployment never scales up.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: api
           image: storage-demo:latest

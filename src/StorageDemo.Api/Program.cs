@@ -20,8 +20,8 @@ builder.Services.Configure<FormOptions>(o => o.MultipartBodyLengthLimit = maxUpl
 
 builder.Services.AddSingleton<ContentTypeSniffer>();
 
-// Reads live bytes from whichever replica owns them. No timeout: a live stream is meant to be
-// held open for as long as the viewer watches it.
+// Reaches whichever replica owns a stream. No timeout: a live stream is meant to be held open for
+// as long as the viewer watches it.
 builder.Services.AddSingleton<LivePeerProxy>();
 builder.Services.AddHttpClient(nameof(LivePeerProxy)).ConfigureHttpClient(
     client => client.Timeout = Timeout.InfiniteTimeSpan);

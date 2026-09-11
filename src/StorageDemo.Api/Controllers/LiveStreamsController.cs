@@ -7,28 +7,38 @@ using StorageDemo.Infrastructure.Streaming;
 
 namespace StorageDemo.Api.Controllers;
 
-public sealed record StartIngestRequest(string Name, string Url);
+/// <param name="Url">Where to listen or connect, for a protocol that cannot name itself.</param>
+public sealed record CreateManualStreamRequest(string Name, string Url);
 
-public sealed record StartEgressRequest(Guid DocumentId, string Url);
+/// <param name="Seconds">
+/// How long to record for. Omitted means the configured default, and a further trigger extends
+/// whatever is running rather than starting a second recording.
+/// </param>
+public sealed record RecordRequest(double? Seconds);
 
-public sealed record LiveStatusResponse(IReadOnlyList<string> Transports, IReadOnlyList<LiveSession> Sessions);
+public sealed record LiveStatusResponse(
+    IReadOnlyList<string> Transports,
+    IReadOnlyList<LiveStream> Streams);
 
 /// <summary>
 /// Control plane for live streaming. REST rather than gRPC on purpose: these are a handful of
-/// administrative calls, and the stream itself never travels over either. It is MPEG-TS on a UDP
-/// or SRT socket, which is the point.
+/// administrative calls, and no media travels over either of them.
 ///
-/// Any replica answers any call. Listing and stopping go through the shared registry, and the two
-/// calls that need the actual bytes, the preview and the stream, are proxied to the replica that
-/// holds them. A caller therefore never has to know which pod took the stream.
+/// Every call names a stream. Any replica answers the ones the registry can satisfy; the ones that
+/// need the stream's actual bytes are forwarded to the replica that holds them, so a caller never
+/// has to know which pod took the connection. Playback is not here at all - it is on the
+/// consumption port, which is what keeps the firewall statement one sentence per port.
+///
+/// The verb comes before the name in every route, which reads oddly and is deliberate. A stream
+/// name is a resource path and may contain slashes, so it has to be the trailing catch-all; put it
+/// first and "live/camera1/record" is ambiguous with a stream called "live/camera1/record".
 /// </summary>
 [ApiController]
 [Route("api/live")]
 public sealed class LiveStreamsController(
     ILiveStreamService live,
     LivePeerProxy peers,
-    IOptions<LiveOptions> options,
-    ILogger<LiveStreamsController> logger) : ControllerBase
+    IOptions<LiveOptions> options) : ControllerBase
 {
     private readonly LiveOptions _options = options.Value;
 
@@ -42,14 +52,12 @@ public sealed class LiveStreamsController(
             return refused;
         }
 
-        return new LiveStatusResponse(live.Transports, await live.SessionsAsync(cancellationToken));
+        return new LiveStatusResponse(live.Transports, await live.StreamsAsync(cancellationToken));
     }
 
-    /// <summary>Starts listening. The recording becomes a document when the stream ends.</summary>
-    [HttpPost("ingest")]
-    [ProducesResponseType(StatusCodes.Status202Accepted)]
-    public async Task<ActionResult<LiveSession>> Ingest(
-        StartIngestRequest request,
+    [HttpGet("stream/{*name}")]
+    public async Task<ActionResult<LiveStream>> Get(
+        string name,
         [FromHeader(Name = "X-Storage-Token")] string? token,
         CancellationToken cancellationToken)
     {
@@ -58,117 +66,18 @@ public sealed class LiveStreamsController(
             return refused;
         }
 
-        try
-        {
-            return Accepted(await live.StartIngestAsync(request.Name, request.Url, cancellationToken));
-        }
-        catch (NotSupportedException ex)
-        {
-            return BadRequest(ex.Message);
-        }
-    }
-
-    /// <summary>Multiplexes a stored document out to a destination.</summary>
-    [HttpPost("egress")]
-    [ProducesResponseType(StatusCodes.Status202Accepted)]
-    public async Task<ActionResult<LiveSession>> Egress(
-        StartEgressRequest request,
-        [FromHeader(Name = "X-Storage-Token")] string? token,
-        CancellationToken cancellationToken)
-    {
-        if (Guard(token) is { } refused)
-        {
-            return refused;
-        }
-
-        try
-        {
-            return Accepted(await live.StartEgressAsync(request.DocumentId, request.Url, cancellationToken));
-        }
-        catch (NotSupportedException ex)
-        {
-            return BadRequest(ex.Message);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return NotFound(ex.Message);
-        }
-    }
-
-    /// <summary>The latest preview frame of a running stream.</summary>
-    [HttpGet("{id:guid}/thumbnail")]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Thumbnail(Guid id, CancellationToken cancellationToken)
-    {
-        if (!_options.Enabled)
-        {
-            return NotFound();
-        }
-
-        // Deliberately unauthenticated, like a document thumbnail: it is a picture, and the client
-        // renders it in an image tag rather than through an API call it can add headers to.
-        if (live.Thumbnail(id) is { } local)
-        {
-            Response.Headers.XContentTypeOptions = "nosniff";
-            return File(local, "image/jpeg");
-        }
-
-        var session = await live.GetAsync(id, cancellationToken);
-        if (session is null || !session.HasThumbnail || session.IsFinished)
-        {
-            return NotFound();
-        }
-
-        return await ProxyAsync(session, $"api/live/{id}/thumbnail", "image/jpeg", cancellationToken);
+        return await live.GetAsync(name, cancellationToken) is { } stream ? stream : NotFound();
     }
 
     /// <summary>
-    /// The running stream, as MPEG-TS, for a player to pull. Ends when the stream does.
+    /// Creates a stream by request, for a protocol that cannot name itself. It shares one
+    /// namespace and one claim with automatic streams: a manual stream is simply one that claimed
+    /// its name early, and an encoder presenting that name is the same conflict as any other.
     /// </summary>
-    [HttpGet("{id:guid}/stream")]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Stream(Guid id, CancellationToken cancellationToken)
-    {
-        if (!_options.Enabled)
-        {
-            return NotFound();
-        }
-
-        var session = await live.GetAsync(id, cancellationToken);
-        if (session is null || session.IsFinished)
-        {
-            return NotFound();
-        }
-
-        if (!string.Equals(session.Owner, peers.Owner, StringComparison.Ordinal))
-        {
-            return await ProxyAsync(session, $"api/live/{id}/stream", "video/mp2t", cancellationToken);
-        }
-
-        Response.ContentType = "video/mp2t";
-        Response.Headers.CacheControl = "no-store";
-
-        try
-        {
-            await live.StreamAsync(id, Response.Body, cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // The viewer closed the player. Normal.
-        }
-        catch (InvalidOperationException ex)
-        {
-            logger.LogDebug(ex, "Live stream {SessionId} ended while a viewer was attached", id);
-        }
-
-        return new EmptyResult();
-    }
-
-    [HttpDelete("{id:guid}")]
+    [HttpPost("manual")]
     [ProducesResponseType(StatusCodes.Status202Accepted)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Stop(
-        Guid id,
+    public async Task<ActionResult<LiveStream>> CreateManual(
+        CreateManualStreamRequest request,
         [FromHeader(Name = "X-Storage-Token")] string? token,
         CancellationToken cancellationToken)
     {
@@ -177,24 +86,200 @@ public sealed class LiveStreamsController(
             return refused;
         }
 
-        // Accepted rather than NoContent: the owner may be another replica, which acts shortly.
-        return await live.StopAsync(id, cancellationToken) ? Accepted() : NotFound();
+        try
+        {
+            return Accepted(await live.CreateManualAsync(request.Name, request.Url, cancellationToken));
+        }
+        catch (Exception ex) when (ex is NotSupportedException or ArgumentException)
+        {
+            return BadRequest(ex.Message);
+        }
+    }
+
+    /// <summary>The current preview: the picture now, not a poster frame.</summary>
+    [HttpGet("preview/{*name}")]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Preview(string name, CancellationToken cancellationToken)
+    {
+        if (!_options.Enabled)
+        {
+            return NotFound();
+        }
+
+        // Deliberately unauthenticated, like a document thumbnail: it is a picture, and a client
+        // renders it in an image tag rather than through a call it can add headers to.
+        if (live.Preview(name) is { } local)
+        {
+            Response.Headers.XContentTypeOptions = "nosniff";
+
+            // A cached live preview is a still picture of a moving stream, which is the one
+            // failure this endpoint exists to avoid. Set on both branches.
+            Response.Headers.CacheControl = "no-store";
+
+            return File(local, "image/jpeg");
+        }
+
+        var stream = await live.GetAsync(name, cancellationToken);
+
+        if (stream is null || !stream.HasPreview || live.Owns(name))
+        {
+            return NotFound();
+        }
+
+        return await ProxyAsync(stream, $"api/live/preview/{name}", cancellationToken);
+    }
+
+    /// <summary>
+    /// Takes a picture now and stores it as a document. Served while a stream is interrupted, so
+    /// the button still works while the tile shows the gap, and refused once the stream is gone.
+    /// </summary>
+    [HttpPost("snapshot/{*name}")]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Snapshot(
+        string name,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        return await ForwardOrRun(
+            name,
+            $"api/live/snapshot/{name}",
+            token,
+            async () => await live.SnapshotAsync(name, cancellationToken) is { } id
+                ? Ok(new { documentId = id })
+                : NotFound(),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Starts a recording, or extends the one already running. A person pressing record and a
+    /// detector firing arrive here identically, which is what makes detection free to add later.
+    /// </summary>
+    [HttpPost("record/{*name}")]
+    [ProducesResponseType(StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Record(
+        string name,
+        RecordRequest? request,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        var duration = request?.Seconds is { } seconds and > 0
+            ? TimeSpan.FromSeconds(seconds)
+            : (TimeSpan?)null;
+
+        return await ForwardOrRun(
+            name,
+            $"api/live/record/{name}",
+            token,
+            async () =>
+            {
+                // Accepted, not Ok: the recording is running and has no further relationship with
+                // this call. The document appears when there is a file.
+                var status = await live.RecordAsync(name, duration, cancellationToken);
+
+                return status is null ? NotFound() : Accepted(status);
+            },
+            cancellationToken,
+            body: request);
+    }
+
+    [HttpDelete("record/{*name}")]
+    [ProducesResponseType(StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> StopRecording(
+        string name,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        return await ForwardOrRun(
+            name,
+            $"api/live/record/{name}",
+            token,
+            async () => await live.StopRecordingAsync(name, cancellationToken) ? Accepted() : NotFound(),
+            cancellationToken,
+            method: HttpMethod.Delete);
+    }
+
+    [HttpDelete("stream/{*name}")]
+    [ProducesResponseType(StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Stop(
+        string name,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        return await ForwardOrRun(
+            name,
+            $"api/live/stream/{name}",
+            token,
+            async () => await live.StopAsync(name, cancellationToken) ? Accepted() : NotFound(),
+            cancellationToken,
+            method: HttpMethod.Delete);
+    }
+
+    /// <summary>
+    /// Runs the call here when this replica owns the stream, and forwards it to the owner when it
+    /// does not. Only the owner can act on a stream, so a caller reaching the wrong replica is
+    /// routed rather than refused.
+    /// </summary>
+    private async Task<IActionResult> ForwardOrRun(
+        string name,
+        string path,
+        string? token,
+        Func<Task<IActionResult>> run,
+        CancellationToken cancellationToken,
+        HttpMethod? method = null,
+        object? body = null)
+    {
+        if (live.Owns(name))
+        {
+            return await run();
+        }
+
+        var stream = await live.GetAsync(name, cancellationToken);
+
+        if (stream is null)
+        {
+            return NotFound();
+        }
+
+        return await peers.RelayAsync(stream, method ?? HttpMethod.Post, path, token, body, cancellationToken)
+            ?? NotFound();
     }
 
     private async Task<IActionResult> ProxyAsync(
-        LiveSession session,
+        LiveStream stream,
         string path,
-        string contentType,
         CancellationToken cancellationToken)
     {
-        var upstream = await peers.OpenAsync(session.Owner, path, cancellationToken);
+        var upstream = await peers.OpenAsync(stream, path, cancellationToken);
 
         if (upstream is null)
         {
             return NotFound();
         }
 
-        Response.ContentType = contentType;
+        Response.ContentType = "image/jpeg";
         Response.Headers.CacheControl = "no-store";
 
         try

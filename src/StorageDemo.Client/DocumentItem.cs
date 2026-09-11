@@ -20,7 +20,7 @@ public sealed record MetadataRow(string Key, string Value);
 public sealed class DocumentItem : INotifyPropertyChanged
 {
     private DocumentMessage? _document;
-    private LiveSessionMessage? _live;
+    private LiveStreamMessage? _live;
     private BitmapImage? _thumbnail;
     private string? _pendingName;
     private long _pendingSize;
@@ -37,19 +37,28 @@ public sealed class DocumentItem : INotifyPropertyChanged
     public DocumentMessage? Document => _document;
 
     /// <summary>Set when this tile is a stream rather than a stored file.</summary>
-    public LiveSessionMessage? Live => _live;
+    public LiveStreamMessage? Live => _live;
 
     public bool IsLive => _live is not null;
 
     public bool IsPending => _document is null && _live is null;
 
-    public string Id => _document?.Id ?? _live?.Id ?? string.Empty;
+    /// <summary>
+    /// A document's identifier, or a stream's name. The name is a stream's identity: a feed that
+    /// drops and reconnects under it is the same stream resuming, so there is no other key.
+    /// </summary>
+    public string Id => _document?.Id ?? _live?.Name ?? string.Empty;
 
     public string FileName => _document?.FileName ?? _live?.Name ?? _pendingName ?? string.Empty;
 
     public long Size => _document?.Size ?? _live?.Bytes ?? _pendingSize;
 
     public bool HasThumbnail => _document?.HasThumbnail ?? _live?.HasPreview ?? false;
+
+    /// <summary>An interrupted stream is dimmed rather than removed, so the tile stays put.</summary>
+    public bool IsInterrupted => _live?.State == "Interrupted";
+
+    public bool IsRecording => _live?.Recording is not null;
 
     /// <summary>A tile that is still uploading is as new as it gets.</summary>
     public DateTimeOffset CreatedAt => _document?.CreatedAt?.ToDateTimeOffset() ?? DateTimeOffset.UtcNow;
@@ -59,12 +68,12 @@ public sealed class DocumentItem : INotifyPropertyChanged
         : ContentTypes.KindOf(_document?.ContentType, FileName);
 
     public string Details => IsLive
-        ? $"{_live!.State}  {HumanSize(Size)}"
+        ? $"{_live!.State}{(_live.Recording is null ? string.Empty : "  REC")}  {HumanSize(Size)}"
         : IsPending
             ? "Uploading..."
             : $"{Icon}  {HumanSize(Size)}";
 
-    public double Dimming => IsPending ? 0.45 : 1.0;
+    public double Dimming => IsPending || IsInterrupted ? 0.45 : 1.0;
 
     /// <summary>A running stream is marked, because it is the one tile that changes on its own.</summary>
     public Visibility LiveBadgeVisibility => IsLive ? Visibility.Visible : Visibility.Collapsed;
@@ -76,15 +85,41 @@ public sealed class DocumentItem : INotifyPropertyChanged
         {
             if (_live is not null)
             {
-                return
-                [
-                    new MetadataRow("State", _live.State),
-                    new MetadataRow("Direction", _live.Direction),
-                    new MetadataRow("Transport", _live.Url),
-                    new MetadataRow("Replica", _live.Owner),
-                    new MetadataRow("Packets", _live.Packets.ToString("N0")),
-                    new MetadataRow("Carried", HumanSize(_live.Bytes)),
-                ];
+                var rows = new List<MetadataRow>
+                {
+                    new("State", _live.State),
+                    new("Source", _live.Manual ? "Created by request" : "Named itself on connect"),
+                    new("Layout", _live.Layout),
+                    new("Replica", _live.Owner),
+                    new("Packets", _live.Packets.ToString("N0")),
+                    new("Carried", HumanSize(_live.Bytes)),
+                    new("Buffered", $"{_live.BufferedSeconds:0.#} s"),
+                };
+
+                if (_live.Recording is { } recording)
+                {
+                    // On the stream rather than in the document list, because a document appears
+                    // only when there is a file.
+                    rows.Add(new MetadataRow(
+                        "Recording",
+                        $"since {recording.StartedAt.ToDateTimeOffset().LocalDateTime:HH:mm:ss}, "
+                        + HumanSize(recording.Bytes)));
+                }
+
+                if (!_live.Startable)
+                {
+                    // The operator's business: while this is true every pre-roll is empty and
+                    // every snapshot is second-hand, and the fix is at the encoder.
+                    rows.Add(new MetadataRow("Warning", "No keyframe recently enough to start from."));
+                }
+
+                if (_live.CeilingBinding)
+                {
+                    rows.Add(new MetadataRow("Warning", "The buffer's byte ceiling is binding, so "
+                        + "pre-rolls are shorter than the window promises."));
+                }
+
+                return rows;
             }
 
             return _document is null
@@ -93,10 +128,10 @@ public sealed class DocumentItem : INotifyPropertyChanged
         }
     }
 
-    public static DocumentItem ForLive(LiveSessionMessage live) => new() { _live = live };
+    public static DocumentItem ForLive(LiveStreamMessage live) => new() { _live = live };
 
     /// <summary>Refreshes a live tile in place, so its stats move without the tile being rebuilt.</summary>
-    public void Apply(LiveSessionMessage live)
+    public void Apply(LiveStreamMessage live)
     {
         _live = live;
 
@@ -106,6 +141,9 @@ public sealed class DocumentItem : INotifyPropertyChanged
             nameof(Size),
             nameof(HasThumbnail),
             nameof(Details),
+            nameof(Dimming),
+            nameof(IsInterrupted),
+            nameof(IsRecording),
             nameof(Metadata));
     }
 

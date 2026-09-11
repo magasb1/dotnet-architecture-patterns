@@ -2,9 +2,12 @@
 
 ## Destination
 
-**Reached.** The document is at `docs/design/server-side-stream-ingest.md`. Every ticket on this map
-is resolved and nothing is left to decide before someone builds, with one edge named in the document
-as needing an answer first: what the buffer does with a feed carrying no startable point.
+**Reached, and built.** The document is at `docs/design/server-side-stream-ingest.md` and the code
+is in `src/StorageDemo.Infrastructure/Streaming/`. Every ticket on this map is resolved. The one
+edge the document left open, what the buffer does with a feed carrying no startable point, was
+answered at the start of the build; that and everything else decided while building is recorded
+below. What a replica disappearing costs a producer and a viewer is measured in
+`docs/replica-failover.md`.
 
 
 A design document a developer picks up and builds from, covering SRT streams that arrive
@@ -64,6 +67,121 @@ a recording becomes a document, and a recording cut from a rolling buffer starts
 timestamp, so this has to be fixed whichever sampler survives. The wider lesson is worth carrying:
 "the frame three seconds in" and "the picture right now" are different questions, and one interface
 answering both is what let a live preview serve a fixed frame while everything reported success.
+
+## Decided while building
+
+Everything here is a decision the design did not anticipate, or one it made that the build had to
+revisit. Each says what was found, what was chosen, and why.
+
+- **A feed with no startable point.** The edge the design left open. The buffer keeps at most one
+  open segment, and when that segment reaches the byte ceiling with no keyframe having arrived it is
+  discarded and restarted from the newest packet. While that is the state, the stream reports itself
+  as **not startable** and the three jobs the buffer does degrade honestly rather than silently: a
+  viewer joins at the live edge with no pre-roll, a recording begins at the next packet with no
+  pre-roll, and a snapshot falls back to the harvester's last picture with a metadata note saying so.
+
+  Rejected: keeping the open segment as a flat ring and handing its oldest byte to a decoder. That
+  serves a start point that is not one, so a viewer gets a broken picture and a recording's first
+  seconds are undecodable, and both look like a bug in this service rather than what they are.
+  Rejected too: growing the segment past the ceiling, which is one careless encoder evicting the
+  service, the exact thing the ceiling exists to stop.
+
+  The reasoning is that a feed which never sends a keyframe is a misconfigured encoder and there is
+  no fix on this side. The useful behaviour is to keep ingest working, keep memory bounded, and make
+  the condition visible, which is why it joins the operator conditions in the design.
+
+- **Consumption is SRT, not MPEG-TS over HTTP.** Overridden by the repository owner during the
+  build, against the recorded decision in `issues/11-viewer-consumption.md`. A player now calls the
+  consumption port and names the stream it wants in its stream identifier, symmetric with ingest.
+
+  Two of the three costs that decision was rejected on are real and are now paid. The accept
+  carousel limits viewers to roughly two or three connections a second, because it is the same
+  libav listener with the same backlog of one. And a viewer reaching a replica that does not own
+  the stream cannot be redirected, because SRT has no such thing, so that replica calls the owner
+  and relays the bytes: a media relay, which is exactly what the HTTP shape avoided.
+
+  The third cost turned out to be wrong. "Rollback has nowhere sensible to carry a position" is not
+  true: the convention reserves the `user_*` prefix for vendor extensions, so the position rides in
+  `user_from` and no format changes. Returning to live is still a new connection rather than a
+  control message.
+
+  What is lost: the response can no longer say how far back it actually started, because there is
+  no header. It is logged, and the stream reports what its buffer holds.
+
+- **The claim is the registry entry's owner field, not the distributed lock.** The design said a
+  replica claims a name "on the distributed lock that already exists, renewed by the heartbeat".
+  `IDistributedLock` can do neither: `TryAcquireAsync` refuses a second holder rather than handing
+  a name over, and there is no renew. Building either would change the interface the design says is
+  unchanged, and refusing the newcomer is the behaviour that decision explicitly rejected.
+
+  So the owner field of the registry entry is the claim, and the lock serialises the moment of
+  taking it rather than being held for the stream's life. Nothing waits on the lock: a replica that
+  cannot take it proceeds anyway, because both contenders are claiming and the second write is by
+  definition the newer connection. The displaced owner still learns it lost on its next heartbeat,
+  which is what the design asked for.
+
+- **A viewer's connection is held open across a stream moving between replicas.** Not in the
+  design, and it is where a viewer's downtime actually comes from. A viewer served by a single
+  attach has its socket closed when the owning replica disappears, and a player then pays a
+  reconnect and a fresh probe. Holding the socket and re-attaching to wherever the stream went
+  costs only the gap in the feed. The muxer's timeline carries across the re-attach, so the player
+  is never asked to accept timestamps jumping back to zero mid-connection.
+
+  It only helps when the replica holding the viewer is not the one that died. When they are the
+  same pod nothing can save that connection, and the player reconnects. Measured in
+  `docs/replica-failover.md`.
+
+- **Readiness means the media ports are accepting.** Not in the design, which said nothing about
+  health checks. For a service whose purpose is being live, a replica that is reachable but not
+  accepting is worse than one that is plainly absent: the Service keeps sending encoders to it and
+  they keep failing. A failed stream identifier self-test or an FFmpeg without SRT now takes a
+  replica out of the Service instead of letting it swallow encoders it could only serve unnamed.
+
+  The listener reports itself bound by how long a listen attempt took rather than by its error
+  code, because libav returns a negative number for both a quiet minute and a port that will not
+  bind, and the errno for a timeout differs by platform.
+
+  One consequence is accepted rather than solved: readiness gates the pod, and the pod backs all
+  three Services, so a storage outage also removes a replica from ingest. Kubernetes has no
+  per-port readiness. If it ever matters, the storage checks move out of the `ready` tag.
+
+- **The probe is bounded on both ends.** libav reads five seconds of a transport stream before
+  deciding what is in it. On ingest that is dead time between a camera connecting and its stream
+  being on air; on a player it is most of what a viewer experiences as a reconnect. Capped at one
+  second and one megabyte, a viewer's join went from about eight seconds to two. The cost is that a
+  camera presenting its audio late would be read as having none, so both limits are configurable
+  and the symptom is documented.
+
+- **A recording is stored in parts and read back as one document.** The design said bytes go to
+  a local file and are uploaded through the ordinary storage path when the recording ends, with two
+  accepted limits: a recording is bounded by pod disk and dies with its pod. For cameras recording
+  for hours those limits are not acceptable, so the shape changed while keeping the reason the
+  design chose it.
+
+  A few minutes are muxed to a local file, uploaded as an ordinary object, and the file deleted.
+  Disk and memory are bounded by one part however long the recording runs, and what has already
+  been recorded survives the pod that recorded it. Each part is still one ordinary write:
+  nothing needs multipart upload or anything else only S3 has, which was the whole reason the
+  design rejected streaming into object storage.
+
+  None of it is visible to whoever opens the document. `Document.Parts` carries the pieces, the
+  download joins them, and the joined stream is seekable, so a player scrubs six hours with one
+  ranged read. `IFileStorage` gained a read-from-offset overload for that; both a filesystem and an
+  object store do it natively, so it does not break the parity rule the way multipart would.
+
+  Two consequences that reverse earlier decisions, both recorded here rather than left to be
+  discovered:
+
+  - **The document appears with the first part and grows**, where the design said it should
+    appear only at the end because "a half-written one that cannot be downloaded is a lie". A
+    stored segment is not half-written, and the alternative for a camera is losing everything
+    recorded before a restart.
+  - **The reconciler ignores documents written in parts.** Their bytes live outside the prefix it scans,
+    so it would find no object at their storage key and delete a recording that was perfectly
+    intact, or still being written.
+
+  Parts live under `recordings/` rather than `documents/`, for the same reason thumbnails live
+  under `thumbnails/`: under the scanned prefix each would be imported as a document of its own.
 
 ## Decisions so far
 

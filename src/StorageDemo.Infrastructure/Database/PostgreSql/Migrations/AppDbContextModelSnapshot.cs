@@ -44,6 +44,10 @@ namespace StorageDemo.Infrastructure.Database.PostgreSql.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb");
 
+                    b.Property<string>("Parts")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
                     b.Property<long>("Size")
                         .HasColumnType("bigint");
 

@@ -24,6 +24,9 @@ public sealed class ServerList
         new("Local (dotnet run)", "http://127.0.0.1:5080"),
         new("Docker Compose", "http://127.0.0.1:5081"),
         new("Kubernetes (port-forward)", "http://127.0.0.1:5082"),
+        // The Talos lab cluster, reached on the address Cilium holds for the API Service. No
+        // port-forward: the cluster hands out real addresses on the lab network.
+        new("Talos lab", "http://10.10.10.122:5080"),
     ];
 
     public List<ServerEntry> Entries { get; private set; } = [.. Defaults];
@@ -40,6 +43,11 @@ public sealed class ServerList
                 if (loaded is { Count: > 0 })
                 {
                     list.Entries = loaded;
+
+                    // A saved list is the user's, but a default added since it was written would
+                    // otherwise never appear: the file exists, so nothing reads the defaults again.
+                    list.Entries.AddRange(Defaults.Where(d =>
+                        !loaded.Any(e => string.Equals(e.Address, d.Address, StringComparison.OrdinalIgnoreCase))));
                 }
             }
         }

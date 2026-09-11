@@ -50,6 +50,12 @@ public sealed class FileSystemStorage : IFileStorage
     }
 
     public Task<Stream?> OpenReadAsync(string key, CancellationToken cancellationToken = default)
+        => OpenReadAsync(key, 0, cancellationToken);
+
+    public Task<Stream?> OpenReadAsync(
+        string key,
+        long offset,
+        CancellationToken cancellationToken = default)
     {
         var path = ResolvePath(key);
         if (!File.Exists(path))
@@ -66,6 +72,11 @@ public sealed class FileSystemStorage : IFileStorage
                 FileShare.Read,
                 bufferSize: BufferSize,
                 useAsync: true);
+
+            if (offset > 0)
+            {
+                stream.Seek(offset, SeekOrigin.Begin);
+            }
 
             return Task.FromResult<Stream?>(stream);
         }

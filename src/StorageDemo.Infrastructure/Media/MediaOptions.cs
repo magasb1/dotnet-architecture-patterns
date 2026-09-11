@@ -30,4 +30,12 @@ public sealed class MediaOptions
     [Range(0, 600)]
     public double VideoFrameSeconds { get; init; } = 3;
 
+    /// <summary>
+    /// Quality for a snapshot, on the same scale as the thumbnail. Better, because a snapshot is
+    /// a document someone opens and is sometimes the only surviving record of what happened.
+    /// A lossless format belongs here if snapshots ever have to be evidence-grade.
+    /// </summary>
+    [Range(1, 31)]
+    public int SnapshotQuality { get; init; } = 2;
+
 }

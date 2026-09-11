@@ -36,6 +36,33 @@ public sealed class DocumentServiceTests
         Assert.True(_repository.Documents.ContainsKey(document.Id));
     }
 
+    /// <summary>
+    /// A snapshot knows which live stream it came from and when it was captured, and a recording
+    /// knows whether it was truncated. No media probe can work any of that out, so the uploader
+    /// carries it and the document keeps it.
+    /// </summary>
+    [Fact]
+    public async Task Upload_keeps_what_the_uploader_knew_that_a_probe_could_not()
+    {
+        var document = await CreateService().UploadAsync(
+            "camera1-20260101-120000.jpg",
+            Content(),
+            "image/jpeg",
+            CancellationToken.None,
+            new Dictionary<string, string>
+            {
+                ["Live stream"] = "live/camera1",
+                ["Captured"] = "2026-01-01 12:00:00Z",
+            });
+
+        Assert.Equal("live/camera1", document.Metadata["Live stream"]);
+        Assert.Equal("2026-01-01 12:00:00Z", document.Metadata["Captured"]);
+    }
+
+    [Fact]
+    public async Task Upload_without_metadata_carries_none()
+        => Assert.Empty((await CreateService().UploadAsync("report.pdf", Content(), null)).Metadata);
+
     [Fact]
     public async Task Upload_strips_client_supplied_paths_from_the_filename()
     {

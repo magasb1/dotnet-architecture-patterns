@@ -2,9 +2,6 @@
 
 The domain language of this repository. Terms here are used precisely, in code and in conversation.
 
-Live streaming is the part currently being redesigned. The design in progress is charted at
-`.scratch/server-side-ingest/map.md`; terms settle here as its tickets resolve.
-
 ## Live streaming
 
 **Stream.** A named live feed. The name is the identity, not an incidental label: a feed that drops
@@ -54,11 +51,21 @@ live.
 deliberately rolled back. It never accumulates delay.
 
 **Recording.** A durable capture of a stream, taken because something asked, continuing whether or
-not any client is connected, and becoming a document when it ends. Not a scrub timeline. Every
+not any client is connected. It is written in **segments** of a few minutes, each stored as it
+completes so that no pod ever holds the whole thing, and read back as one document: one name, one
+size, one download, seekable end to end. The segmenting is the recorder's business and nobody
+else's. Not a scrub timeline. Every
 recording begins in the buffer, so it starts before the moment it was requested. One runs at a time
 per stream; a trigger arriving while one is running extends it rather than starting another. A
 recording with a stop time set at the start is what would otherwise be called a clip, and is not a
 separate thing.
+
+**Part.** The unit a recording is stored in: a few minutes, muxed to a local file and uploaded as an
+ordinary object as it completes, so that no pod ever holds a six hour recording and losing one costs
+at most the part in progress. Not a **segment**: a segment is the buffer's unit and the sender's to
+decide, a part is ours and is minutes long, and a part holds many segments. Parts are joined on the
+way out, so a document made of them has one name, one size, one download and seeks end to end. Where
+the boundaries fell is the recorder's business and nobody else's.
 
 **Pre-roll.** The stretch of buffered stream a recording reaches back for, so an event already under
 way when it was noticed is still caught. A floor rather than an exact figure, since a recording can
@@ -75,12 +82,15 @@ while a stream is interrupted, refused once it is gone.
 **Ingest port.** Where encoders push. One address, never changing, any replica behind it. Reaching it
 lets you push a stream and nothing else.
 
-**Consumption port.** Where viewers pull live streams, as MPEG-TS over HTTP. Live only: finished
-recordings and snapshots are documents and stay on the API. Reaching it lets you watch and nothing
-else.
+**Consumption port.** Where viewers pull live streams, over SRT, symmetric with ingest: a player
+calls it and names the stream it wants in the streamid, exactly as an encoder names the stream it
+is sending. Live only, since finished recordings and snapshots are documents and stay on the API.
+Reaching it lets you watch and nothing else.
 
 **Owner.** The replica holding a stream's connection. Only the owner has the bytes, so requests
-reaching another replica are forwarded to it.
+reaching another replica are forwarded to it, and a viewer that landed elsewhere is relayed from
+it. A viewer's own connection is held open across a change of owner, so what a moving stream costs
+somebody watching is the gap in the feed rather than a reconnect.
 
 **Claim.** How a replica becomes the owner of a name, taken on a distributed lock and renewed by the
 heartbeat. Names are one namespace shared by automatic and manual streams. A contested name goes to

@@ -67,6 +67,9 @@ internal sealed class DocumentRecord
     /// <summary>Media metadata is free-form, so it is stored as JSON rather than as columns.</summary>
     public string? MetadataJson { get; set; }
 
+    /// <summary>The pieces of a document written a piece at a time, in order. Empty for the rest.</summary>
+    public string? PartsJson { get; set; }
+
     public static DocumentRecord FromDomain(Document document) => new()
     {
         Id = document.Id,
@@ -77,6 +80,7 @@ internal sealed class DocumentRecord
         CreatedAt = document.CreatedAt.ToString("O"),
         ThumbnailKey = document.ThumbnailKey,
         MetadataJson = DocumentMetadata.Serialize(document.Metadata),
+        PartsJson = DocumentMetadata.SerializeParts(document.Parts),
     };
 
     public Document ToDomain() => new()
@@ -89,5 +93,6 @@ internal sealed class DocumentRecord
         CreatedAt = DateTimeOffset.Parse(CreatedAt, null, System.Globalization.DateTimeStyles.RoundtripKind),
         ThumbnailKey = ThumbnailKey,
         Metadata = DocumentMetadata.Deserialize(MetadataJson),
+        Parts = DocumentMetadata.DeserializeParts(PartsJson),
     };
 }

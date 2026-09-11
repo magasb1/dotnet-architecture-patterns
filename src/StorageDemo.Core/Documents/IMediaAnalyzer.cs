@@ -20,4 +20,17 @@ public interface IMediaAnalyzer
         string fileName,
         string? contentType,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The last picture in the media, at source resolution, or null when it holds none.
+    ///
+    /// Deliberately not the same question as the thumbnail above. That one is the poster frame,
+    /// a fixed number of seconds in, which is what a stored file wants. This one is "the picture
+    /// now", which is what a live preview and a snapshot want. One verb answering both is how a
+    /// live preview came to serve a fixed frame while everything reported success.
+    /// </summary>
+    Task<byte[]?> LatestFrameAsync(
+        Stream content,
+        string fileName,
+        CancellationToken cancellationToken = default);
 }

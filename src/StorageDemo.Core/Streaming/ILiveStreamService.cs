@@ -1,100 +1,93 @@
 namespace StorageDemo.Core.Streaming;
 
-public enum LiveDirection
-{
-    /// <summary>Into the service: a sender pushes a stream, the service records it as a document.</summary>
-    Ingest,
-
-    /// <summary>Out of the service: a stored document is multiplexed to a destination.</summary>
-    Egress,
-}
-
-public enum LiveSessionState
-{
-    /// <summary>Listening, with nothing arriving yet.</summary>
-    Waiting,
-    Active,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-/// <param name="DocumentId">
-/// For ingest, the document the recording became, once the stream ended. For egress, the document
-/// being sent.
-/// </param>
-/// <param name="Owner">
-/// The replica holding the socket. Every other replica needs this to route a stop or a playback
-/// request to the one place that can serve it.
-/// </param>
-/// <param name="Heartbeat">
-/// Last time the owner said it was still alive. A pod that dies holding a socket cannot report its
-/// own death, so a stale heartbeat is how the rest of the cluster finds out.
-/// </param>
-/// <param name="StopRequested">
-/// Set by any replica; acted on by the owner. Stopping is a request rather than a command because
-/// only the owner can actually close the socket.
-/// </param>
-/// <param name="PlaybackUrl">Where a viewer can pull this stream while it is running.</param>
-public sealed record LiveSession(
-    Guid Id,
-    string Name,
-    LiveDirection Direction,
-    string Url,
-    LiveSessionState State,
-    DateTimeOffset StartedAt,
-    DateTimeOffset? EndedAt,
-    long Packets,
-    long Bytes,
-    Guid? DocumentId,
-    string? Error,
-    string Owner = "",
-    DateTimeOffset? Heartbeat = null,
-    bool StopRequested = false,
-    bool HasThumbnail = false,
-    string? PlaybackUrl = null)
-{
-    /// <summary>Nothing more will happen to a session in one of these states.</summary>
-    public bool IsFinished => State is LiveSessionState.Completed
-        or LiveSessionState.Failed
-        or LiveSessionState.Cancelled;
-}
+/// <param name="Preroll">How far back the caller asked to start, in seconds. Zero means live.</param>
+public sealed record ViewerRequest(string Name, double Preroll);
 
 /// <summary>
-/// Live streaming in and out of the service, over whatever transports the loaded FFmpeg carries.
+/// Live streaming, as everything outside the pipeline sees it.
 ///
-/// A session owns a socket, so it belongs to the process that started it. That is why sessions are
-/// not shared between replicas the way documents are: there is nothing useful another pod could do
-/// with a session whose socket it does not hold.
+/// Every call names a stream rather than an identifier, because the registry is keyed by name and
+/// no identifier survives a reconnect. Only the replica that owns a stream can serve the calls
+/// that need its bytes; the rest are answered from the shared registry by any replica.
 /// </summary>
 public interface ILiveStreamService
 {
-    /// <summary>Transport schemes the loaded libraries can actually use, such as udp or srt.</summary>
+    /// <summary>This replica's name, as it records itself when it claims a stream.</summary>
+    string Owner { get; }
+
+    /// <summary>Transport schemes the loaded libraries can carry, such as udp or srt.</summary>
     IReadOnlyList<string> Transports { get; }
 
-    /// <summary>Every session in the cluster, not only this replica's.</summary>
-    Task<IReadOnlyList<LiveSession>> SessionsAsync(CancellationToken cancellationToken = default);
+    /// <summary>Every stream on air anywhere, not only this replica's.</summary>
+    Task<IReadOnlyList<LiveStream>> StreamsAsync(CancellationToken cancellationToken = default);
 
-    Task<LiveSession?> GetAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    Task<LiveStream?> GetAsync(string name, CancellationToken cancellationToken = default);
 
-    /// <param name="url">Where to listen, for example udp://0.0.0.0:9000 or srt://0.0.0.0:9000.</param>
-    Task<LiveSession> StartIngestAsync(string name, string url, CancellationToken cancellationToken = default);
-
-    /// <param name="url">Where to send, for example udp://receiver:9000.</param>
-    Task<LiveSession> StartEgressAsync(Guid documentId, string url, CancellationToken cancellationToken = default);
+    /// <summary>True when this replica holds the connection, so it can serve the bytes.</summary>
+    bool Owns(string name);
 
     /// <summary>
-    /// Asks the owner to stop. False when no such session exists anywhere. True does not mean it
-    /// has stopped yet, only that the owner has been told.
+    /// The current preview, when this replica owns the stream and has one. The picture now, not a
+    /// poster frame: it is what the harvester last decoded.
     /// </summary>
-    Task<bool> StopAsync(Guid sessionId, CancellationToken cancellationToken = default);
-
-    /// <summary>The latest preview frame, when this replica owns the session and has one.</summary>
-    byte[]? Thumbnail(Guid sessionId);
+    byte[]? Preview(string name);
 
     /// <summary>
-    /// Streams the live recording to a viewer. Only the owner can serve this, because only the
-    /// owner has the bytes; another replica proxies to it.
+    /// Creates a stream by request, for a protocol that cannot name itself, and opens its input.
+    /// It sits in the registry waiting for bytes and is indistinguishable from an automatic stream
+    /// once a demultiplexer exists.
     /// </summary>
-    Task StreamAsync(Guid sessionId, Stream destination, CancellationToken cancellationToken = default);
+    Task<LiveStream> CreateManualAsync(string name, string url, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Takes a picture of the stream now and stores it as a document.
+    ///
+    /// A fresh decode of the newest part of the buffer, at full source resolution, rather than the
+    /// preview, which is both smaller and up to a keyframe interval older. Served while a stream is
+    /// interrupted, refused once it is gone.
+    /// </summary>
+    Task<Guid?> SnapshotAsync(string name, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Starts a recording, or extends the one already running.
+    ///
+    /// Returns immediately with the recording's identity and state; the recording then has no
+    /// further relationship with whoever asked for it. Closing the client, losing the client, or
+    /// never having had one changes nothing. A person pressing record and a detector firing are
+    /// the same caller on this one path.
+    /// </summary>
+    /// <param name="duration">
+    /// When given, the stop time is fixed at the start, which is what would otherwise be called a
+    /// clip. Two operations for one thing would drift apart.
+    /// </param>
+    Task<RecordingStatus?> RecordAsync(
+        string name,
+        TimeSpan? duration,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Ends the recording now. It becomes a document, as it would have anyway.</summary>
+    Task<bool> StopRecordingAsync(string name, CancellationToken cancellationToken = default);
+
+    /// <summary>Drops the connection and ends the stream. Any recording closes as a document.</summary>
+    Task<bool> StopAsync(string name, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Writes the stream to a viewer as MPEG-TS until they leave or it ends.
+    ///
+    /// During an interruption the connection is held open and nothing is sent. The client already
+    /// knows the stream is interrupted from its state, and closing would push every viewer into
+    /// reconnecting at the exact moment a reconnect storm is under way on the ingest side.
+    /// </summary>
+    Task WriteToViewerAsync(
+        ViewerRequest request,
+        Stream destination,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// How far back a viewer asking for this much would actually start, in seconds. Answered
+    /// before anything is written, because the response says what it gave: a caller asking for
+    /// twenty seconds and receiving twenty-six is normal rather than an error, since a stream can
+    /// only be joined at a position a decoder can start from.
+    /// </summary>
+    double ResolvePreroll(string name, double seconds);
 }

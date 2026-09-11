@@ -88,6 +88,15 @@
             <Button x:Name="SaveAsButton" Click="OnSaveAs" Padding="10,3">Save as</Button>
             <Separator />
             <Button x:Name="DeleteButton" Click="OnDelete" Padding="10,3">Delete</Button>
+            <Separator />
+            <!--
+                Both act on the server and keep running without this client. Closing the window
+                does not stop a recording, which is the whole reason they are server-side.
+            -->
+            <Button x:Name="RecordButton" Click="OnRecord" Padding="10,3"
+                    ToolTip="Record this stream. It starts a few seconds before now and keeps running if this window closes.">Record</Button>
+            <Button x:Name="SnapshotButton" Click="OnSnapshot" Padding="10,3"
+                    ToolTip="Store a full-resolution picture of this stream as a document.">Snapshot</Button>
         </ToolBar>
 
         <StatusBar DockPanel.Dock="Bottom">

@@ -49,12 +49,20 @@ public static class DependencyInjection
 
         services.AddSingleton<IMediaAnalyzer, LibavMediaAnalyzer>();
 
-        // Live streaming: MPEG-TS over whatever transport the loaded libraries carry. Off unless
-        // configured, because it opens sockets on a caller's instruction.
+        // Live streaming: SRT in on its own port, MPEG-TS out on another. Off unless configured,
+        // because switching it on opens a port anybody who can reach it may push a stream into.
         Bind<LiveOptions>(services, configuration, LiveOptions.SectionName);
-        services.AddSingleton<LibavRemuxer>();
-        services.AddSingleton<LiveStreamManager>();
-        services.AddSingleton<ILiveStreamService>(sp => sp.GetRequiredService<LiveStreamManager>());
+        services.AddSingleton<LiveListeners>();
+        services.AddSingleton<SrtAcceptLoop>();
+        services.AddSingleton<StreamDemuxer>();
+        services.AddSingleton<LiveStreamCoordinator>();
+        services.AddSingleton<ILiveStreamService>(sp => sp.GetRequiredService<LiveStreamCoordinator>());
+        services.AddHostedService<LiveIngestService>();
+        services.AddHostedService<LiveConsumptionService>();
+
+        // Readiness for this service is "am I accepting media", not only "can I reach a database".
+        // A replica that cannot serve an encoder belongs out of the Service until it can.
+        services.AddHealthChecks().AddCheck<LiveIngestHealthCheck>("live", tags: ["ready"]);
         services.AddHostedService<AnalysisWorker>();
         services.AddScoped<IDocumentService, DocumentService>();
 
@@ -64,7 +72,10 @@ public static class DependencyInjection
         AddFileStorage(services, configuration, storageProvider);
         AddDatabase(services, configuration, databaseProvider);
 
-        services.AddSingleton(new ProviderInfo(storageProvider, databaseProvider));
+        services.AddSingleton(new ProviderInfo(
+            storageProvider,
+            databaseProvider,
+            configuration["Documents:PublicBaseUrl"]));
 
         // Watches the store for changes made outside this application: on notification from the
         // filesystem watcher or the S3 endpoint, and on an interval as the backstop.
@@ -106,7 +117,7 @@ public static class DependencyInjection
                 services.AddSingleton<IChangeFeed, InMemoryChangeFeed>();
                 services.AddSingleton<IAnalysisQueue, InMemoryAnalysisQueue>();
                 services.AddSingleton<IDistributedLock, InMemoryLock>();
-                services.AddSingleton<ILiveSessionRegistry, InMemoryLiveSessionRegistry>();
+                services.AddSingleton<ILiveStreamRegistry, InMemoryLiveStreamRegistry>();
                 break;
 
             case "redis":
@@ -131,7 +142,7 @@ public static class DependencyInjection
                 services.AddSingleton<IChangeFeed, RedisChangeFeed>();
                 services.AddSingleton<IAnalysisQueue, RedisAnalysisQueue>();
                 services.AddSingleton<IDistributedLock, RedisLock>();
-                services.AddSingleton<ILiveSessionRegistry, RedisLiveSessionRegistry>();
+                services.AddSingleton<ILiveStreamRegistry, RedisLiveStreamRegistry>();
                 services.AddHealthChecks().AddCheck<RedisHealthCheck>("messaging", tags: ["ready"]);
                 break;
 
@@ -242,4 +253,10 @@ public static class DependencyInjection
 }
 
 /// <summary>Which providers are active, for logging and the /health payload.</summary>
-public sealed record ProviderInfo(string Storage, string Database);
+/// <param name="ContentBaseUrl">
+/// Where this instance's REST surface can be reached, when it has been told. A client uses it to
+/// play a long recording by streaming and seeking rather than downloading hours of it first, which
+/// it cannot work out for itself: it holds a gRPC connection, and the two are on different ports.
+/// Empty means the client falls back to downloading, which is right for ordinary files.
+/// </param>
+public sealed record ProviderInfo(string Storage, string Database, string? ContentBaseUrl = null);

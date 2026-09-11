@@ -1,62 +1,117 @@
-using Microsoft.Extensions.Options;
-using StorageDemo.Infrastructure.Streaming;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Mvc;
+using StorageDemo.Core.Streaming;
 
 namespace StorageDemo.Api.Controllers;
 
 /// <summary>
-/// Fetches live bytes from the replica that holds them.
+/// Reaches the replica that owns a stream.
 ///
-/// This is what lets a viewer keep talking to one address while the stream itself only exists on
-/// one pod. The caller hits whichever replica the load balancer picked; that replica looks up the
-/// owner in the shared registry and reads through to it over the cluster network.
+/// Only the owner has the bytes and only the owner can act on a stream, so a call landing anywhere
+/// else is routed rather than refused. This is what lets a caller keep talking to one address
+/// while the stream itself exists on exactly one pod.
 ///
-/// Only inbound media needs per-pod addressing. Playback does not, because of this.
+/// The address is the one the owner recorded when it claimed the name, not one derived from a
+/// predictable pod name. That is what allows a Deployment instead of a StatefulSet, and it deletes
+/// the headless Service and the per-pod ingest Services with it.
 /// </summary>
 public sealed class LivePeerProxy(
     IHttpClientFactory clients,
-    LiveStreamManager manager,
-    IOptions<LiveOptions> options,
+    ILiveStreamService live,
     ILogger<LivePeerProxy> logger)
 {
-    private readonly LiveOptions _options = options.Value;
+    public string Owner => live.Owner;
 
-    public string Owner => manager.Owner;
-
-    /// <summary>Null when the peer cannot be addressed or has nothing to give.</summary>
-    public async Task<Stream?> OpenAsync(string owner, string path, CancellationToken cancellationToken)
+    /// <summary>Reads a stream of bytes from the owner. Null when it cannot be reached.</summary>
+    public async Task<Stream?> OpenAsync(LiveStream stream, string path, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_options.PeerAddressTemplate))
+        if (Address(stream, path) is not { } address)
         {
-            logger.LogWarning(
-                "Live session is owned by {Owner}, but Live:PeerAddressTemplate is not set, so it "
-                + "cannot be reached from here",
-                owner);
-
             return null;
         }
 
-        var address = $"{_options.PeerAddressTemplate.Replace("{node}", owner).TrimEnd('/')}/{path}";
-
         try
         {
-            var client = clients.CreateClient(nameof(LivePeerProxy));
-
-            var response = await client.GetAsync(
+            var response = await clients.CreateClient(nameof(LivePeerProxy)).GetAsync(
                 address,
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken);
 
-            if (!response.IsSuccessStatusCode)
-            {
-                return null;
-            }
-
-            return await response.Content.ReadAsStreamAsync(cancellationToken);
+            return response.IsSuccessStatusCode
+                ? await response.Content.ReadAsStreamAsync(cancellationToken)
+                : null;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            logger.LogWarning(ex, "Could not read a live stream from {Address}", address);
+            logger.LogWarning(ex, "Could not read from {Address}", address);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Repeats a control call against the owner and hands back its answer. Null when the owner
+    /// cannot be reached, which the caller reports as the stream not being found: an owner nobody
+    /// can talk to is indistinguishable from a stream that is gone.
+    /// </summary>
+    public async Task<IActionResult?> RelayAsync(
+        LiveStream stream,
+        HttpMethod method,
+        string path,
+        string? token,
+        object? body,
+        CancellationToken cancellationToken)
+    {
+        if (Address(stream, path) is not { } address)
+        {
+            return null;
+        }
+
+        using var request = new HttpRequestMessage(method, address);
+
+        if (token is { Length: > 0 })
+        {
+            request.Headers.Add("X-Storage-Token", token);
+        }
+
+        if (body is not null)
+        {
+            request.Content = JsonContent.Create(body);
+        }
+
+        try
+        {
+            using var response = await clients.CreateClient(nameof(LivePeerProxy))
+                .SendAsync(request, cancellationToken);
+
+            var content = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            return new ContentResult
+            {
+                StatusCode = (int)response.StatusCode,
+                Content = content,
+                ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/json",
+            };
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            logger.LogWarning(ex, "Could not reach {Address}", address);
+            return null;
+        }
+    }
+
+    private string? Address(LiveStream stream, string path)
+    {
+        if (string.IsNullOrWhiteSpace(stream.OwnerAddress))
+        {
+            logger.LogWarning(
+                "'{Name}' is owned by {Owner}, which recorded no address, so it cannot be reached "
+                + "from here. Set Live:PeerBaseUrl on every replica.",
+                stream.Name,
+                stream.Owner);
+
+            return null;
+        }
+
+        return $"{stream.OwnerAddress.TrimEnd('/')}/{path}";
     }
 }

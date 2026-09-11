@@ -143,7 +143,7 @@ public sealed class DocumentsApi : IDisposable
         return buffer.Length == 0 ? null : buffer.ToArray();
     }
 
-    /// <summary>Live sessions running anywhere in the cluster.</summary>
+    /// <summary>Live streams on air anywhere in the cluster.</summary>
     public async Task<LiveListResponse> ListLiveAsync(CancellationToken cancellationToken)
     {
         try
@@ -157,11 +157,11 @@ public sealed class DocumentsApi : IDisposable
         }
     }
 
-    /// <summary>Null before the first frame of a stream has been decoded.</summary>
-    public async Task<byte[]?> DownloadLivePreviewAsync(string sessionId, CancellationToken cancellationToken)
+    /// <summary>Null before the first picture of a stream has been decoded.</summary>
+    public async Task<byte[]?> DownloadLivePreviewAsync(string name, CancellationToken cancellationToken)
     {
         using var call = _client.DownloadLivePreview(
-            new LiveSessionId { Id = sessionId },
+            new LiveStreamName { Name = name },
             cancellationToken: cancellationToken);
 
         using var buffer = new MemoryStream();
@@ -179,6 +179,57 @@ public sealed class DocumentsApi : IDisposable
         }
 
         return buffer.Length == 0 ? null : buffer.ToArray();
+    }
+
+    /// <summary>Takes a picture of a stream now. Null when the server would not or could not.</summary>
+    public async Task<string?> SnapshotLiveAsync(string name, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var document = await _client.SnapshotLiveAsync(
+                new LiveStreamName { Name = name },
+                cancellationToken: cancellationToken);
+
+            return document.Id;
+        }
+        catch (RpcException ex) when (ex.StatusCode is StatusCode.NotFound or StatusCode.Unimplemented)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Starts a recording, or extends the one already running. It continues whether or not this
+    /// client stays connected, which is the point: closing the window does not stop it.
+    /// </summary>
+    public async Task<LiveRecordingMessage?> RecordLiveAsync(
+        string name,
+        double seconds,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _client.RecordLiveAsync(
+                new RecordLiveRequest { Name = name, Seconds = seconds },
+                cancellationToken: cancellationToken);
+        }
+        catch (RpcException ex) when (ex.StatusCode is StatusCode.NotFound or StatusCode.Unimplemented)
+        {
+            return null;
+        }
+    }
+
+    public async Task StopLiveRecordingAsync(string name, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _client.StopLiveRecordingAsync(
+                new LiveStreamName { Name = name },
+                cancellationToken: cancellationToken);
+        }
+        catch (RpcException ex) when (ex.StatusCode is StatusCode.NotFound or StatusCode.Unimplemented)
+        {
+        }
     }
 
     public async Task DeleteAsync(string id, CancellationToken cancellationToken)

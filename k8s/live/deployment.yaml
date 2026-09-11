@@ -1,0 +1,225 @@
+# Live streaming: the two media Services, and the Deployment again with their ports on it.
+#
+#   kubectl apply -f k8s/           # first, for everything that is not live streaming
+#   kubectl apply -f k8s/live/      # then this, which re-applies the Deployment with media ports
+#
+# Applied in that order, and idempotent in it: this file's Deployment is the one in
+# k8s/deployment.yaml with the media ports, the addresses a replica records when it claims a name,
+# and room on /tmp for a recording. Apply only k8s/ for a document service with no live streaming.
+#
+# What used to be here was a StatefulSet with a headless Service and one ingest Service per pod.
+# All of that existed so a sender could be pointed at a particular pod, and nothing points at a
+# particular pod any more: a replica claims a stream's name when the connection arrives and records
+# its own address, so a replica needing to reach another looks the address up rather than deriving
+# it from a predictable name. The StatefulSet, the headless Service and the per-pod Services all
+# went with that one decision.
+# Two Services, so each can be exposed to a different network with its own type, annotations and
+# source ranges. That separation is the entire reason for the split:
+#
+#   ingest      -> push a stream, and nothing else
+#   consumption -> watch live streams, and nothing else
+#   API         -> everything else
+#
+# Two things are easily conflated here and only one is needed. Per-flow stickiness is required,
+# because an SRT connection is a UDP flow whose packets must all reach the same pod; that is
+# ordinary connection tracking and every load balancer in play does it without being configured to.
+# Stickiness across reconnects is not required, because the newest connection wins the name and the
+# previous owner stands down. No affinity configuration, no session tables, nothing to get wrong.
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-demo-ingest
+  namespace: storage-demo
+spec:
+  # One address for every encoder, forever. Which pod answers is the load balancer's business.
+  type: LoadBalancer
+  # Keeps the sender's address. A diagnostic argument rather than a security one, since the chosen
+  # authentication candidate is an SRT passphrase, but an encoder nobody can identify in a log is
+  # painful exactly when it matters. The cost is that only nodes running a pod receive traffic.
+  externalTrafficPolicy: Local
+  selector:
+    app: storage-demo
+  ports:
+    - name: ingest
+      port: 9000
+      targetPort: ingest
+      protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-demo-consumption
+  namespace: storage-demo
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: storage-demo
+  ports:
+    - name: consumption
+      port: 9010
+      targetPort: consumption
+      protocol: UDP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage-demo
+  namespace: storage-demo
+spec:
+  # Streams spread across replicas because the load balancer spreads connections, and each replica
+  # owns some streams and holds everything for them. The useful autoscaling signal is therefore
+  # streams owned per replica rather than processor load: an idle stream still costs a buffer.
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      # Never take a replica away before its replacement is serving. An encoder whose pod goes
+      # reconnects within about a second when there is somewhere to land, and waits out its own
+      # peer timeout when there is not. Measured in docs/replica-failover.md.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: storage-demo
+  template:
+    metadata:
+      labels:
+        app: storage-demo
+    spec:
+      serviceAccountName: storage-demo
+      # A pod being replaced has to let its encoders find somewhere else, and the fastest way to do
+      # that is to stop holding their connections. Long enough for a recording in progress to
+      # finish uploading, short enough that a rolling update is not a long outage.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 64198
+        fsGroup: 64198
+      containers:
+        - name: api
+          image: storage-demo:latest
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 5080
+            # Both media ports are SRT and therefore UDP. Ingest is where encoders push;
+            # consumption is where players pull.
+            - name: ingest
+              containerPort: 9000
+              protocol: UDP
+            - name: consumption
+              containerPort: 9010
+              protocol: UDP
+          envFrom:
+            - configMapRef:
+                name: storage-demo-config
+            - secretRef:
+                name: storage-demo-secrets
+          env:
+            - name: Live__Enabled
+              value: "true"
+
+            # Names this replica in the registry, so an operator can tell where a stream actually
+            # is, and so a displaced owner can recognise that it has been displaced.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+            # The address this replica records when it claims a name: the pod's own IP rather than
+            # one derived from an ordinal, which is what allows a Deployment at all.
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+
+            - name: Live__PeerBaseUrl
+              value: http://$(POD_IP):8080
+
+            # Media never travels over the API port, on either hop. A viewer that lands on a
+            # replica which does not own its stream is relayed through this address.
+            - name: Live__PeerConsumptionBaseUrl
+              value: srt://$(POD_IP):9010
+
+            # What a player is told to connect to: the consumption Service, as reachable from
+            # wherever viewers are. Replace the host with its external address.
+            - name: Live__PublicConsumptionUrl
+              value: srt://storage-demo-consumption.storage-demo.svc.cluster.local:9010
+          lifecycle:
+            preStop:
+              # Kubernetes removes a pod from its Services and sends SIGTERM at the same moment, so
+              # without this the process can close its sockets before kube-proxy has stopped
+              # routing to it. An encoder reconnecting inside that window lands back on the pod
+              # that is going away, and pays a second round trip to find that out.
+              sleep:
+                seconds: 5
+          startupProbe:
+            # The boot-time self-test opens a loopback listener and calls it, so a pod is a few
+            # seconds old before it can serve anything. Kept apart from readiness so a slow start
+            # is not mistaken for a failure, and so liveness does not begin counting until the
+            # process is actually up.
+            #
+            # Liveness, not readiness: readiness asks storage and the database whether they are
+            # reachable, and a pod that never finishes starting because S3 is slow is killed and
+            # restarted, which makes a slow dependency look like a broken build. Readiness still
+            # keeps such a pod out of the Service; it just no longer ends its life.
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 2
+            failureThreshold: 45
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 20
+          readinessProbe:
+            # Includes whether the two media ports are accepting, not only whether storage and the
+            # database are reachable. For a service whose purpose is being live, a replica that is
+            # reachable but not accepting is worse than one that is plainly absent: the Service
+            # keeps sending encoders to it and they keep failing.
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            # Two failures rather than three, so a replica that stops accepting leaves the Service
+            # in about ten seconds and encoders are pushed somewhere that works.
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 200m
+              # Bounded by the per-stream buffer ceiling times the streams this replica owns, which
+              # is what makes this a calculation rather than a guess.
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # A recording is written here and uploaded when it ends, so this needs room for the maximum
+        # recording duration times the concurrent recordings this replica is expected to carry.
+        # A recording is bounded by pod disk and dies with its pod; that is an accepted limit.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 8Gi
+---
+# A node drain must not take every replica at once, for the same reason a rolling update must not:
+# an encoder reconnects in about a second when there is a replica to land on, and otherwise waits
+# out its own peer timeout with nowhere to go.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: storage-demo
+  namespace: storage-demo
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: storage-demo
