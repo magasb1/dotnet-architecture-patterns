@@ -23,6 +23,26 @@ public sealed class LiveOptions
     public int IngestPort { get; init; } = 9000;
 
     /// <summary>
+    /// How many consecutive ports ingest binds, starting at <see cref="IngestPort"/>. One by
+    /// default, which is what this service has always done.
+    ///
+    /// It exists because libsrt runs one receive worker thread per bound UDP port per process, and
+    /// every socket accepted on a port shares its listener's. That single thread is what a replica
+    /// runs out of first: measured here at roughly sixty camera-rate streams, well before processor
+    /// or memory bind. Binding four ports gives four of those threads and a replica that holds
+    /// about four times as much, at the cost of a deployment that has to publish the whole range
+    /// and senders that have to be spread across it - no single port is any bigger than it was.
+    ///
+    /// A count rather than a list, because a Service publishing a contiguous range is one manifest
+    /// entry and nobody has asked for holes in it.
+    ///
+    /// Fewer, larger replicas is also a worse failure: when one dies it takes four times as many
+    /// streams into a reconnect with it.
+    /// </summary>
+    [Range(1, 16)]
+    public int IngestPortCount { get; init; } = 1;
+
+    /// <summary>
     /// Where viewers pull live streams, over SRT, symmetric with ingest. Separate from ingest so a
     /// deployment can expose one to the internet and keep the other on a private network, each
     /// with its own rules.

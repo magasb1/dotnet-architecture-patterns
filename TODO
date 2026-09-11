@@ -33,8 +33,10 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
 - [x] Raise k8s/live/deployment.yaml's resources. Was 200m/512Mi with a 1Gi limit, which OOM-kills
       at about 20 camera-rate streams; now 2 cores and 3Gi with a 4Gi limit, and the arithmetic is
       in the manifest
-- [ ] Multi-port ingest: bind several SRT ingest ports so a pod gets several libsrt receive threads
-      instead of one. If it holds, a thousand streams needs 4-5 pods rather than 17
+- [x] Multi-port ingest via Live__IngestPortCount. The threads do multiply, but the gain is about
+      2x rather than 4x and costs a third more CPU and memory per stream: 17 pods becomes 8-9
+- [ ] Re-measure multi-port on a real node. The load generator ran out of machine before the
+      service did, so the ratio is "about two" rather than a number
 - [ ] Measure whether pooling StreamDemuxer.Pump's per-packet byte[] moves the per-stream thread
       cost. Two threads per stream at ~1.7% of a core is what actually dominates, not the preview
 - [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and

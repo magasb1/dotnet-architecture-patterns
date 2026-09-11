@@ -64,12 +64,24 @@ public sealed class LiveIngestService(
             logger,
             listeners);
 
-        var listening = Task.Factory.StartNew(
-            () => listener.Run(_options.IngestPort, stoppingToken),
-            TaskCreationOptions.LongRunning);
+        // One thread per port and one libsrt receive worker behind each, which is the only way this
+        // replica gets more than one: the worker belongs to the multiplexer, and there is one of
+        // those per bound UDP port per process. The listener holds nothing between calls, so the
+        // same instance serves every port.
+        var ports = Enumerable.Range(_options.IngestPort, _options.IngestPortCount).ToArray();
+
+        listeners.Expect(StreamIntent.Publish, ports.Length);
+
+        // Materialised, not deferred: a lazy Select here would start nothing until the heartbeat
+        // ended, which is to say at shutdown.
+        var listening = ports
+            .Select(port => Task.Factory.StartNew(
+                () => listener.Run(port, stoppingToken),
+                TaskCreationOptions.LongRunning))
+            .ToArray();
 
         await HeartbeatAsync(stoppingToken);
-        await listening;
+        await Task.WhenAll(listening);
     }
 
     /// <summary>

@@ -207,6 +207,14 @@ spec:
           #            + 0.5                              (the receive thread)
           #                                               (the preview, until Phase 8 moves it out)
           #            ~= 2.3 cores
+          #
+          # Both numbers assume one ingest port, which is the default. Live__IngestPortCount binds
+          # more, giving libsrt a receive thread each and roughly doubling what a pod holds at two
+          # to four ports. It is not free: measured at about a third more processor and memory per
+          # stream, so four ports at 125 streams wanted 6 cores and 6.5Gi rather than three of
+          # each. Raise both here before raising that there, and re-measure on the real node -
+          # .scratch/scale-to-1000/multi-port.md ran out of load generator before it ran out of
+          # service.
           resources:
             requests:
               cpu: "2"

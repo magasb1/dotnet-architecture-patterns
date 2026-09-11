@@ -61,6 +61,11 @@ public sealed class LiveStreamTests : IAsyncLifetime
             builder.UseSetting("Live:Enabled", "true");
             builder.UseSetting("Live:Token", Token);
             builder.UseSetting("Live:IngestPort", _ingestPort.ToString());
+
+            // Two, so the whole suite runs against a replica bound to a range rather than a single
+            // port. Every test here still uses the first one; only the reconnect test below uses
+            // the second.
+            builder.UseSetting("Live:IngestPortCount", "2");
             builder.UseSetting("Live:ConsumptionPort", (_ingestPort + 5).ToString());
             builder.UseSetting("Live:PreviewIntervalSeconds", "1");
             builder.UseSetting("Live:RecordingDirectory", Path.Combine(_root, "recordings"));
@@ -505,6 +510,53 @@ public sealed class LiveStreamTests : IAsyncLifetime
         Assert.Single(listed!.Streams, stream => stream.Name == name);
     }
 
+    /// <summary>
+    /// The same reconnect, landing on a different port of the same replica.
+    ///
+    /// Ingest may bind a range of ports so that libsrt gives the replica more than one receive
+    /// worker thread, and a sender spread across that range has no reason to come back to the port
+    /// it left. The name has to be the identity for that to be safe, so this pins that a port is
+    /// carried nowhere: not into the claim, not into the entry, not into what a viewer sees.
+    /// </summary>
+    [Fact]
+    public async Task A_reconnect_on_another_ingest_port_resumes_the_same_stream()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
+
+        const string name = "camera-that-moves-port";
+
+        var first = Push(name);
+        var before = await WaitForStreamAsync(name, TimeSpan.FromSeconds(40));
+
+        Assert.NotNull(before);
+
+        Kill(first);
+
+        Assert.True(
+            await WaitAsync(
+                async () => await Get(name) is { State: LiveStreamState.Interrupted },
+                TimeSpan.FromSeconds(30)),
+            "the stream never became interrupted");
+
+        Push(name, _ingestPort + 1);
+
+        Assert.True(
+            await WaitAsync(
+                async () => await Get(name) is { State: LiveStreamState.Live } resumed
+                    && resumed.ConnectionId != before.ConnectionId,
+                TimeSpan.FromSeconds(60)),
+            "the second ingest port never accepted the returning sender");
+
+        var after = await Get(name);
+
+        Assert.NotNull(after);
+        Assert.Equal(before.StartedAt, after.StartedAt);
+
+        var listed = await _client.GetFromJsonAsync<LiveStatusResponse>("/api/live");
+        Assert.Single(listed!.Streams, stream => stream.Name == name);
+    }
+
     private async Task<DocumentResponse?> Get(Guid id)
     {
         var documents = await _client.GetFromJsonAsync<List<DocumentResponse>>("/api/documents");
@@ -634,10 +686,10 @@ public sealed class LiveStreamTests : IAsyncLifetime
     /// An encoder pushing at the ingest port with a name in its stream identifier, which is the
     /// whole setup: nothing is requested first.
     /// </summary>
-    private Process Push(string name)
+    private Process Push(string name, int? port = null)
     {
         var identifier = Uri.EscapeDataString($"#!::r={name},m=publish");
-        var target = $"srt://127.0.0.1:{_ingestPort}?mode=caller&streamid={identifier}";
+        var target = $"srt://127.0.0.1:{port ?? _ingestPort}?mode=caller&streamid={identifier}";
 
         var startInfo = new ProcessStartInfo(Ffmpeg.ExecutablePath)
         {

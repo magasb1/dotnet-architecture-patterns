@@ -441,6 +441,7 @@ reach it may push a stream into:
 Live__Enabled=true
 Live__Token=<secret>        # required in X-Storage-Token on every API call
 Live__IngestPort=9000
+Live__IngestPortCount=1     # how many consecutive ports ingest binds; see below before raising it
 Live__ConsumptionPort=9010
 Live__SrtLatencyMs=120      # SRT's buffering delay on both ports; 60 on a LAN, more on the internet
 Live__ProbeSeconds=1        # how long libav may spend working out what a camera is sending
@@ -450,6 +451,16 @@ Live__MaxRecordingMinutes=720     # the ceiling on one recording
 
 Documents__PublicBaseUrl=http://127.0.0.1:8081   # where a client streams a long recording from
 ```
+
+`IngestPortCount` binds that many consecutive ports from `IngestPort`, one by default. It exists
+because libsrt runs one receive worker thread per bound UDP port per process, and every socket
+accepted on a port shares its listener's thread: that single thread is what a replica runs out of
+first, well before processor or memory. Four ports measured about twice the streams per replica,
+not four times, and wanted about twice the CPU and memory to do it - the numbers and the method are
+in `.scratch/scale-to-1000/multi-port.md`. Raising it is only worth anything if the deployment
+publishes the whole range **and** encoders are spread across it, since no single port is any bigger
+than it was. The consumption port is unaffected. Nothing downstream sees a port: a stream is its
+name, and an encoder reconnecting on a different port of the same replica resumes the same stream.
 
 `ProbeSeconds` and `ProbeBytes` are dead time between a camera connecting and its stream being on
 air. libav's own defaults are five seconds and five megabytes; MPEG-TS repeats its tables every

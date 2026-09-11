@@ -106,15 +106,21 @@ receive timeout can be lengthened now that the close is proven to unblock a read
 2. **Decide the overload signal**, which Phase 4 cannot be trusted without. See Phase 4.
 3. **Raise the pod's memory limit**, which `baseline.md` shows OOM-kills at around 20 camera-rate
    streams against a plan that assumes 250. The cheapest fix on this list by a distance.
-4. **Attack the per-stream thread cost**, which `preview-cost.md` found is what actually dominates:
+4. **Re-measure multi-port ingest on a real node.** `Live__IngestPortCount` is built and binding
+   four ports does give libsrt four receive threads, evenly loaded. But the gain measured about
+   two rather than four, and it costs roughly a third more processor and memory per stream, so a
+   thousand camera-rate streams becomes eight or nine pods rather than seventeen. The load
+   generator ran out of machine before the service did, so that ratio wants redoing where the
+   senders are not competing with the receiver. See `multi-port.md`.
+5. **Attack the per-stream thread cost**, which `preview-cost.md` found is what actually dominates:
    about 1.7 percent of a core per stream across two threads, linear, and 2.3 cores at 150 streams.
    One of the two is ours. See "The per-stream cost" below.
-5. **Phase 8, the worker tier.** Still right, because detection has to decode every stream and that
+6. **Phase 8, the worker tier.** Still right, because detection has to decode every stream and that
    belongs on a GPU, but it is worth a fifth of the pod rather than the largest win, and it does not
    raise per-pod capacity. Benchmark RF-DETR on the target GPU before sizing anything.
-6. **Phase 3, the in-cluster hop**, which also deletes `AvioStream` and gives the worker tier the
+7. **Phase 3, the in-cluster hop**, which also deletes `AvioStream` and gives the worker tier the
    route it subscribes through.
-7. Then 4, 5 and 6 in order.
+8. Then 4, 5 and 6 in order.
 
 ### The per-stream cost
 
