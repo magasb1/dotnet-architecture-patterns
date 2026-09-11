@@ -38,6 +38,12 @@
     its rolling buffer: the buffer is held as segments one keyframe apart, so a long interval
     means a viewer joins, rolls back and starts a recording in coarse steps.
 
+    It is also the floor on how long a viewer waits to see a picture, whatever the SRT latency is
+    set to, because a decoder can only start at a keyframe. One second is the reason the default
+    is one second. It applies only while transcoding: a remultiplex copies the source's keyframes
+    across as they are, so with a camera emitting one every ten seconds that is the wait, and the
+    only ways out are the camera's own settings or -Transcode.
+
 .PARAMETER Loop
     Play a finite source over and over, so a short clip behaves like a camera that never stops.
 
@@ -165,14 +171,21 @@ function Get-FfmpegArguments {
     $arguments += @('-i', $Source)
 
     if ($Transcode) {
+        # Three flags for one keyframe interval, and all three are needed. -g asks for it,
+        # -keyint_min stops the encoder shortening it, and -sc_threshold 0 stops a scene change
+        # inserting a keyframe of its own: without that last one a source that cuts between shots
+        # has whatever interval its editor chose rather than the one asked for here.
+        $keyframeInterval = $KeyframeSeconds * 25
+
         $arguments += @(
             '-c:v', 'mpeg2video', '-b:v', '4000k',
-            '-g', "$($KeyframeSeconds * 25)",
+            '-g', "$keyframeInterval", '-keyint_min', "$keyframeInterval", '-sc_threshold', '0',
             '-c:a', 'mp2', '-b:a', '128k')
     }
     else {
         # A remultiplex: encoded frames are copied across untouched, which is what keeps this
-        # cheap enough to run several of at once.
+        # cheap enough to run several of at once. Keyframes come across as they are, so this path
+        # cannot answer for the interval; -KeyframeSeconds says what that costs.
         $arguments += @('-c', 'copy')
     }
 

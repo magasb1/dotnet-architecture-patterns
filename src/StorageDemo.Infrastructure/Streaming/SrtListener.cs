@@ -161,6 +161,13 @@ public sealed unsafe class SrtListener(
 
         Srt.SetInt32(listener, SRT_SOCKOPT.SRTO_RCVTIMEO, ReceiveTimeoutMilliseconds);
 
+        // SRTO_LATENCY rather than SRTO_RCVLATENCY, because it sets the peer half too and the two
+        // ports sit on opposite ends of the negotiation: ingest receives, consumption sends, and
+        // per direction the effective figure is the larger of the receiver's own latency and the
+        // sender's peer latency. Set here, with the other pre-connect options, because an accepted
+        // socket inherits what the listener had before srt_listen and nothing set after it.
+        Srt.SetInt32(listener, SRT_SOCKOPT.SRTO_LATENCY, options.SrtLatencyMs);
+
         // srt_bind wants the raw sockaddr, and a serialised endpoint is exactly that, laid out the
         // way the running platform lays it out.
         var address = new IPEndPoint(IPAddress.Parse(options.IngestAddress), port).Serialize();
@@ -284,7 +291,19 @@ public sealed unsafe class SrtListener(
 
         Srt.SetInt32(socket, SRT_SOCKOPT.SRTO_RCVTIMEO, ReceiveTimeoutMilliseconds);
 
-        logger.LogInformation("Accepted '{Name}' on the {Which} port", name, PortName);
+        // What the handshake settled on, not what was asked for: the larger of the two sides wins,
+        // so a caller that knows its link can raise this and an operator should be able to see that
+        // it did. Whichever half describes the receiver of this port's direction is the one that
+        // means anything - ingest receives, consumption sends to a receiver at the far end.
+        var negotiated = Srt.GetInt32(
+            socket,
+            intent == StreamIntent.Publish ? SRT_SOCKOPT.SRTO_RCVLATENCY : SRT_SOCKOPT.SRTO_PEERLATENCY);
+
+        logger.LogInformation(
+            "Accepted '{Name}' on the {Which} port at {Latency} ms of SRT latency",
+            name,
+            PortName,
+            negotiated);
 
         using var accepted = new AcceptedSocket(socket, streamId, name);
 

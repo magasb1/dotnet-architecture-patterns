@@ -25,12 +25,18 @@ while true; do
 
     # -re paces the sender at wall-clock speed. Without it the whole thing arrives as one burst
     # and the far end sees a connection that hangs up mid-handshake rather than a stream.
-    # mpeg2video keeps this cheap: the point is a stream, not picture quality. A one second
-    # keyframe interval gives the buffer thirty fine segments rather than three coarse ones.
+    # mpeg2video keeps this cheap: the point is a stream, not picture quality.
+    #
+    # A one second keyframe interval, and all three flags are needed to get one: -g asks for it,
+    # -keyint_min stops the encoder shortening it, and -sc_threshold 0 stops a scene change
+    # inserting a keyframe of its own, which the test pattern's hard cuts would otherwise do. It
+    # decides two things: the buffer is cut into thirty fine segments rather than three coarse
+    # ones, and a viewer can only start at a keyframe, so this is also the floor on how long
+    # joining takes however low the SRT latency goes.
     ffmpeg -hide_banner -loglevel warning -re \
         -f lavfi -i "testsrc=size=640x360:rate=25" \
         -f lavfi -i "sine=frequency=440:sample_rate=48000" \
-        -c:v mpeg2video -b:v 1500k -g 25 \
+        -c:v mpeg2video -b:v 1500k -g 25 -keyint_min 25 -sc_threshold 0 \
         -c:a mp2 -b:a 128k \
         -f mpegts "${TARGET}?mode=caller&streamid=${STREAMID}" || true
 

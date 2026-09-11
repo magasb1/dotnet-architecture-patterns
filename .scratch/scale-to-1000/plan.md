@@ -600,6 +600,15 @@ examples so the reference senders demonstrate the right setting. For x264 at 25 
 `-g 25 -keyint_min 25 -sc_threshold 0`; the last flag matters, since without it a scene cut
 inserts a keyframe and the interval is no longer what was asked for.
 
+One awkwardness, worth stating rather than papering over: `Restream.ps1` remultiplexes by default,
+and on a copy the GOP is the camera's and ffmpeg cannot change it without re-encoding. So the
+keyframe flags only apply on its `-Transcode` branch, and the reference sender demonstrates the
+right setting only when it is actually encoding. A camera sending a keyframe every ten seconds
+means a ten second join wait, and the only fixes are the camera's own settings or transcoding.
+`docker/srt-sender.sh` always encodes, so it carries the flags unconditionally. Both senders use
+mpeg2video rather than x264, and the three flags are generic encoder options that transfer
+unchanged.
+
 `SRTO_MAXBW` defaults to -1, which is unlimited with a 1 Gbps cap in live mode, so the join burst
 is sent at once and nothing needs setting. Leave it. The earlier worry that the default paces
 relative to input rate was wrong; that is what 0 means, and nothing sets 0.
@@ -612,9 +621,18 @@ relative to input rate was wrong; that is what 0 means, and nothing sets 0.
 - **The encoder's higher latency wins.** Same test, sender with `latency=200000`, which is
   microseconds in FFmpeg's option, assert 200. Pins the negotiation direction so nobody "fixes" it
   later.
-- **The consumption side inherits it too.** Player with none against a consumption listener at
-  60, read the accepted socket's `SRTO_PEERLATENCY`, assert 60. The other half of `SRTO_LATENCY`,
-  and the one a plain `SRTO_RCVLATENCY` would have missed.
+- **The consumption side inherits it too.** Player asking for 20 ms against a consumption listener
+  at 60, read the accepted socket's `SRTO_PEERLATENCY`, assert 60. The other half of
+  `SRTO_LATENCY`, and the one a plain `SRTO_RCVLATENCY` would have missed.
+
+  This test is written with a player that asks for something, which an earlier draft had wrong:
+  it said a player with no options at all. A caller setting nothing asks for libsrt's live
+  default of 120 ms, the listener takes the larger of the two, and the socket would report 120
+  whether or not this service had configured anything. The assertion would have passed on a
+  service that set no latency at all, which is the definition of a vacuous test. Asking for 20
+  makes 60 an answer that can only have come from `SRTO_LATENCY`, since with a plain
+  `SRTO_RCVLATENCY` the peer half would still be its default of zero and the answer would be the
+  player's own 20.
 
 Glass-to-glass is measured, not tested: the failover rig with `Live__SrtLatencyMs=60` and a
 one-second GOP, both hops on the same LAN. Expect about 150 ms plus encoder and player, down from

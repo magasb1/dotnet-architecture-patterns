@@ -52,6 +52,21 @@ public sealed class LiveOptions
     public int GracePeriodSeconds { get; init; } = 30;
 
     /// <summary>
+    /// The receiver's buffering delay on both media ports, in milliseconds. It is the floor on
+    /// end-to-end latency and the budget out of which a lost packet is retransmitted, so it is the
+    /// one number to turn down on a link that does not need it.
+    ///
+    /// Haivision's deployment guide sizes it as a multiple of the round trip: about four times the
+    /// RTT as a rule of thumb, three on a link losing under one percent, and never below 60 ms.
+    /// A LAN is therefore 60. The internet is whatever the internet is that day.
+    ///
+    /// libsrt's own live default, kept so that a deployment which sets nothing behaves exactly as
+    /// it did before this option existed.
+    /// </summary>
+    [Range(0, 8000)]
+    public int SrtLatencyMs { get; init; } = 120;
+
+    /// <summary>
     /// Identifies this replica. Defaults to POD_NAME, which Kubernetes supplies from the downward
     /// API, and to the machine name elsewhere.
     /// </summary>

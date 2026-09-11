@@ -28,7 +28,11 @@ internal static class SrtSenders
     private static readonly ConcurrentDictionary<int, StringBuilder> Stderr = new();
 
     /// <summary>An encoder pushing into a listening port. Null presents no identifier at all.</summary>
-    public static Process StartSender(int port, string? streamId)
+    /// <param name="callerOptions">
+    /// Further SRT options for the caller, written as they would be in the URL, for a test about
+    /// what the two ends negotiate. FFmpeg's time options are microseconds.
+    /// </param>
+    public static Process StartSender(int port, string? streamId, string? callerOptions = null)
         => Start(
         [
             "-hide_banner", "-loglevel", "error",
@@ -37,7 +41,7 @@ internal static class SrtSenders
             "-re",
             "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15",
             "-c:v", "mpeg2video", "-b:v", "600k", "-g", "15",
-            "-f", "mpegts", Target(port, streamId),
+            "-f", "mpegts", Target(port, streamId, callerOptions),
         ]);
 
     /// <summary>
@@ -45,8 +49,13 @@ internal static class SrtSenders
     /// connected SRT peer that sends no application bytes at all: an encoder always writes a header
     /// the moment the socket opens, and libsrt's caller side is not exposed to this test assembly.
     /// </summary>
-    public static Process StartPlayer(int port, string streamId)
-        => Start(["-hide_banner", "-loglevel", "error", "-i", Target(port, streamId), "-f", "null", "-"]);
+    /// <inheritdoc cref="StartSender" path="/param[@name='callerOptions']"/>
+    public static Process StartPlayer(int port, string streamId, string? callerOptions = null)
+        => Start([
+            "-hide_banner", "-loglevel", "error",
+            "-i", Target(port, streamId, callerOptions),
+            "-f", "null", "-",
+        ]);
 
     /// <summary>
     /// Whether this caller was turned away rather than served: it gave up quickly and said so.
@@ -158,9 +167,10 @@ internal static class SrtSenders
         throw new InvalidOperationException("No free port in the test range.");
     }
 
-    private static string Target(int port, string? streamId)
+    private static string Target(int port, string? streamId, string? callerOptions)
         => $"srt://127.0.0.1:{port}?mode=caller"
-            + (streamId is null ? string.Empty : $"&streamid={Escape(streamId)}");
+            + (streamId is null ? string.Empty : $"&streamid={Escape(streamId)}")
+            + (callerOptions is null ? string.Empty : $"&{callerOptions}");
 
     /// <summary>
     /// Only the hash, which is the one character of the Access Control envelope a URL would read as

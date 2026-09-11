@@ -442,6 +442,7 @@ Live__Enabled=true
 Live__Token=<secret>        # required in X-Storage-Token on every API call
 Live__IngestPort=9000
 Live__ConsumptionPort=9010
+Live__SrtLatencyMs=120      # SRT's buffering delay on both ports; 60 on a LAN, more on the internet
 Live__ProbeSeconds=1        # how long libav may spend working out what a camera is sending
 Live__ProbeBytes=1048576    # and how much it may read doing it
 Live__RecordingPartMinutes=5   # how much of a recording a pod holds at a time

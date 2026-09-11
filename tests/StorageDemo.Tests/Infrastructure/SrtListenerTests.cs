@@ -16,6 +16,9 @@ namespace StorageDemo.Tests.Infrastructure;
 ///
 /// These tests exist to fail loudly if a libsrt or FFmpeg upgrade takes any of the three away,
 /// because each would come back as a capacity ceiling that looks like a slow network.
+///
+/// The last three are about the fourth thing a listener decides and a viewer feels: how much
+/// latency a connection ends up with, which is negotiated rather than configured.
 /// </summary>
 public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
 {
@@ -279,8 +282,126 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
             });
     }
 
-    private SrtListener Listener(Action<AcceptedSocket> onAccepted, StreamIntent intent = StreamIntent.Publish)
-        => new(intent, new LiveOptions(), _ => null, onAccepted, NullLogger<SrtListener>.Instance);
+    /// <summary>
+    /// What the listener asks for is what an accepted socket ends up with, as long as nobody at the
+    /// far end asks for more. Fails if the option is set on the wrong socket or after srt_listen,
+    /// either of which leaves libsrt's 120 ms default in place and nothing else to notice it by.
+    /// </summary>
+    [Fact]
+    public async Task The_configured_latency_is_what_an_accepted_socket_negotiates()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+
+        var negotiated = await NegotiatedAsync(
+            StreamIntent.Publish,
+            latencyMs: 60,
+            SRT_SOCKOPT.SRTO_RCVLATENCY,
+            port => Sender(port, "cam-1"));
+
+        Assert.Equal(60, negotiated);
+    }
+
+    /// <summary>
+    /// The direction of the negotiation, pinned so nobody "fixes" it later. Each side names a
+    /// figure and the larger one wins, which is correct: an encoder on a link that loses packets
+    /// knows something this service does not, and its 200 ms has to survive our 60.
+    ///
+    /// FFmpeg's <c>latency</c> is microseconds and libsrt's is milliseconds, which is the other
+    /// thing this test would catch: a unit slip here reads as a stream that buffers a thousand
+    /// times too much or not at all.
+    /// </summary>
+    [Fact]
+    public async Task The_encoders_higher_latency_wins()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+
+        var negotiated = await NegotiatedAsync(
+            StreamIntent.Publish,
+            latencyMs: 60,
+            SRT_SOCKOPT.SRTO_RCVLATENCY,
+            port => Sender(port, "cam-1", "latency=200000"));
+
+        Assert.Equal(200, negotiated);
+    }
+
+    /// <summary>
+    /// The half a plain SRTO_RCVLATENCY would have missed. On the consumption port this service is
+    /// the sender, so the buffer that matters is the player's, and it is SRTO_PEERLATENCY that
+    /// carries our figure into it.
+    ///
+    /// The player asks for 20 ms rather than for nothing, which is where this departs from the
+    /// plan. libsrt takes the maximum of our peer latency and the player's own receive latency, and
+    /// a player that asks for nothing is asking for libsrt's 120 ms default, so it would win and
+    /// the assertion would pass at 120 whether or not this service had set anything at all. Against
+    /// a player asking for less, 60 can only have come from SRTO_LATENCY: with SRTO_RCVLATENCY
+    /// alone the peer half would still be its default of zero and the answer would be the player's
+    /// own 20.
+    /// </summary>
+    [Fact]
+    public async Task The_consumption_side_inherits_the_latency_too()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+
+        var negotiated = await NegotiatedAsync(
+            StreamIntent.Subscribe,
+            latencyMs: 60,
+            SRT_SOCKOPT.SRTO_PEERLATENCY,
+            port => Player(port, "cam-1", "latency=20000"));
+
+        Assert.Equal(60, negotiated);
+    }
+
+    /// <summary>
+    /// Runs one caller against a listener at <paramref name="latencyMs"/> and answers with the
+    /// option read off the accepted socket. Post-handshake that is the negotiated figure rather
+    /// than the configured one, which is the whole reason these three tests read it from there and
+    /// not from the options object.
+    /// </summary>
+    private async Task<int> NegotiatedAsync(
+        StreamIntent intent,
+        int latencyMs,
+        SRT_SOCKOPT option,
+        Func<int, Process> caller)
+    {
+        var negotiated = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await ListeningAsync(
+            Listener(
+                socket =>
+                {
+                    // Taken off the handler rather than read through it: an option is only worth
+                    // anything on a live connection, and the handler closes what it is given.
+                    var connection = socket.Release();
+                    _held.Add(connection);
+
+                    negotiated.TrySetResult(Srt.GetInt32(connection, option));
+                },
+                intent,
+                latencyMs),
+            SrtSenders.FreePort(),
+            async port =>
+            {
+                caller(port);
+
+                await SrtSenders.WaitUntilAsync(
+                    () => negotiated.Task.IsCompleted,
+                    TimeSpan.FromSeconds(15),
+                    () => $"the caller was never accepted on port {port}: {SrtSenders.Complaints(_callers)}");
+            });
+
+        return await negotiated.Task;
+    }
+
+    private SrtListener Listener(
+        Action<AcceptedSocket> onAccepted,
+        StreamIntent intent = StreamIntent.Publish,
+        int latencyMs = 120)
+        => new(
+            intent,
+            new LiveOptions { SrtLatencyMs = latencyMs },
+            _ => null,
+            onAccepted,
+            NullLogger<SrtListener>.Instance);
 
     /// <summary>
     /// Runs a listener on its own thread for as long as the body takes, and stops it afterwards
@@ -305,17 +426,17 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
         }
     }
 
-    private Process Sender(int port, string? streamId)
+    private Process Sender(int port, string? streamId, string? callerOptions = null)
     {
-        var caller = SrtSenders.StartSender(port, streamId);
+        var caller = SrtSenders.StartSender(port, streamId, callerOptions);
         _callers.Add(caller);
 
         return caller;
     }
 
-    private Process Player(int port, string streamId)
+    private Process Player(int port, string streamId, string? callerOptions = null)
     {
-        var caller = SrtSenders.StartPlayer(port, streamId);
+        var caller = SrtSenders.StartPlayer(port, streamId, callerOptions);
         _callers.Add(caller);
 
         return caller;
