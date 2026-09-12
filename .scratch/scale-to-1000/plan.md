@@ -156,7 +156,17 @@ earlier document assumed. Two threads per stream, roughly 0.87 percent of a core
 Together 1.7 percent of a core per stream, linear, which is 2.3 cores at 150 streams and more than
 twice the preview. Plus the single receive thread at 60 to 80 percent.
 
-One hypothesis worth testing before anything is designed: `StreamDemuxer.Pump` allocates a fresh
+**Measured, and the hypothesis below was wrong by twenty times.** `perf-ingest.md` ran four
+experiments at 100 streams, each against a control with GC counters attached, and kept none of
+them: `av_read_frame` yields PES packets, about 25 a second per stream, so the allocation rate is
+2,500 a second at a hundred streams rather than the half a million guessed here, and the garbage
+collector costs one to two percent of a core in total. Pooling, a libav reference instead of a copy,
+fewer threads and the hub's lock were each bounded at nothing or measured at nothing. The demux
+thread's life is 69 percent inside `srt_recvmsg` and roughly half kernel sleep and wake, which is
+not ours to remove. The one thing that moved a number was workstation garbage collection, which cut
+the working set by about thirty percent at no cost in processor or delivery, and is applied.
+
+The original hypothesis, kept for the record: `StreamDemuxer.Pump` allocates a fresh
 `byte[]` for every packet it reads. At a thousand streams that is on the order of half a million
 allocations a second, all of them short-lived, and pooling them is a small change with a clear
 before-and-after. Whether it accounts for a meaningful share of that 0.87 percent is unmeasured,

@@ -1,5 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
+    <!-- Workstation GC, deliberately, against the ASP.NET default of server GC. Measured on the
+         container rig at 100 streams, three replicates each: working set 971 to 1034 MB against
+         1152 to 1556 with server GC, every replicate below the control's minimum, with CPU inside
+         the control's spread and delivered bitrate identical. The workload is many small,
+         short-lived packets rather than throughput-bound allocation, and memory is what bounds a
+         pod. See .scratch/scale-to-1000/perf-ingest.md. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
     <UserSecretsId>storage-demo</UserSecretsId>
   </PropertyGroup>
   <ItemGroup>
