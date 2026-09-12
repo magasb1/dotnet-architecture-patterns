@@ -142,6 +142,32 @@ public sealed class LiveStreamsController(
     }
 
     /// <summary>
+    /// The newest MISB KLV packet, decoded to the ST 0902 minimum set with the raw bytes alongside.
+    /// Forwarded to the owner like the preview, because only the owner has the packets; the
+    /// answer is JSON, so it rides the control-call relay rather than the byte proxy.
+    /// </summary>
+    [HttpGet("klv/{*name}")]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Klv(
+        string name,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        return await ForwardOrRun(
+            name,
+            $"api/live/klv/{name}",
+            token,
+            () => Task.FromResult<IActionResult>(live.Klv(name) is { } sample ? Ok(sample) : NotFound()),
+            cancellationToken,
+            method: HttpMethod.Get);
+    }
+
+    /// <summary>
     /// Takes a picture now and stores it as a document. Served while a stream is interrupted, so
     /// the button still works while the tile shows the gap, and refused once the stream is gone.
     /// </summary>

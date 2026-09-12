@@ -80,6 +80,14 @@ public sealed record RecordingStatus(
 /// interval. Distinct from lost, and usually means the window is too small for the link rather
 /// than that the link is failing.
 /// </param>
+/// <param name="HasKlv">Whether the transport carries a MISB KLV metadata stream.</param>
+/// <param name="KlvAt">When the last KLV packet arrived, if any has.</param>
+/// <param name="Classification">
+/// The ST 0102 marking from the newest KLV packet, carried here rather than only on the KLV route
+/// because a wall of a thousand tiles has to show its markings without a thousand calls. Null
+/// when the stream carries no KLV or no security set, which a client shows as unmarked; that is a
+/// different thing from an empty marking.
+/// </param>
 public sealed record LiveStream(
     string Name,
     LiveStreamState State,
@@ -98,7 +106,10 @@ public sealed record LiveStream(
     string? ConnectionId,
     bool Manual = false,
     int PacketsLost = 0,
-    int PacketsDropped = 0);
+    int PacketsDropped = 0,
+    bool HasKlv = false,
+    DateTimeOffset? KlvAt = null,
+    string? Classification = null);
 
 /// <summary>
 /// Where live streams are recorded so every replica can see them, not just the one holding the

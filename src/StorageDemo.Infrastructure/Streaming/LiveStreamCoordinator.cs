@@ -91,6 +91,9 @@ public sealed class LiveStreamCoordinator(
     public byte[]? Preview(string name)
         => _local.TryGetValue(name, out var entry) ? entry.Harvester.Preview : null;
 
+    public KlvSample? Klv(string name)
+        => _local.TryGetValue(name, out var entry) ? entry.Klv.Latest : null;
+
     /// <summary>
     /// Whether a publisher presenting this name may connect, answered on libsrt's receiver thread.
     ///
@@ -360,6 +363,12 @@ public sealed class LiveStreamCoordinator(
             metadata["Snapshot"] = note;
         }
 
+        // A stored picture must not lose the marking the stream carried.
+        if (entry.Klv.Classification is { } marking)
+        {
+            metadata["Classification"] = marking;
+        }
+
         await using var scope = scopeFactory.CreateAsyncScope();
         var documents = scope.ServiceProvider.GetRequiredService<IDocumentService>();
 
@@ -456,7 +465,7 @@ public sealed class LiveStreamCoordinator(
             return Task.FromResult<RecordingStatus?>(running.Status);
         }
 
-        var recorder = new StreamRecorder(entry.Hub, _options, scopeFactory, logger, duration);
+        var recorder = new StreamRecorder(entry.Hub, _options, scopeFactory, logger, duration, () => entry.Klv.Classification);
 
         entry.Records(recorder, recorder.RunAsync(entry.Lifetime.Token));
 
@@ -722,7 +731,10 @@ public sealed class LiveStreamCoordinator(
             entry.ConnectionId,
             entry.Manual,
             health?.Lost ?? 0,
-            health?.Dropped ?? 0);
+            health?.Dropped ?? 0,
+            entry.Klv.Present,
+            entry.Klv.LastPacketAt,
+            entry.Klv.Classification);
     }
 
     private void RequireAllowed(string url)

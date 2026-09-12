@@ -19,8 +19,17 @@ automatic stream.
 packets flow one way through it. One demultiplexer feeds one hub.
 
 **Packet subscriber.** Something attached to the hub receiving demultiplexed packets, filtered by
-stream index, with no decoding. The recorder and the viewer are packet subscribers, and a KLV
-extractor would be one on a different stream index.
+stream index, with no decoding. The recorder and the viewer are packet subscribers, and so is the
+KLV extractor, on the metadata stream index alone.
+
+**KLV extractor.** The packet subscriber that is always attached, the metadata twin of the
+harvester. It keeps a short ring of the newest MISB KLV packets, each with its presentation time
+on the reference clock when the carriage gave it one (ST 1402 synchronous) and flagged as
+timestamp-only when it did not, and decodes the ST 0902 minimum set out of ST 0601, including the
+ST 0102 classification marking. Everything else in a packet stays raw. It touches no decoder,
+which is what keeps it close to free at a thousand streams. The recorder already captures KLV
+because it subscribes to every index, so recordings were complete before this existed; the
+extractor is for live access.
 
 **Frame subscriber.** Something receiving decoded pictures. Exactly one decoder is itself a packet
 subscriber and republishes frames, so a stream is decoded once however many things want pictures, and

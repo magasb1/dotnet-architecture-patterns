@@ -33,6 +33,12 @@ public interface ILiveStreamService
     byte[]? Preview(string name);
 
     /// <summary>
+    /// The newest KLV packet and what was decoded from it, when this replica owns the stream and
+    /// has received one. Only the owner has the packets, like the preview.
+    /// </summary>
+    KlvSample? Klv(string name);
+
+    /// <summary>
     /// Creates a stream by request, for a protocol that cannot name itself, and opens its input.
     /// It sits in the registry waiting for bytes and is indistinguishable from an automatic stream
     /// once a demultiplexer exists.

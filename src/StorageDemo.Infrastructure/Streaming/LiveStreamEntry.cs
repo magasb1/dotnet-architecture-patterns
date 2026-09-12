@@ -24,6 +24,9 @@ public sealed class LiveStreamEntry : IAsyncDisposable
 
         PreviewSubscription = SubscribePreview(Decoder, harvester);
         Decoding = Decoder.RunAsync(Lifetime.Token);
+
+        Klv = new KlvExtractor(hub, logger);
+        Extracting = Klv.RunAsync(Lifetime.Token);
     }
 
     /// <summary>The harvester's handler takes a libav frame, so binding it needs an unsafe context.</summary>
@@ -42,6 +45,11 @@ public sealed class LiveStreamEntry : IAsyncDisposable
     public CancellationTokenSource Lifetime { get; } = new();
 
     public Task Decoding { get; }
+
+    /// <summary>The always-attached packet subscriber on the KLV index, the metadata twin of the harvester.</summary>
+    public KlvExtractor Klv { get; }
+
+    public Task Extracting { get; }
 
     private IDisposable PreviewSubscription { get; }
 
@@ -174,7 +182,7 @@ public sealed class LiveStreamEntry : IAsyncDisposable
 
         Hub.Close();
 
-        await Task.WhenAny(Decoding, Task.Delay(TimeSpan.FromSeconds(10)));
+        await Task.WhenAny(Task.WhenAll(Decoding, Extracting), Task.Delay(TimeSpan.FromSeconds(10)));
 
         PreviewSubscription.Dispose();
         Decoder.Dispose();

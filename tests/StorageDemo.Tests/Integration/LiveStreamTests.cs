@@ -606,11 +606,110 @@ public sealed class LiveStreamTests : IAsyncLifetime
             $"the meter reported {meters.Value("live.streams.owned")} streams owned rather than one");
     }
 
+    /// <summary>
+    /// A transport carrying MISB KLV alongside the picture, through the real ingest: the list
+    /// shows the stream carries it and what it is marked, the route serves the minimum set at
+    /// the values that were sent with the raw packet beside them, and a snapshot keeps the marking.
+    /// </summary>
+    [Fact]
+    public async Task A_stream_carrying_klv_reports_its_marking_and_serves_the_decoded_minimum_set()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
+
+        const string name = "uas/klv-carrier";
+
+        var video = Path.Combine(_root, "video.ts");
+        var carrier = Path.Combine(_root, "klv.ts");
+
+        Render(video, seconds: 60);
+        Misb.WriteTransportStream(video, carrier, Misb.MinimumSet(), intervalSeconds: 0.1);
+
+        Push(name, file: carrier);
+
+        LiveStream? stream = null;
+
+        Assert.True(
+            await WaitAsync(
+                async () => (stream = await Get(name)) is { HasKlv: true, KlvAt: not null },
+                TimeSpan.FromSeconds(40)),
+            $"the stream never reported KLV: {stream}");
+
+        Assert.Contains("klv", stream!.Layout, StringComparison.Ordinal);
+
+        var response = await _client.GetAsync($"/api/live/klv/{name}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var sample = await response.Content.ReadFromJsonAsync<KlvSample>();
+
+        Assert.NotNull(sample);
+        Assert.Equal(Convert.ToHexString(Misb.MinimumSet()), Convert.ToHexString(sample.Raw));
+        Assert.Equal(Misb.Known.Classification, stream.Classification);
+
+        // The file was written with a PES timestamp on every KLV packet, so it is aligned by that
+        // rather than by tag 2.
+        Assert.Equal(KlvAlignment.PresentationTimestamp, sample.Alignment);
+        Assert.NotNull(sample.ReferencePts);
+
+        Assert.NotNull(sample.Fields);
+        Assert.Equal(Misb.Known.Timestamp, sample.Fields.Timestamp);
+        Assert.Equal(Misb.Known.Classification, sample.Fields.Classification);
+        Assert.Equal(Misb.Known.SensorLatitude, sample.Fields.SensorLatitude!.Value, 1e-6);
+        Assert.Equal(Misb.Known.SensorLongitude, sample.Fields.SensorLongitude!.Value, 1e-6);
+        Assert.Equal(Misb.Known.FrameCenterLatitude, sample.Fields.FrameCenterLatitude!.Value, 1e-6);
+        Assert.Equal(Misb.Known.FrameCenterLongitude, sample.Fields.FrameCenterLongitude!.Value, 1e-6);
+        Assert.Equal(Misb.Known.SensorTrueAltitude, sample.Fields.SensorTrueAltitude!.Value, 0.5);
+
+        var snapshot = await _client.PostAsync($"/api/live/snapshot/{name}", null);
+        Assert.Equal(HttpStatusCode.OK, snapshot.StatusCode);
+
+        var document = await WaitForDocumentAsync(
+            document => document.FileName.StartsWith("uas-klv-carrier-", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(30));
+
+        Assert.NotNull(document);
+        Assert.Equal(Misb.Known.Classification, document.Metadata["Classification"]);
+    }
+
     private async Task<DocumentResponse?> Get(Guid id)
     {
         var documents = await _client.GetFromJsonAsync<List<DocumentResponse>>("/api/documents");
 
         return documents?.FirstOrDefault(d => d.Id == id);
+    }
+
+    /// <summary>A video-only transport stream of the synthetic picture, at the same settings <see cref="Push"/> sends.</summary>
+    private static void Render(string path, int seconds)
+    {
+        var startInfo = new ProcessStartInfo(Ffmpeg.ExecutablePath)
+        {
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        foreach (var argument in new[]
+                 {
+                     "-hide_banner", "-loglevel", "error", "-y",
+                     "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15",
+                     "-c:v", "mpeg2video", "-b:v", "800k", "-g", "15",
+                     "-t", seconds.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                     "-f", "mpegts", path,
+                 })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            startInfo.Environment["LD_LIBRARY_PATH"] = Ffmpeg.Directory;
+        }
+
+        using var process = Process.Start(startInfo)!;
+        var complaints = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        Assert.True(process.ExitCode == 0, $"ffmpeg could not render the video: {complaints}");
     }
 
     /// <summary>How many seconds of media the file holds, as the bundled ffprobe reads it.</summary>
@@ -735,7 +834,12 @@ public sealed class LiveStreamTests : IAsyncLifetime
     /// An encoder pushing at the ingest port with a name in its stream identifier, which is the
     /// whole setup: nothing is requested first.
     /// </summary>
-    private Process Push(string name, int? port = null)
+    /// <param name="file">
+    /// A transport stream to push as it is, every stream in it, instead of a synthetic picture.
+    /// This is how a stream carrying something the command line cannot synthesise, such as KLV,
+    /// reaches the service.
+    /// </param>
+    private Process Push(string name, int? port = null, string? file = null)
     {
         var identifier = Uri.EscapeDataString($"#!::r={name},m=publish");
         var target = $"srt://127.0.0.1:{port ?? _ingestPort}?mode=caller&streamid={identifier}";
@@ -747,16 +851,14 @@ public sealed class LiveStreamTests : IAsyncLifetime
             CreateNoWindow = true,
         };
 
-        foreach (var argument in new[]
-                 {
-                     "-hide_banner", "-loglevel", "error",
-                     // Paced at wall-clock speed, and with a one second keyframe interval so the
-                     // buffer holds fine segments rather than two coarse ones.
-                     "-re",
-                     "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15",
-                     "-c:v", "mpeg2video", "-b:v", "800k", "-g", "15",
-                     "-f", "mpegts", target,
-                 })
+        string[] source = file is null
+            // A one second keyframe interval, so the buffer holds fine segments rather than two
+            // coarse ones.
+            ? ["-f", "lavfi", "-i", "testsrc=size=320x240:rate=15", "-c:v", "mpeg2video", "-b:v", "800k", "-g", "15"]
+            : ["-i", file, "-map", "0", "-c", "copy"];
+
+        // Paced at wall-clock speed either way: SRT is a connection, not a file copy.
+        foreach (var argument in (string[])["-hide_banner", "-loglevel", "error", "-re", .. source, "-f", "mpegts", target])
         {
             startInfo.ArgumentList.Add(argument);
         }

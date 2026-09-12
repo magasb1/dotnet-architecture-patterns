@@ -44,6 +44,9 @@ public sealed class StreamRecorder
     private readonly Lock _gate = new();
     private readonly string _directory;
 
+    /// <summary>The stream's ST 0102 marking, asked for when a part is stored so the document carries it.</summary>
+    private readonly Func<string?> _classification;
+
     private DateTimeOffset _endsAt;
 
     /// <summary>Bytes of the parts already stored, so the running total survives a part roll.</summary>
@@ -54,12 +57,14 @@ public sealed class StreamRecorder
         LiveOptions options,
         IServiceScopeFactory scopeFactory,
         ILogger logger,
-        TimeSpan? duration)
+        TimeSpan? duration,
+        Func<string?>? classification = null)
     {
         _hub = hub;
         _options = options;
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _classification = classification ?? (() => null);
 
         StartedAt = DateTimeOffset.UtcNow;
         _endsAt = StartedAt + (duration ?? TimeSpan.FromSeconds(options.DefaultRecordingSeconds));
@@ -323,6 +328,13 @@ public sealed class StreamRecorder
         if (Truncated)
         {
             metadata["Recording"] = "Truncated: the recorder could not keep up with the stream.";
+        }
+
+        // ponytail: the marking as it stands when the part is stored, not the highest seen over
+        // the recording. Track the maximum if a stream ever changes marking mid-recording.
+        if (_classification() is { } marking)
+        {
+            metadata["Classification"] = marking;
         }
 
         return metadata;

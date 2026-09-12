@@ -19,15 +19,23 @@ public sealed unsafe class StreamLayout : IDisposable
     private readonly IntPtr[] _parameters;
     private readonly AVRational[] _timeBases;
 
-    private StreamLayout(IntPtr[] parameters, AVRational[] timeBases, int videoIndex)
+    private StreamLayout(IntPtr[] parameters, AVRational[] timeBases, int videoIndex, int klvIndex)
     {
         _parameters = parameters;
         _timeBases = timeBases;
         VideoIndex = videoIndex;
+        KlvIndex = klvIndex;
     }
 
     /// <summary>The stream a keyframe means something on, or -1 when there is no picture.</summary>
     public int VideoIndex { get; }
+
+    /// <summary>
+    /// The MISB metadata stream, or -1 when there is none. In MPEG-TS it is a data stream whose
+    /// registration descriptor says KLVA, which libav reports as the SMPTE KLV codec; a data
+    /// stream carrying anything else is not metadata this service understands.
+    /// </summary>
+    public int KlvIndex { get; }
 
     public int Count => _parameters.Length;
 
@@ -49,6 +57,7 @@ public sealed unsafe class StreamLayout : IDisposable
         var parameters = new IntPtr[count];
         var timeBases = new AVRational[count];
         var videoIndex = -1;
+        var klvIndex = -1;
 
         for (var index = 0; index < count; index++)
         {
@@ -68,9 +77,16 @@ public sealed unsafe class StreamLayout : IDisposable
             {
                 videoIndex = index;
             }
+
+            if (klvIndex < 0
+                && stream->codecpar->codec_type == AVMediaType.AVMEDIA_TYPE_DATA
+                && stream->codecpar->codec_id == AVCodecID.AV_CODEC_ID_SMPTE_KLV)
+            {
+                klvIndex = index;
+            }
         }
 
-        return new StreamLayout(parameters, timeBases, videoIndex);
+        return new StreamLayout(parameters, timeBases, videoIndex, klvIndex);
     }
 
     /// <summary>
