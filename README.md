@@ -588,6 +588,10 @@ Each of these is a deliberate trade, not an oversight.
 - A recording still running is visible in the document list and grows. That reverses the original
   design, which held a document back until there was a whole file; a part that has been stored
   is not half-written, and for a camera the alternative was losing everything before a restart.
+- Nothing bounds concurrent recordings on a pod. A part is five minutes and the volume is 8 GiB, so
+  at camera rate about fifty-four recordings fit at once, and what happens when the volume fills is
+  untested. The number is written down beside the sizing in `k8s/live/deployment.yaml`; enforcing it
+  is a separate decision.
 - Viewers of one stream all funnel through its owner, so adding replicas does nothing for a single
   popular stream. Correct for contribution, where streams outnumber viewers; wrong for
   distributing one stream to an audience.
@@ -652,6 +656,47 @@ The endpoint stays closed until `StorageMonitor__WebhookToken` is set, and compa
 
 Tune the rest with `StorageMonitor__IntervalSeconds`, `StorageMonitor__DebounceMilliseconds` (a
 folder copy fires one event per file, so a burst is allowed to settle) and `StorageMonitor__Enabled`.
+
+## Retention
+
+Nothing expires by itself unless you say so. A thousand camera-rate streams record about 43 TB a
+day, so a deployment that records has to expire something, but a service that deletes a customer's
+recordings the first time it is upgraded is indefensible. Retention is therefore **off unless
+configured**, exactly as live streaming is.
+
+```
+Retention__Enabled=true
+Retention__MaxAgeDays=30           # 0 keeps documents forever and sweeps only the registry
+Retention__IntervalSeconds=3600
+Retention__AbandonedEntryMinutes=10
+```
+
+It runs on the same pattern as the storage monitor: a periodic pass under the distributed lock, so
+one replica sweeps and the others skip.
+
+**Only what live streaming produced is expired.** A recording or a snapshot carries the stream it
+came from in its metadata, and that is the mark the pass looks for. A file somebody uploaded is
+theirs, whatever its age.
+
+**Bytes before rows.** A recording is many objects under `recordings/`, outside the prefix the
+monitor scans, so a row-only delete orphans them where nothing will ever notice. The parts go
+first, then the thumbnail, then the row - the opposite order to writing one, which is what leaves
+nothing behind if a pass dies halfway.
+
+**A recording still being written is never swept.** A document appears with its first part and
+grows, so it is older than the cutoff long before it is finished, and age alone would take the
+early parts of a six-hour recording out from under the recorder. A recording is open while its
+stream's registry entry carries a recording status, and the entry is shared, so the replica
+sweeping knows this about a stream owned by a different pod. The stream's name and the recording's
+start time say *which* document is open, because a camera recording continuously has produced
+hundreds and protecting all of them would mean it never expires anything.
+
+**The same pass removes abandoned registry entries.** A force-killed pod leaves one entry per
+stream behind it and nothing else in the service ever removes them. An entry counts as abandoned
+when its owner has not heartbeated for ten minutes: three hundred missed beats, and twenty times
+the grace period that already declares a stream gone. Deliberately far out, because removing a
+living stream's entry would unlock its name to a second publisher and drop it out of every
+replica's view, which is much worse than a dead entry surviving another pass.
 
 ## Scaling out
 
@@ -730,6 +775,10 @@ Messaging__Provider=Redis
 Messaging__Redis__ConnectionString=redis:6379
 StorageMonitor__WebhookToken=local-demo-token
 ```
+
+Two features are off unless configured, because switching either on has consequences nobody should
+inherit by upgrading: `Live__Enabled` opens a port anybody who can reach it may push a stream into,
+and `Retention__Enabled` starts deleting recordings. See "Live streaming" and "Retention".
 
 ## API
 

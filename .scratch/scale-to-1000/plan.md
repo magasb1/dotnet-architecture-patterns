@@ -1074,6 +1074,108 @@ The packet tier, the hub, the rolling buffer, recordings and viewers are all unt
 removes a frame subscriber from the ingest pod and adds a packet subscriber somewhere else, which
 is the seam working as designed rather than a change to it.
 
+## Phase 9: Answer "which of my thousand streams is broken"
+
+Not in the original plan, and the largest operational gap in the service. There is no metric, no
+trace and no per-stream health anywhere in the codebase today. `baseline.md` showed why that is
+worse than it sounds: at 250 streams the API reported 250 of them live and contented while a fifth
+of the media was arriving. The system does not merely lack instruments, it actively reports health
+it does not have.
+
+This phase also settles the overload signal that Phase 4 has been blocked on, because they are the
+same question asked twice.
+
+### The signal is a measurement, not an inference
+
+Two earlier proposals inferred trouble from throughput: compare against a declared expected rate,
+or watch a stream's delivered rate against its own history. Both are guesses about a thing that can
+be measured directly. The baseline's failure was 319,000 kernel UDP input errors in fifteen
+seconds, and that is the mechanism rather than a symptom.
+
+So the signal is two counters at two levels, and neither of them is new work in the sense of new
+mechanism:
+
+- **Per stream, from libsrt itself.** `srt_bstats` is already bound in `Srt.cs` and has never been
+  called. It reports packets lost and dropped on a socket, which is the transport saying it failed
+  rather than something deducing it from a byte count.
+- **Per pod, from the kernel.** Receive errors on the UDP socket, which catch what never reached
+  libsrt at all. That is precisely the multiplexer-level overload the baseline hit, and no
+  per-socket counter can see it.
+
+A stream is healthy when both are quiet. Nothing has to declare an expected bitrate, and a stream
+that was never healthy is as visible as one that degraded.
+
+### Two audiences, two shapes, and the cardinality trap
+
+**An operator asking about one stream** wants per-stream detail, and the natural home is the thing
+that already answers per-stream questions: `LiveStream` gains loss and drop figures, so
+`GET /api/live` and the stream tile answer "which one is broken" directly. No exporter, no
+dashboard, no new dependency.
+
+**An autoscaler asking about a pod** wants aggregates. A `Meter` named `StorageDemo.Live` with
+streams owned, accepts and rejects tagged by reason, and the pod-level receive errors.
+
+**Do not tag a metric with the stream name.** A thousand streams times several instruments is
+thousands of time series, and the per-stream question is already answered better by the API. This
+is the trap that makes naive instrumentation expensive, and it is worth one sentence in the code.
+
+The Prometheus exporter stays out until an autoscaler exists, for the reason `research/k8s-autoscaling-and-metrics.md`
+records: it has never shipped a stable release. `dotnet-counters` reads the meter with no package.
+
+### What good looks like
+
+Re-run the baseline's 250-stream case. Today it reports 250 healthy. After this phase it should
+show the drops, and an operator should be able to name the degraded streams from one API call.
+That is the acceptance test, and it is runnable on the rig that exists.
+
+## Phase 10: Retention, and the sweeper nothing owns
+
+Your original map listed retention as not yet specified and it never reached this plan. Nothing
+expires a recording or a snapshot. At a thousand camera-rate streams, recording everything is about
+43 TB a day and recording a tenth of them is about 4.3 TB. Storage grows without bound from the day
+this goes live, and it is much harder to retrofit over a year of data than to build now.
+
+### What it deletes, and the two traps
+
+Age is the default policy, with the ceiling in configuration rather than in code. Per-stream
+overrides can come later if something asks; nothing has.
+
+Two things make this less trivial than "delete old rows":
+
+- **A recording is many objects.** `Document.Parts` carries them and they live under `recordings/`
+  rather than the scanned prefix, so deleting the row is not enough and the reconciler will not
+  clean up after a half-done delete. Bytes first, then the row, which is the opposite order to
+  upload and is what leaves no orphan.
+- **A recording still being written must not be swept.** One is open whenever `Recording` is set on
+  its stream, and a document appears with its first part and grows, so age alone would delete a
+  six-hour recording's early parts while it is still running.
+
+### The sweeper is the thing to get right, and there is already one
+
+Do not invent a scheduler. `StorageMonitor` already runs a periodic pass under
+`IDistributedLock.TryAcquireAsync`, so exactly one replica does the work and the others skip it.
+Retention is the same shape with a different body, and following that pattern is most of the
+design.
+
+### Sweep the registry too, while something finally owns sweeping
+
+`cross-pod.md` found that nothing ever removes a registry entry whose owner is gone, so a
+force-killed pod leaks one per stream into Redis forever. That is the same unanswered question,
+"who sweeps", and it should be answered once here rather than twice.
+
+It also unblocks something else. A graceful shutdown currently deletes its entries rather than
+interrupting them, which is why a rolling update still resets a stream's start time. The fix is to
+interrupt instead of delete, and the only reason not to was that abandoned entries accumulate.
+Once a sweeper exists, that reason is gone and the rolling-update reset can be fixed properly.
+
+### The disk ceiling nobody has written down
+
+While in here: a part is five minutes and the pod's volume is 8 GiB, so at camera rate that is
+roughly fifty-four concurrent recordings per pod. With multi-port ingest pushing a pod toward a
+hundred and twenty-five streams, a detector triggering broadly could exceed it, and nothing bounds
+concurrent recordings or says what happens when the volume fills. State the ceiling in the manifest
+beside the sizing arithmetic; bounding it is a separate decision.
+
 ## Documentation, as each phase lands
 
 - `README.md`: the "About SRT" section is rewritten around libsrt direct, the carousel and the

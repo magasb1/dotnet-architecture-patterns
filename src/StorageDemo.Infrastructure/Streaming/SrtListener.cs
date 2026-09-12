@@ -69,8 +69,15 @@ public sealed unsafe class SrtListener(
     Admit admit,
     Action<AcceptedSocket> onAccepted,
     ILogger logger,
-    LiveListeners? listeners = null)
+    LiveListeners? listeners = null,
+    LiveMetrics? metrics = null)
 {
+    /// <summary>
+    /// One instance serves every port, so what the handshake hook needs to know about the port it
+    /// is answering for travels beside the instance rather than on it.
+    /// </summary>
+    private sealed record Bound(SrtListener Listener, int Port);
+
     /// <summary>
     /// Deep enough that a cold start of a thousand encoders never meets a full queue. It costs a
     /// pending-connection slot each, which is why it is not larger still.
@@ -107,8 +114,8 @@ public sealed unsafe class SrtListener(
         }
 
         // [UnmanagedCallersOnly] forbids capturing anything, so libsrt's hook_opaque is the only
-        // road from the static hook back to this instance.
-        var self = GCHandle.Alloc(this);
+        // road from the static hook back to this instance and to which port it is answering for.
+        var self = GCHandle.Alloc(new Bound(this, port));
 
         try
         {
@@ -130,7 +137,7 @@ public sealed unsafe class SrtListener(
             // thread as what unblocks it, with SRT_ESCLOSED. There is no other handle on the call.
             using (cancellationToken.Register(() => Srt.srt_close(listener)))
             {
-                Accept(listener, cancellationToken);
+                Accept(listener, port, cancellationToken);
             }
         }
         finally
@@ -208,7 +215,7 @@ public sealed unsafe class SrtListener(
         return true;
     }
 
-    private void Accept(int listener, CancellationToken cancellationToken)
+    private void Accept(int listener, int port, CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -216,7 +223,7 @@ public sealed unsafe class SrtListener(
 
             if (socket != Srt.SRT_INVALID_SOCK)
             {
-                Handle(socket);
+                Handle(socket, port);
 
                 continue;
             }
@@ -257,7 +264,7 @@ public sealed unsafe class SrtListener(
     /// every stream arrive unnamed; an identifier that will not parse is a sender's problem, and
     /// here it is also a surprise, because the hook parsed the same string and admitted it.
     /// </summary>
-    private void Handle(int socket)
+    private void Handle(int socket, int port)
     {
         var streamId = Srt.GetString(socket, SRT_SOCKOPT.SRTO_STREAMID);
 
@@ -305,6 +312,8 @@ public sealed unsafe class SrtListener(
             PortName,
             negotiated);
 
+        metrics?.Accepted(port);
+
         using var accepted = new AcceptedSocket(socket, streamId, name);
 
         try
@@ -331,8 +340,8 @@ public sealed unsafe class SrtListener(
     {
         try
         {
-            return GCHandle.FromIntPtr((IntPtr)opaque).Target is SrtListener listener
-                ? listener.Handshake(socket, Marshal.PtrToStringUTF8((IntPtr)streamId))
+            return GCHandle.FromIntPtr((IntPtr)opaque).Target is Bound bound
+                ? bound.Listener.Handshake(socket, bound.Port, Marshal.PtrToStringUTF8((IntPtr)streamId))
                 : -1;
         }
         catch (Exception)
@@ -341,24 +350,40 @@ public sealed unsafe class SrtListener(
         }
     }
 
-    private int Handshake(int socket, string? streamId)
+    private int Handshake(int socket, int port, string? streamId)
     {
         if (!StreamName.TryParse(streamId, out var name, out _, intent))
         {
             // The rejection text is not logged here. This is the packet thread, and a caller who
-            // spells a name wrong retries, so the line would come a thousand at a time.
-            return Reject(socket, Srt.SRT_REJX_BAD_REQUEST);
+            // spells a name wrong retries, so the line would come a thousand at a time. It is
+            // counted instead, which is the same information without the thousand lines.
+            return Reject(socket, port, Srt.SRT_REJX_BAD_REQUEST);
         }
 
         var refusal = admit(new Admission(name, streamId!, intent));
 
-        return refusal is null ? 0 : Reject(socket, refusal.Value);
+        return refusal is null ? 0 : Reject(socket, port, refusal.Value);
     }
 
-    private static int Reject(int socket, int code)
+    private int Reject(int socket, int port, int code)
     {
         Srt.srt_setrejectreason(socket, code);
 
+        metrics?.Rejected(port, Reason(code));
+
         return -1;
     }
+
+    /// <summary>
+    /// The rejection as a word, from a closed set. Never the identifier that was refused and never
+    /// the code as text: a tag whose values a caller can choose is a tag that can be made to cost
+    /// whatever the caller likes.
+    /// </summary>
+    private static string Reason(int code) => code switch
+    {
+        Srt.SRT_REJX_BAD_REQUEST => "bad-request",
+        Srt.SRT_REJX_OVERLOAD => "overload",
+        Srt.SRT_REJX_CONFLICT => "conflict",
+        _ => "other",
+    };
 }

@@ -80,6 +80,33 @@ public sealed unsafe class SrtSocketStream : Stream
     /// <summary>What a write is cut into and the smallest buffer a read may be given.</summary>
     public int PayloadSize => _payloadSize;
 
+    /// <summary>
+    /// What this connection lost and dropped since the last time it was asked, or null when the
+    /// socket has gone and there is nothing to ask.
+    ///
+    /// The interval, not the running total, and the <c>clear</c> argument is what makes it one. An
+    /// operator looking at a list of a thousand streams is asking which of them is broken now: a
+    /// total answers "this one lost forty packets at some point today", which is true of a healthy
+    /// stream that had one bad minute and says nothing about the last two seconds. Only the
+    /// heartbeat calls this, once per beat per stream, so the window is that beat and the figure
+    /// reads as "per two seconds" without anything having to record when it was last cleared.
+    ///
+    /// The two are different failures. Lost is what never arrived and could not be retransmitted in
+    /// time, which is the network or a saturated receive path; dropped is what arrived too late for
+    /// the latency window, which is usually the latency window being too small for the link.
+    /// </summary>
+    public (int Lost, int Dropped)? Health()
+    {
+        if (_closed || _socket == Srt.SRT_INVALID_SOCK)
+        {
+            return null;
+        }
+
+        return Srt.Stats(_socket, out var stats, clear: true)
+            ? (stats.pktRcvLoss, stats.pktRcvDrop)
+            : null;
+    }
+
     public override long Length => throw new NotSupportedException();
 
     public override long Position

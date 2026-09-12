@@ -68,6 +68,13 @@ public sealed class LiveStreamEntry : IAsyncDisposable
 
     public Task? Feeding { get; private set; }
 
+    /// <summary>
+    /// The socket the current feed is arriving on, so the heartbeat can ask libsrt how that
+    /// connection is actually doing rather than inferring it from a byte count. Null for a pulled
+    /// stream, which libav dials and which therefore has no socket this service holds.
+    /// </summary>
+    public SrtSocketStream? Transport { get; private set; }
+
     public StreamRecorder? Recorder { get; private set; }
 
     public Task<Guid?>? Recording { get; private set; }
@@ -119,11 +126,12 @@ public sealed class LiveStreamEntry : IAsyncDisposable
         }
     }
 
-    public void Feeds(Task feeding)
+    public void Feeds(Task feeding, SrtSocketStream? transport = null)
     {
         lock (_gate)
         {
             Feeding = feeding;
+            Transport = transport;
         }
     }
 

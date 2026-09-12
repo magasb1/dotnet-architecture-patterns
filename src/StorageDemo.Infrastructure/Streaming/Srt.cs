@@ -286,12 +286,154 @@ public static unsafe partial class Srt
     public static partial byte* srt_getlasterror_str();
 
     /// <summary>
-    /// ponytail: perf is void* rather than a marshalled SRT_TRACEBSTATS, because nothing reads the
-    /// statistics yet. Declare the struct when Phase 4's gauge needs a field out of it; it is
-    /// eighty-odd members and transcribing them before then buys nothing.
+    /// Still void*, because the destination is deliberately larger than the struct. See
+    /// <see cref="Stats"/>, which is the only caller and the only thing that should be.
     /// </summary>
     [LibraryImport(Library)]
     public static partial int srt_bstats(int u, void* perf, int clear);
+
+    /// <summary>
+    /// What libsrt says about one connection, or false when it will not answer - a socket that has
+    /// already gone, which is a normal thing for a caller to ask about and not an error.
+    /// </summary>
+    /// <param name="clear">
+    /// Resets the interval counters, the ones without a <c>Total</c> suffix, so the next sample
+    /// covers only the time since this one. The <c>Total</c> fields are never reset either way.
+    /// </param>
+    public static bool Stats(int socket, out SRT_TRACEBSTATS stats, bool clear)
+    {
+        // srt_bstats writes however many bytes the struct has in the libsrt that is actually
+        // loaded, and takes no length to bound it. The header only ever grows at the end - it says
+        // so in a comment above the struct - so the destination is padded to twice what this file
+        // declares: an older libsrt leaves the tail alone, and one newer than this file writes into
+        // the padding instead of into somebody's stack.
+        Span<byte> destination = stackalloc byte[sizeof(SRT_TRACEBSTATS) * 2];
+
+        destination.Clear();
+
+        fixed (byte* raw = destination)
+        {
+            if (srt_bstats(socket, raw, clear ? 1 : 0) != 0)
+            {
+                stats = default;
+
+                return false;
+            }
+
+            stats = *(SRT_TRACEBSTATS*)raw;
+
+            return true;
+        }
+    }
+}
+
+/// <summary>
+/// libsrt's <c>CBytePerfMon</c>, which <c>srt_bstats</c> fills in.
+///
+/// Transcribed field for field, in order, from <c>srtcore/srt.h</c> at v1.5.3, v1.5.6 and master,
+/// which are byte for byte the same struct: 1.5.3 is what Ubuntu 24.04 installs in the container,
+/// 1.5.6 is what vcpkg builds for a Windows developer, and the file has only ever gained fields at
+/// the end. Nothing here is a guess, because a wrong layout would read plausible garbage and report
+/// it as the health of a stream, which is worse than reporting nothing at all.
+///
+/// Names are libsrt's own, so a field reads straight onto the header and onto every SRT statistics
+/// document. Most of them are never used: they are here because the ones that are used sit at an
+/// offset the fields above them decide.
+///
+/// Sequential layout with the platform's natural alignment, which is what the C compiler gave it -
+/// libsrt packs nothing and both platforms this service runs on align an 8-byte member to 8.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SRT_TRACEBSTATS
+{
+    public long msTimeStamp;
+    public long pktSentTotal;
+    public long pktRecvTotal;
+    public int pktSndLossTotal;
+    public int pktRcvLossTotal;
+    public int pktRetransTotal;
+    public int pktSentACKTotal;
+    public int pktRecvACKTotal;
+    public int pktSentNAKTotal;
+    public int pktRecvNAKTotal;
+    public long usSndDurationTotal;
+    public int pktSndDropTotal;
+    public int pktRcvDropTotal;
+    public int pktRcvUndecryptTotal;
+    public ulong byteSentTotal;
+    public ulong byteRecvTotal;
+    public ulong byteRcvLossTotal;
+    public ulong byteRetransTotal;
+    public ulong byteSndDropTotal;
+    public ulong byteRcvDropTotal;
+    public ulong byteRcvUndecryptTotal;
+    public long pktSent;
+    public long pktRecv;
+    public int pktSndLoss;
+
+    /// <summary>Packets this receiver never got and could not have retransmitted in time.</summary>
+    public int pktRcvLoss;
+
+    public int pktRetrans;
+    public int pktRcvRetrans;
+    public int pktSentACK;
+    public int pktRecvACK;
+    public int pktSentNAK;
+    public int pktRecvNAK;
+    public double mbpsSendRate;
+    public double mbpsRecvRate;
+    public long usSndDuration;
+    public int pktReorderDistance;
+    public double pktRcvAvgBelatedTime;
+    public long pktRcvBelated;
+    public int pktSndDrop;
+
+    /// <summary>Packets that did arrive, too late for the latency window to play them.</summary>
+    public int pktRcvDrop;
+
+    public int pktRcvUndecrypt;
+    public ulong byteSent;
+    public ulong byteRecv;
+    public ulong byteRcvLoss;
+    public ulong byteRetrans;
+    public ulong byteSndDrop;
+    public ulong byteRcvDrop;
+    public ulong byteRcvUndecrypt;
+    public double usPktSndPeriod;
+    public int pktFlowWindow;
+    public int pktCongestionWindow;
+    public int pktFlightSize;
+    public double msRTT;
+    public double mbpsBandwidth;
+    public int byteAvailSndBuf;
+    public int byteAvailRcvBuf;
+    public double mbpsMaxBW;
+    public int byteMSS;
+    public int pktSndBuf;
+    public int byteSndBuf;
+    public int msSndBuf;
+    public int msSndTsbPdDelay;
+    public int pktRcvBuf;
+    public int byteRcvBuf;
+    public int msRcvBuf;
+    public int msRcvTsbPdDelay;
+    public int pktSndFilterExtraTotal;
+    public int pktRcvFilterExtraTotal;
+    public int pktRcvFilterSupplyTotal;
+    public int pktRcvFilterLossTotal;
+    public int pktSndFilterExtra;
+    public int pktRcvFilterExtra;
+    public int pktRcvFilterSupply;
+    public int pktRcvFilterLoss;
+    public int pktReorderTolerance;
+    public long pktSentUniqueTotal;
+    public long pktRecvUniqueTotal;
+    public ulong byteSentUniqueTotal;
+    public ulong byteRecvUniqueTotal;
+    public long pktSentUnique;
+    public long pktRecvUnique;
+    public ulong byteSentUnique;
+    public ulong byteRecvUnique;
 }
 
 /// <summary>

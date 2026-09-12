@@ -26,6 +26,7 @@ namespace StorageDemo.Infrastructure.Streaming;
 public sealed class LiveConsumptionService(
     LiveStreamCoordinator coordinator,
     LiveListeners listeners,
+    LiveMetrics metrics,
     IHttpClientFactory clients,
     IOptions<LiveOptions> options,
     ILogger<LiveConsumptionService> logger) : BackgroundService
@@ -51,7 +52,8 @@ public sealed class LiveConsumptionService(
             Admit,
             OnAccepted,
             logger,
-            listeners);
+            listeners,
+            metrics);
 
         return Task.Factory.StartNew(
             () => listener.Run(_options.ConsumptionPort, stoppingToken),

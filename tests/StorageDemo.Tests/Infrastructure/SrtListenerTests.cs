@@ -61,9 +61,17 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
         var names = Enumerable.Range(1, 20).Select(index => $"cam-{index:00}").ToArray();
         var accepted = new ConcurrentDictionary<string, bool>();
 
+        using var metrics = new LiveMetrics();
+
+        // Before anything is accepted: a counter is an event, so a listener started afterwards sees
+        // none of them.
+        using var meters = new Meters(metrics);
+
+        var listenPort = SrtSenders.FreePort();
+
         await ListeningAsync(
-            Listener(socket => accepted[socket.Name] = true),
-            SrtSenders.FreePort(),
+            Listener(socket => accepted[socket.Name] = true, metrics: metrics),
+            listenPort,
             async port =>
             {
                 // Nothing between them, which is the point.
@@ -80,6 +88,20 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
             });
 
         Assert.Equal(names.Order(), accepted.Keys.Order());
+
+        // The same event, counted. Twenty accepts on one port is one time series and not twenty:
+        // the port is the tag, the name is not, and this is what stops that being changed quietly.
+        var counted = meters
+            .Read()
+            .Where(measurement => measurement.Instrument == "live.accepts")
+            .ToArray();
+
+        Assert.Equal(names.Length, counted.Sum(measurement => measurement.Value));
+        Assert.All(
+            counted,
+            measurement => Assert.Equal(
+                [new KeyValuePair<string, object?>("port", listenPort)],
+                measurement.Tags));
     }
 
     /// <summary>
@@ -133,9 +155,14 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
 
         var accepted = new ConcurrentBag<string>();
 
+        using var metrics = new LiveMetrics();
+        using var meters = new Meters(metrics);
+
+        var listenPort = SrtSenders.FreePort();
+
         await ListeningAsync(
-            Listener(socket => accepted.Add(socket.Name)),
-            SrtSenders.FreePort(),
+            Listener(socket => accepted.Add(socket.Name), metrics: metrics),
+            listenPort,
             async port =>
             {
                 var sender = Sender(port, "../../etc/passwd");
@@ -148,6 +175,135 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
                     refused,
                     $"the sender was not turned away quickly: {SrtSenders.Complaints(_callers)}");
             });
+
+        // The other half of "an operator can find out why an encoder cannot connect". The reason is
+        // a word from a closed set and never the identifier that was refused, which a caller chooses
+        // and could therefore use to choose this metric's cost.
+        var reject = Assert.Single(
+            meters.Read(),
+            measurement => measurement.Instrument == "live.rejects");
+
+        Assert.Equal(
+            [
+                new KeyValuePair<string, object?>("port", listenPort),
+                new KeyValuePair<string, object?>("reason", "bad-request"),
+            ],
+            reject.Tags);
+    }
+
+    /// <summary>
+    /// The one thing that cannot be reasoned about: that the fields this service reads out of
+    /// <c>srt_bstats</c> are the fields libsrt wrote.
+    ///
+    /// <c>SRT_TRACEBSTATS</c> is eighty-two members of mixed width, and libsrt takes no length to
+    /// bound what it writes. A layout that is wrong by one member does not fail: it returns success
+    /// and hands back a plausible number from the wrong offset, which would be reported as the
+    /// health of a stream and believed. So two fields deep inside the struct are checked against
+    /// values known from somewhere else entirely - the MTU, which is libsrt's own default of 1500,
+    /// and the receiver's delivery delay, which has to be the latency the connection negotiated and
+    /// is read here through a socket option instead.
+    ///
+    /// Their offsets are 360 and 392 bytes in, so a struct that is wrong anywhere before them is
+    /// wrong here too.
+    /// </summary>
+    [Fact]
+    public async Task The_statistics_libsrt_writes_land_in_the_fields_this_service_reads()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+
+        var connected = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stats = default(SRT_TRACEBSTATS);
+
+        await ListeningAsync(
+            Listener(
+                socket =>
+                {
+                    var connection = socket.Release();
+                    _held.Add(connection);
+
+                    connected.TrySetResult(connection);
+                },
+                latencyMs: 60),
+            SrtSenders.FreePort(),
+            async port =>
+            {
+                Sender(port, "live/cam-1");
+
+                await SrtSenders.WaitUntilAsync(
+                    () => connected.Task.IsCompleted,
+                    TimeSpan.FromSeconds(15),
+                    () => $"the sender was never accepted on port {port}: {SrtSenders.Complaints(_callers)}");
+
+                var socket = await connected.Task;
+
+                // Sampled once media has actually moved, so the receive counters mean something.
+                await SrtSenders.WaitUntilAsync(
+                    () => Srt.Stats(socket, out stats, clear: false) && stats.pktRecvTotal > 0,
+                    TimeSpan.FromSeconds(15),
+                    () => $"libsrt never reported a received packet: {SrtSenders.Complaints(_callers)}");
+            });
+
+        Assert.True(stats.msTimeStamp > 0, "the connection reported no elapsed time");
+        Assert.Equal(1500, stats.byteMSS);
+
+        Assert.Equal(
+            Srt.GetInt32(await connected.Task, SRT_SOCKOPT.SRTO_RCVLATENCY),
+            stats.msRcvTsbPdDelay);
+    }
+
+    /// <summary>
+    /// A stream that is fine says so, which is the half of the health signal that has to be quiet or
+    /// none of it means anything.
+    ///
+    /// Two samples rather than one, because the figure is an interval and the first one covers the
+    /// connection's whole life. The second covers only the seconds between the two calls, which is
+    /// what the heartbeat reads and what an operator is shown.
+    ///
+    /// The socket is drained throughout. A receiver that never reads accumulates drops of its own
+    /// once packets outlive the latency window, and that would be this test measuring itself.
+    /// </summary>
+    [Fact]
+    public async Task A_healthy_stream_reports_no_loss_and_no_drops()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+
+        var connected = new TaskCompletionSource<SrtSocketStream>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (int Lost, int Dropped)? health = null;
+
+        await ListeningAsync(
+            Listener(socket => connected.TrySetResult(new SrtSocketStream(socket.Release(), writable: false))),
+            SrtSenders.FreePort(),
+            async port =>
+            {
+                Sender(port, "live/cam-1");
+
+                await SrtSenders.WaitUntilAsync(
+                    () => connected.Task.IsCompleted,
+                    TimeSpan.FromSeconds(15),
+                    () => $"the sender was never accepted on port {port}: {SrtSenders.Complaints(_callers)}");
+
+                using var transport = await connected.Task;
+                using var draining = new CancellationTokenSource();
+
+                var drain = Task.Factory.StartNew(
+                    () => Drain(transport, draining.Token),
+                    TaskCreationOptions.LongRunning);
+
+                await Task.Delay(TimeSpan.FromSeconds(2));
+
+                Assert.NotNull(transport.Health());
+
+                await Task.Delay(TimeSpan.FromSeconds(2));
+
+                health = transport.Health();
+
+                await draining.CancelAsync();
+                await drain;
+            });
+
+        Assert.Equal((0, 0), health);
     }
 
     /// <summary>
@@ -395,13 +551,16 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
     private SrtListener Listener(
         Action<AcceptedSocket> onAccepted,
         StreamIntent intent = StreamIntent.Publish,
-        int latencyMs = 120)
+        int latencyMs = 120,
+        LiveMetrics? metrics = null)
         => new(
             intent,
             new LiveOptions { SrtLatencyMs = latencyMs },
             _ => null,
             onAccepted,
-            NullLogger<SrtListener>.Instance);
+            NullLogger<SrtListener>.Instance,
+            listeners: null,
+            metrics);
 
     /// <summary>
     /// Runs a listener on its own thread for as long as the body takes, and stops it afterwards
@@ -423,6 +582,16 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
         {
             await stop.CancelAsync();
             await listening;
+        }
+    }
+
+    /// <summary>Reads until cancelled, so the receiver is never why a packet went stale.</summary>
+    private static void Drain(SrtSocketStream transport, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[transport.PayloadSize];
+
+        while (!cancellationToken.IsCancellationRequested && transport.Read(buffer) > 0)
+        {
         }
     }
 

@@ -13,7 +13,14 @@ public enum LiveStreamState
     Interrupted,
 }
 
-/// <param name="Id">The document this recording will become, once it ends and there is a file.</param>
+/// <param name="Id">
+/// The recording in progress, unique per recording. It is <b>not</b> a document id and never
+/// becomes one: the recorder mints this when it starts and mints nothing else, and the document id
+/// is a separate value that does not exist until the recording ends and its file has been stored.
+/// Nothing in this record carries it, so a caller holding a running recording cannot name the
+/// document it will become - it can only wait for the recording to finish and find the document by
+/// what it was written with.
+/// </param>
 /// <param name="EndsAt">
 /// When it is due to stop. A further trigger moves this later rather than starting a second
 /// recording, so continuous detection leaves one clip covering the whole event.
@@ -61,6 +68,18 @@ public sealed record RecordingStatus(
 /// True when the buffer's byte ceiling is evicting before its time window is reached, which
 /// silently shortens every pre-roll taken from it.
 /// </param>
+/// <param name="PacketsLost">
+/// Packets the transport never received on this feed during the last heartbeat, as libsrt counts
+/// them. Zero on a healthy stream, and the first thing to look at on one that is not: a stream can
+/// be listed as live, with packets and bytes rising, while most of what was sent to it is missing.
+/// An interval rather than a total, so it answers "is this stream broken now"; see
+/// <c>SrtSocketStream.Health</c>.
+/// </param>
+/// <param name="PacketsDropped">
+/// Packets that did arrive but too late for the latency window to play them, over the same
+/// interval. Distinct from lost, and usually means the window is too small for the link rather
+/// than that the link is failing.
+/// </param>
 public sealed record LiveStream(
     string Name,
     LiveStreamState State,
@@ -77,7 +96,9 @@ public sealed record LiveStream(
     string? Layout,
     RecordingStatus? Recording,
     string? ConnectionId,
-    bool Manual = false);
+    bool Manual = false,
+    int PacketsLost = 0,
+    int PacketsDropped = 0);
 
 /// <summary>
 /// Where live streams are recorded so every replica can see them, not just the one holding the

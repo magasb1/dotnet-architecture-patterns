@@ -30,6 +30,7 @@ public sealed class LiveStreamCoordinator(
     IServiceScopeFactory scopeFactory,
     IOptions<LiveOptions> options,
     IOptions<MediaOptions> mediaOptions,
+    LiveMetrics metrics,
     ILogger<LiveStreamCoordinator> logger) : ILiveStreamService, IAsyncDisposable
 {
     /// <summary>
@@ -129,7 +130,7 @@ public sealed class LiveStreamCoordinator(
         _ = Task.Run(() => AttachAsync(name, transport, connectionId));
     }
 
-    private async Task AttachAsync(string name, Stream transport, string connectionId)
+    private async Task AttachAsync(string name, SrtSocketStream transport, string connectionId)
     {
         LiveStreamEntry? entry = null;
 
@@ -157,9 +158,9 @@ public sealed class LiveStreamCoordinator(
             var feed = await entry.TakeOverAsync(connectionId);
             var running = entry;
 
-            entry.Feeds(Task.Factory.StartNew(
-                () => Feed(running, transport, feed),
-                TaskCreationOptions.LongRunning));
+            entry.Feeds(
+                Task.Factory.StartNew(() => Feed(running, transport, feed), TaskCreationOptions.LongRunning),
+                transport);
         }
         catch (Exception ex)
         {
@@ -589,6 +590,11 @@ public sealed class LiveStreamCoordinator(
             }
         }
 
+        // After the pass, so it counts what survived it. One beat stale at worst, which is the same
+        // freshness as everything else a replica publishes about itself, and an autoscaler that
+        // cared about two seconds would be reacting to a reconnect.
+        metrics.StreamsOwned = _local.Count;
+
         await RefreshKnownAsync(cancellationToken);
     }
 
@@ -692,6 +698,12 @@ public sealed class LiveStreamCoordinator(
     {
         var buffer = entry.Hub.BufferState();
 
+        // Asked of libsrt here because this runs once per beat per stream and nowhere else does.
+        // The sample is the interval since the last beat, which is what makes the answer "broken
+        // now" rather than "broken at some point". A stream with no socket - pulled, or between
+        // connections - reports nothing rather than a stale figure from the connection before.
+        var health = entry.Transport?.Health();
+
         return new LiveStream(
             entry.Name,
             state,
@@ -708,7 +720,9 @@ public sealed class LiveStreamCoordinator(
             entry.Hub.Layout?.Describe(),
             entry.Recorder is { Finished: false } recorder ? recorder.Status : null,
             entry.ConnectionId,
-            entry.Manual);
+            entry.Manual,
+            health?.Lost ?? 0,
+            health?.Dropped ?? 0);
     }
 
     private void RequireAllowed(string url)

@@ -53,6 +53,7 @@ public static class DependencyInjection
         // because switching it on opens a port anybody who can reach it may push a stream into.
         Bind<LiveOptions>(services, configuration, LiveOptions.SectionName);
         services.AddSingleton<LiveListeners>();
+        services.AddSingleton<LiveMetrics>();
         services.AddSingleton<StreamDemuxer>();
         services.AddSingleton<LiveStreamCoordinator>();
         services.AddSingleton<ILiveStreamService>(sp => sp.GetRequiredService<LiveStreamCoordinator>());
@@ -97,6 +98,13 @@ public static class DependencyInjection
         {
             services.AddHostedService<FileSystemChangeWatcher>();
         }
+
+        // Expires recordings and snapshots, and removes registry entries whose owner was killed
+        // before it could clean up. Off unless configured: nothing else in this service deletes a
+        // document by itself, and doing it by default would be deleting somebody's data uninvited.
+        Bind<RetentionOptions>(services, configuration, RetentionOptions.SectionName);
+        services.AddScoped<RetentionSweeper>();
+        services.AddHostedService<RetentionService>();
 
         services.AddScoped<ISeeder, ReferenceDataSeeder>();
         if (isDevelopment)

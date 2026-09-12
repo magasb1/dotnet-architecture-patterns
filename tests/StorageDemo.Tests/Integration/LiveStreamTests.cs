@@ -557,6 +557,55 @@ public sealed class LiveStreamTests : IAsyncLifetime
         Assert.Single(listed!.Streams, stream => stream.Name == name);
     }
 
+    /// <summary>
+    /// The two answers Phase 9 exists to give, through the real application: which stream is broken,
+    /// and how much this replica is carrying.
+    ///
+    /// The first is per stream and comes out of the API, where an operator with a thousand streams
+    /// already looks. The second is per pod and comes out of the meter, where an autoscaler looks
+    /// and where a stream name must never appear.
+    ///
+    /// The health figures are asserted as zero because a loopback stream at 600 kbit/s does not lose
+    /// packets. That is the honest half of this test and also its limit: it pins that the figures
+    /// are read, carried and serialised, and it cannot pin that a broken stream reports a non-zero
+    /// one, which needs load this suite has no way to generate. The property name is asserted on the
+    /// raw JSON because that, not the C# record, is what an operator's tooling reads.
+    /// </summary>
+    [Fact]
+    public async Task A_live_stream_reports_its_health_on_the_api_and_the_replica_reports_what_it_holds()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
+
+        const string name = "camera-with-a-health-figure";
+
+        var metrics = _factory.Services.GetRequiredService<LiveMetrics>();
+        using var meters = new Meters(metrics);
+
+        Assert.Equal(0, meters.Value("live.streams.owned"));
+
+        Push(name);
+
+        var stream = await WaitForStreamAsync(name, TimeSpan.FromSeconds(40));
+
+        Assert.NotNull(stream);
+        Assert.Equal(0, stream.PacketsLost);
+        Assert.Equal(0, stream.PacketsDropped);
+
+        var listed = await _client.GetStringAsync("/api/live");
+
+        Assert.Contains("\"packetsLost\":", listed, StringComparison.Ordinal);
+        Assert.Contains("\"packetsDropped\":", listed, StringComparison.Ordinal);
+
+        // Published by the heartbeat rather than by the claim, so it arrives a beat after the stream
+        // does. Waiting for it is also what proves the heartbeat is what publishes it.
+        Assert.True(
+            await WaitAsync(
+                () => Task.FromResult(meters.Value("live.streams.owned") == 1),
+                TimeSpan.FromSeconds(20)),
+            $"the meter reported {meters.Value("live.streams.owned")} streams owned rather than one");
+    }
+
     private async Task<DocumentResponse?> Get(Guid id)
     {
         var documents = await _client.GetFromJsonAsync<List<DocumentResponse>>("/api/documents");

@@ -15,6 +15,7 @@ namespace StorageDemo.Infrastructure.Streaming;
 public sealed class LiveIngestService(
     LiveStreamCoordinator coordinator,
     LiveListeners listeners,
+    LiveMetrics metrics,
     IOptions<LiveOptions> options,
     ILogger<LiveIngestService> logger) : BackgroundService
 {
@@ -62,7 +63,8 @@ public sealed class LiveIngestService(
             coordinator.AdmitPublisher,
             coordinator.OnAccepted,
             logger,
-            listeners);
+            listeners,
+            metrics);
 
         // One thread per port and one libsrt receive worker behind each, which is the only way this
         // replica gets more than one: the worker belongs to the multiplexer, and there is one of
