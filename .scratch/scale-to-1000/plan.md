@@ -1158,6 +1158,23 @@ therefore load-bearing rather than informational, and a consumer cannot recover 
 it. It is this standard's equivalent of the wrong-scale problem that made the 0601 validation worth
 doing.
 
+### The inference half has its own plan
+
+`detection-plan.md` covers what runs in the worker: the model-agnostic seam, RF-DETR first with
+YOLO proving the abstraction, and five phases from geometry to tracking. Two findings from
+`research/onnxruntime-dotnet.md` and `research/detector-models.md` changed this section's
+assumptions and belong here too:
+
+- **The zero-copy path this plan assumed is not practical from .NET.** ONNX Runtime can wrap a
+  device pointer and FFmpeg's hardware frame is one, but the bridge between pitched NV12 and a
+  dense tensor is a CUDA kernel that cannot be written in C#. The realistic route is on-device
+  resize with normalisation baked into the model graph, which removes the kernel requirement; the
+  fallback is a host copy of about 93 MB/s per stream at 30 frames a second.
+- **One project reference serves both environments.** The GPU package's natives include the
+  processor provider and the CUDA library loads lazily, so a developer machine with no GPU runs the
+  same build. That was an open question about how the seam stays honest without hardware, and it is
+  answered.
+
 ### Two things that decide whether the GPU is used well
 
 **Decode and inference share the GPU.** Frames go from NVDEC into device memory and into the model
