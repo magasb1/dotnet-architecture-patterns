@@ -25,8 +25,13 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
       reference senders. The join-latency floor is the encoder's keyframe interval
 - [x] Phase 1b: a live name is locked. A second publisher of a name that is live and held is
       refused at the handshake, rather than taking it over
-- [ ] Verify Phase 1b on real pods, via the k3s rig in docs/replica-failover.md. It is the only
-      built behaviour never run on more than one replica, and it is about two of them
+- [x] Verify cross-pod behaviour on k3s. Found two defects, both fixed: a graceful shutdown was
+      worse for a viewer than a crash, and a stream that moved replicas got a new start time
+- [ ] Decide who sweeps abandoned registry entries. A force-killed pod leaks one per stream into
+      Redis forever, and until something sweeps them a graceful shutdown cannot interrupt instead
+      of delete, which is what a rolling update needs to keep a stream's start time
+- [ ] Refresh docs/replica-failover.md with the k3s numbers. Its recorded figures predate all of
+      this work and its claims about the viewer and the start time were only made true yesterday
 - [x] Phase 0 baseline on one container: see `.scratch/scale-to-1000/baseline.md`. Accept rate is
       at least 20/s and the rig was always the limit, not the service
 - [ ] Phase 3: the in-cluster viewer hop becomes HTTP, deleting the SRT relay and AvioStream

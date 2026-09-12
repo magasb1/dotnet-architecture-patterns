@@ -85,14 +85,31 @@ ran there for the first time, so the negotiation is confirmed rather than reason
 **The race fix is verified**: 100 runs of the snapshot test under constrained CPU with no failure,
 against a rate of roughly one in eight before it.
 
+**Cross-pod behaviour is verified too, and it cost two defects.** `cross-pod.md` ran two replicas
+on k3s. The name lock refuses a live name on another pod in about half a second with the right
+rejection code while the incumbent carries on; an interrupted name is admitted anywhere and resumes
+as one entry; a viewer on the wrong pod gets media; a preview and a snapshot asked of a non-owner
+come back as real bytes. The two defects it found are fixed and described in the commit: a graceful
+shutdown was worse for a viewer than a crash, and a stream that moved replicas got a new start
+time. Phase 1b's real cost on a force-kill is about one second, one refusal and one retry, not the
+several this plan guessed.
+
+**One number moves Phase 3 up the list.** The SRT relay roughly doubles a viewer's join: 1.8
+seconds pulling from the owner against 3.8 relayed. Phase 3's target was under ten milliseconds of
+difference.
+
 **What is owed.**
 
 - **The load rig has never been pointed at anything.** Phase 0's five baseline numbers are all
   unmeasured, including the one that sizes pods.
-- **Nothing has run on more than one replica.** Every cross-pod behaviour in this plan is still
-  argued rather than observed: the name lock across pods, the viewer that lands on the wrong pod,
-  a stream moving when its owner dies. Docker Desktop's Kubernetes would exercise the first two
-  and would not reproduce load-balancer behaviour faithfully.
+- **A registry entry is never swept, and a graceful shutdown deletes rather than interrupts.**
+  Found on k3s and deliberately not fixed, because both halves need a decision rather than a
+  patch. A force-killed pod leaks one entry per stream into Redis forever, since nothing in the
+  service ever removes an entry whose owner is gone. And a clean shutdown deletes its entries, so
+  a rolling update still resets a stream's start time even after the fix above. Making shutdown
+  interrupt instead of delete would preserve the start time and trade it for that leak on the
+  common path, which is why it is a design question: something has to own sweeping abandoned
+  entries before the obvious fix is safe.
 
 **Two things Phase 1 left behind, both small and both recorded in code.** `SrtSocketStream`'s
 receive timeout can be lengthened now that the close is proven to unblock a read, and
