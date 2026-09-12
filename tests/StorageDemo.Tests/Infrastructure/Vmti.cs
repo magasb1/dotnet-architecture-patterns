@@ -112,6 +112,17 @@ internal static class Vmti
     public static string Text(byte[] value) => Encoding.UTF8.GetString(value);
 
     /// <summary>
+    /// ST 0903.4-53: a 16-byte UUID, read in the byte order the section 11 Track ID example shows,
+    /// which is network order and not the order <see cref="Guid.ToByteArray()"/> uses by default.
+    /// </summary>
+    public static Guid Uuid(byte[] value)
+    {
+        Assert.Equal(16, value.Length);
+
+        return new Guid(value, bigEndian: true);
+    }
+
+    /// <summary>
     /// ST 0903.4 section 11.15 Tag 1 backwards: pixel number to (column, row), one-based from the
     /// top left. The division is the half of the formula the encoder never runs, which is why this
     /// catches a frame width the encoder got wrong.

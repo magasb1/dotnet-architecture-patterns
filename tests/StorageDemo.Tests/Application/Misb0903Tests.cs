@@ -183,6 +183,48 @@ public sealed class Misb0903Tests
             () => Misb0903.Encode(Frame(new VmtiDetection(1, 0, 0, 30, 40))));
     }
 
+    [Fact]
+    public void A_vtracker_local_set_survives_the_round_trip()
+    {
+        var id = Guid.Parse("f81d4fae-7dec-11d0-a765-00a0c91e6bf6"); // the section 11 example UUID
+        var started = Timestamp.AddSeconds(-12.5);
+        var full = new VmtiTrack(id, VmtiTrackStatus.Dropped, started, Timestamp, "ByteTrack", 70);
+        var bare = new VmtiTrack(Guid.NewGuid(), VmtiTrackStatus.Active, Timestamp, Timestamp);
+
+        var decoded = Vmti.Decode(Misb0903.Encode(Frame(
+            new VmtiDetection(7, 100, 200, 140, 260, Track: full),
+            new VmtiDetection(8, 300, 200, 340, 260, Track: bare),
+            new VmtiDetection(9, 500, 200, 540, 260))));
+
+        var vtracker = Vmti.Nested(decoded.Targets[0].Items[104]);
+
+        // Table 6 tag 1 is F16 in RFC 4122 byte order: the standard's example spells that UUID as
+        // F8 1D 4F AE 7D EC 11 D0 ..., and a little-endian Guid would come back as a different id.
+        Assert.Equal(id, Vmti.Uuid(vtracker[1]));
+        Assert.Equal(new byte[] { 0xF8, 0x1D, 0x4F, 0xAE }, vtracker[1][..4]);
+        Assert.Equal(2UL, Vmti.Integer(vtracker[2])); // Table 16: Dropped
+        Assert.Equal(started, DateTimeOffset.UnixEpoch.AddTicks((long)Vmti.Integer(vtracker[3]) * 10));
+        Assert.Equal(Timestamp, DateTimeOffset.UnixEpoch.AddTicks((long)Vmti.Integer(vtracker[4]) * 10));
+        Assert.Equal("ByteTrack", Vmti.Text(vtracker[6]));
+        Assert.Equal(70UL, Vmti.Integer(vtracker[7]));
+        Assert.DoesNotContain(8, vtracker.Keys); // no geodetic locus, so no track point count
+
+        var minimal = Vmti.Nested(decoded.Targets[1].Items[104]);
+
+        Assert.Equal(bare.Id, Vmti.Uuid(minimal[1]));
+        Assert.Equal([1, 2, 3, 4], minimal.Keys.Order());
+        Assert.DoesNotContain(104, decoded.Targets[2].Items.Keys);
+    }
+
+    [Fact]
+    public void A_track_last_seen_before_it_started_is_refused()
+    {
+        var track = new VmtiTrack(Guid.NewGuid(), VmtiTrackStatus.Active, Timestamp, Timestamp.AddSeconds(-1));
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => Misb0903.Encode(Frame(new VmtiDetection(1, 10, 20, 30, 40, Track: track))));
+    }
+
     private static (int Column, int Row) Pixel(VmtiPack target, int tag)
         => Vmti.Pixel(Vmti.Integer(target.Items[tag]), 1920);
 }

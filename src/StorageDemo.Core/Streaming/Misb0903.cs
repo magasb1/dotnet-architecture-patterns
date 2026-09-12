@@ -24,6 +24,10 @@ namespace StorageDemo.Core.Streaming;
 /// VObject LS tag 2, the class name as it appears in the ontology named by
 /// <see cref="VmtiFrame.Ontology"/>. Null when the detector reports a box but no class.
 /// </param>
+/// <param name="Track">
+/// VTarget Pack tag 104, the VTracker LS: present when a tracker, not just a detector, produced
+/// this box. Null for a bare detection.
+/// </param>
 public sealed record VmtiDetection(
     int Id,
     int Left,
@@ -31,7 +35,56 @@ public sealed record VmtiDetection(
     int Right,
     int Bottom,
     int? ConfidencePercent = null,
-    string? OntologyClass = null);
+    string? OntologyClass = null,
+    VmtiTrack? Track = null);
+
+/// <summary>
+/// ST 0903.4 Table 16, the VTracker LS Detection Status values, numbered as the standard numbers
+/// them so the enum casts straight onto the wire. The descriptions are the standard's, paraphrased.
+/// </summary>
+public enum VmtiTrackStatus
+{
+    /// <summary>Detections have ended: merged, split, or nothing correlates any more.</summary>
+    Inactive = 0,
+
+    /// <summary>Established or updated from a VMTI report or a prediction.</summary>
+    Active = 1,
+
+    /// <summary>Uncorrelated for longer than a threshold, "lost", but may still resume.</summary>
+    Dropped = 2,
+
+    /// <summary>Stationary, or always was.</summary>
+    Stopped = 3,
+}
+
+/// <summary>
+/// What a track adds to a detection, in the terms of ST 0903.4 Table 6 (VTracker LS): who the
+/// track is, what state it is in, and when it was first and last actually observed. Everything
+/// else in that table (bounding box, locus, velocity, acceleration) is in geodetic Location packs,
+/// which a pixel-space tracker cannot fill, so it is not here.
+/// </summary>
+/// <param name="Id">
+/// Tag 1, Track ID. ST 0903.4-53: a 16-byte UUID per ISO/IEC 9834-8, which is why it is a
+/// <see cref="Guid"/> and not the VTarget Pack's 21-bit integer.
+/// </param>
+/// <param name="Started">Tag 3, first observation, microseconds (ST 0603 clock).</param>
+/// <param name="LastSeen">
+/// Tag 4, the most recent observation. On a frame where the box is a prediction this is older
+/// than the frame's own timestamp, and that difference is how a consumer tells a coasted box
+/// from a seen one.
+/// </param>
+/// <param name="Algorithm">Tag 6, a name that identifies the tracker uniquely.</param>
+/// <param name="ConfidencePercent">
+/// Tag 7, 0 to 100: certainty that the sequence of detections is one object. Distinct from the
+/// detection's own confidence, and null when the tracker has no such estimate.
+/// </param>
+public sealed record VmtiTrack(
+    Guid Id,
+    VmtiTrackStatus Status,
+    DateTimeOffset Started,
+    DateTimeOffset LastSeen,
+    string? Algorithm = null,
+    int? ConfidencePercent = null);
 
 /// <summary>
 /// One frame's detections, with the frame-level facts a consumer needs to make sense of them. A
@@ -120,9 +173,12 @@ public sealed record DetectionReference(string Stream, DateTimeOffset Timestamp,
 /// when detection ran on different imagery than the video), 13 (MIIS core identifier); VTarget
 /// tags 4 (priority), 6 (target history), 7-9 (pixel share, colour, intensity), 10-18 (all the
 /// geo-space forms, which are the worker's job once it has ST 0601 platform data), 19/20 (centroid
-/// as row and column, a redundant spelling of tag 1), 21 (FPA index); and the VMask, VFeature,
-/// VChip and VTracker local sets. VTracker is the one to add first: it is where a track's history
-/// lives, and pattern of life is a track question.
+/// as row and column, a redundant spelling of tag 1), 21 (FPA index); and the VMask, VFeature
+/// and VChip local sets. The VTracker LS (tag 104) is encoded, but only its pixel-free half: tags
+/// 5, 8, 9, 10 and 11 (bounding box, locus, velocity, acceleration) are geodetic Location packs
+/// (section 9.12) and wait for the worker to have ST 0601 platform data. Section 10 of the same
+/// document already defines the track-centric VTrack LS and says it is preferred over VTracker;
+/// that is a separate packet type with its own key and is not started here.
 /// </summary>
 public static class Misb0903
 {
@@ -228,7 +284,55 @@ public static class Misb0903
             Item(pack, 102, VObject(frame.Ontology, target));
         }
 
+        if (detection.Track is { } track)
+        {
+            Item(pack, 104, VTracker(track));
+        }
+
         return [.. pack];
+    }
+
+    /// <summary>
+    /// Table 6: the VTracker LS, nested under VTarget Pack tag 104 (Table 2). The tags and formats
+    /// are Table 6's; the wording of each is section 11's VTracker pages.
+    /// </summary>
+    private static byte[] VTracker(VmtiTrack track)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(track.LastSeen, track.Started);
+
+        var set = new List<byte>();
+
+        // Tag 1, F16, ST 0903.4-53: a UUID. The section 11 example writes F81D4FAE-7DEC-11D0-...
+        // as the bytes F8 1D 4F AE 7D EC 11 D0 in that order, which is RFC 4122 network order,
+        // not the little-endian layout Guid.ToByteArray() gives by default.
+        Item(set, 1, track.Id.ToByteArray(bigEndian: true));
+
+        // Tag 2, F1: Table 16's enumeration, whose numbering the enum reproduces.
+        Item(set, 2, [(byte)track.Status]);
+
+        // Tags 3 and 4 are V8 ("Variable up to 8 Bytes"), unlike the VMTI LS's own tag 2, which
+        // is a fixed eight. Same ST 0603 microsecond clock.
+        Item(set, 3, Variable(Microseconds(track.Started)));
+        Item(set, 4, Variable(Microseconds(track.LastSeen)));
+
+        if (track.Algorithm is { } algorithm)
+        {
+            Item(set, 6, Encoding.UTF8.GetBytes(algorithm));
+        }
+
+        if (track.ConfidencePercent is { } confidence)
+        {
+            // Tag 7, one byte, 0 to 100 as a percentage, like the VTarget Pack's tag 5.
+            ArgumentOutOfRangeException.ThrowIfNegative(confidence);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(confidence, 100);
+            Item(set, 7, [(byte)confidence]);
+        }
+
+        // Tags 8 and 9 (track point count and locus) are left out together: ST 0903.4-55 wants a
+        // count of at least one whenever it is present, and the section 11 note on tag 8 says the
+        // count need not be specified at all, so absent is the only conforming option without a
+        // geodetic locus.
+        return [.. set];
     }
 
     /// <summary>
