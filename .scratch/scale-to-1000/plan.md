@@ -1076,6 +1076,18 @@ goal: the GPU execution provider in the cluster, batching across the streams tha
 frames staying in device memory from decode to inference. On a developer machine the CPU provider
 runs the same graph slowly, which is what keeps the seam honest without a GPU.
 
+### Detections leave the worker as MISB ST 0903, not as a private format
+
+Found by way of a commercial KLV library's feature list rather than by design: the standard family
+this project targets already defines how detections and tracks are encoded. **MISB ST 0903, Video
+Moving Target Indicator**, is part of MISP-2019.1, so a STANAG 4609 consumer expects detections as
+a VMTI local set riding beside the video, aligned to the same frame timestamps as the 0601
+metadata. The worker tier therefore emits ST 0903, and the "detections and the preview, back to
+the API" box on the diagram means a KLV stream a conforming consumer can read, not JSON invented
+here. Pattern of life is a track question, and ST 0903 carries tracks as well as detections, which
+is the other half of why it fits. Fetch the standard before designing the wire format; do not work
+from a library's tag list.
+
 ### Two things that decide whether the GPU is used well
 
 **Decode and inference share the GPU.** Frames go from NVDEC into device memory and into the model
