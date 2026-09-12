@@ -25,6 +25,12 @@
          open for hours, so it wants the factory's handler pooling rather than a client of its own. -->
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="10.0.0" />
+    <!-- The GPU package on purpose, even though a developer machine has no GPU: its natives carry
+         the processor provider too, and the CUDA library only loads when a session asks for it, so
+         one reference serves both environments. The cost is ~146 MB of unused natives in a
+         developer restore, which beats two project configurations
+         (research/onnxruntime-dotnet.md section 1). -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.30.0" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <PackageReference Include="StackExchange.Redis" Version="2.9.11" />

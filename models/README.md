@@ -71,4 +71,4 @@ Checked by eye: the dog box sits on the beagle, the top cup on the right-hand gl
 across the top. A .NET test should assert `dog` (18) > 0.5 with a box within a few pixels of
 `(158, 493, 459, 850)`, and a `person` (1) > 0.8; a different resize (OpenCV `INTER_LINEAR` is the
 match, PIL is not) shifts scores by a few hundredths and boxes by a pixel or two, so do not assert
-exact equality. An all-black 384x384 frame gives a max sigmoid score of 0.000.
+A blank (all-zero) frame is not silent: with ONNX Runtime 1.30 it yields `potted plant` at about 0.115 over the whole frame. Assert nothing above 0.2 rather than nothing at all; the .NET runner reproduces exactly this.
