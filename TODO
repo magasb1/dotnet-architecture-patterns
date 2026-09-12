@@ -56,8 +56,9 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
       at a useful batch size, and whether NVDEC or the model saturates first
 - [ ] Separate detection rate from tracking rate. Pattern of life needs stable identities, which is
       a tracker property; detecting every frame on every stream is the most expensive option there is
-- [ ] Decide the overload signal. At 250 streams the API reported 250 healthy while a fifth of the
-      media arrived, so a streams-owned gauge cannot tell health from collapse. Blocks Phase 4
+- [x] The overload signal, proven on the rig at 50, 100 and 250 streams: per-stream loss and drop
+      name the degraded streams, the pod-level kernel counter is the collapse itself, and both
+      agree with delivered bitrate. Phase 4 is unblocked; decide over a window of beats
 - [ ] Phase 4: refuse at the handshake when the pod is full, a gauge to scale on, and honest CPU
       and memory in k8s/live/deployment.yaml, which is short by about tenfold on both
 - [ ] Phase 5: optional SRT passphrase, enforced during the handshake

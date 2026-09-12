@@ -1165,6 +1165,28 @@ is the trap that makes naive instrumentation expensive, and it is worth one sent
 The Prometheus exporter stays out until an autoscaler exists, for the reason `research/k8s-autoscaling-and-metrics.md`
 records: it has never shipped a stable release. `dotnet-counters` reads the meter with no package.
 
+### Proven, on the rig, at three loads
+
+`health-signal.md` re-ran the overload case with Phase 9 in the image. At 50 streams every figure
+was zero on every stream for the whole run, and the kernel counter never moved. At 250, the
+service collapsed to a twentieth of the delivered bitrate, the kernel logged about 12,900 receive
+errors a second, and `GET /api/live` named the degraded streams: non-zero loss and drop on two
+hundred of them on every heartbeat, with the zeros being the streams that had no socket. Meter and
+kernel agreed to the packet at 100 streams, 227,135 each, read independently.
+
+Two things the plan had wrong, both in the useful direction. It predicted the per-stream figures
+would be blind to multiplexer-level overload and only the pod-level counter would see it; in fact
+the drops happen on the one shared UDP socket and every SRT socket sees the resulting gaps, so
+one API call attributes the failure. And lost equals dropped at collapse, because retransmits die
+on the same full socket, so there is nothing to recover.
+
+Two cautions for Phase 4. Near the knee a single beat is noisy, so an autoscaler decides over a
+window of beats rather than one. And the signal caught the measuring agent's own sidecar starting
+mid-window, which is a good sign about the signal and a warning about sampling.
+
+**Verdict: Phase 4 can trust it.** The pod-level receive errors are the collapse mechanism itself
+and are what an autoscaler reads; the per-stream figures are for attribution.
+
 ### What good looks like
 
 Re-run the baseline's 250-stream case. Today it reports 250 healthy. After this phase it should
