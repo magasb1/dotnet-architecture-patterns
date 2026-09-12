@@ -13,6 +13,8 @@ Constraints, fixed by the repository owner:
 - Lowest possible end-to-end latency.
 - Push and pull ingest both exist and both matter.
 - No media server in front. Everything is a service in this repository.
+- The desktop client speaks gRPC. REST is the surface for AI agents and command-line tools, so a
+  live feature is not finished until it is on the proto as well as on a route.
 
 ## What is wrong today, in one line each
 
@@ -1156,6 +1158,24 @@ records: it has never shipped a stable release. `dotnet-counters` reads the mete
 Re-run the baseline's 250-stream case. Today it reports 250 healthy. After this phase it should
 show the drops, and an operator should be able to name the degraded streams from one API call.
 That is the acceptance test, and it is runnable on the rig that exists.
+
+## Phase 11: The gRPC surface catches up with REST
+
+Decided by the owner: the desktop client stays gRPC, and REST is for agents and command-line
+tools. The client plan found that everything the client now needs is REST-only, and one thing is
+worse than missing: `DownloadLivePreview` deliberately does not proxy to the owning replica, so in
+a cluster of eight pods the current client shows icons on most tiles. That was a documented
+trade-off when one replica was the normal case; it is a defect now.
+
+So one proto change, once, carrying all of it rather than one per feature: the health figures and
+the classification marking on `ListLive`; a preview that proxies to the owner the way the REST
+route does; a KLV call returning the ST 0902 minimum set and the raw packet; the detection toggle
+when Phase 8 exists; and whatever retention exposes. The client plan lists which are a field on an
+existing message and which are a new RPC, in the order its phases need them.
+
+Whether the live RPCs are guarded at all is a question to answer while in there: the REST live
+routes require a token, and a gRPC surface that bypasses it would be a hole rather than a
+convenience.
 
 ## Phase 10: Retention, and the sweeper nothing owns
 

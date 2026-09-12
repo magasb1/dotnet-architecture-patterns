@@ -44,6 +44,8 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
       service did, so the ratio is "about two" rather than a number
 - [ ] Measure whether pooling StreamDemuxer.Pump's per-packet byte[] moves the per-stream thread
       cost. Two threads per stream at ~1.7% of a core is what actually dominates, not the preview
+- [ ] Phase 11: the gRPC surface catches up with REST, in one proto change. The client stays gRPC
+      by decision; health, marking, a proxied preview and KLV must reach ListLive and friends
 - [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and
       returns detections and the preview. Detection runs on every stream, so decoding on demand
       answers nothing; KLV needs no decode at all and must not argue for any
