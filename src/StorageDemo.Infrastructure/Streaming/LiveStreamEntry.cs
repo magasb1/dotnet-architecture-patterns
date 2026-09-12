@@ -45,7 +45,16 @@ public sealed class LiveStreamEntry : IAsyncDisposable
 
     private IDisposable PreviewSubscription { get; }
 
-    public DateTimeOffset StartedAt { get; } = DateTimeOffset.UtcNow;
+    /// <summary>
+    /// When the stream began, which is not when this entry was built: a stream that moves to
+    /// another replica is the same stream resuming, and its start time has to move with it or the
+    /// name is the only thing that survived. Set from the registry by <c>Resumes</c> under the
+    /// claim lock, before anything reads it.
+    /// </summary>
+    public DateTimeOffset StartedAt { get; private set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>Adopts the start time of the stream this entry is taking over.</summary>
+    public void Resumes(DateTimeOffset startedAt) => StartedAt = startedAt;
 
     public bool Manual { get; }
 

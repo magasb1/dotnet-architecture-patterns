@@ -252,12 +252,23 @@ public sealed class LiveStreamCoordinator(
                 return false;
             }
 
-            if (existing is not null && existing.Owner != Owner && !LiveStreamStaleness.IsGone(existing, Grace))
+            if (existing is not null && !LiveStreamStaleness.IsGone(existing, Grace))
             {
-                logger.LogInformation(
-                    "Taking '{Name}' over from {Previous}, which will stand down on its next heartbeat",
-                    entry.Name,
-                    existing.Owner);
+                // The same stream resuming, so it keeps the start time it has always had. Without
+                // this a stream that moved replicas looked identical to a new one with the same
+                // name: same registry entry, but a start time that jumped to the moment the new
+                // owner built its entry. docs/replica-failover.md claims the start time survives a
+                // move; on one host it did, because the entry was reused, and across two pods it
+                // did not. Observed on k3s; see .scratch/scale-to-1000/cross-pod.md.
+                entry.Resumes(existing.StartedAt);
+
+                if (existing.Owner != Owner)
+                {
+                    logger.LogInformation(
+                        "Taking '{Name}' over from {Previous}, which will stand down on its next heartbeat",
+                        entry.Name,
+                        existing.Owner);
+                }
             }
 
             await registry.UpsertAsync(Describe(entry, LiveStreamState.Live), cancellationToken);

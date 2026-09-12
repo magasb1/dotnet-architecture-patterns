@@ -142,6 +142,46 @@ public sealed class LiveNameLockTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// A stream that moves to another replica is the same stream resuming, so it keeps its start
+    /// time. On one host that is free, because the entry the replica already holds is reused; across
+    /// two it has to be carried through the registry, and it was not. The symptom is a stream whose
+    /// start time jumps forward every time its owner is replaced, which makes "this feed has been up
+    /// for two hours" a lie told once per rolling update.
+    ///
+    /// docs/replica-failover.md states the start time survives a move. This is that claim, tested.
+    /// </summary>
+    [Fact]
+    public async Task A_name_resumed_on_another_pod_keeps_its_start_time()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
+
+        const string name = "moved-camera";
+        var began = DateTimeOffset.UtcNow.AddMinutes(-7);
+
+        // The production grace period rather than this fixture's five seconds, because the window
+        // this test lives in does not exist at five: a name frees three beats after its owner stops
+        // heartbeating, which is six seconds, and a stream whose heartbeat is six seconds old is
+        // already gone under a five second grace. A stream that is gone leaves no trace and its name
+        // is genuinely new the next time somebody publishes it, which is why the claim only carries
+        // a start time forward for an entry that is still listed.
+        Start("pod-b", _bIngest, _shared, graceSeconds: 30);
+
+        // A pod that was killed outright: an entry nothing will ever update again. Eight seconds
+        // frees the name, and leaves the stream listed as interrupted rather than gone.
+        await _shared.UpsertAsync(Entry(name, "ghost", DateTimeOffset.UtcNow.AddSeconds(-8), began));
+
+        Send(_bIngest, name);
+
+        await Until(
+            async () => await _shared.GetAsync(name) is { Owner: "pod-b", State: LiveStreamState.Live },
+            TimeSpan.FromSeconds(40),
+            "B never took a name whose owner was gone");
+
+        Assert.Equal(began, (await _shared.GetAsync(name))!.StartedAt);
+    }
+
+    /// <summary>
     /// The second enforcement point, on its own.
     ///
     /// The handshake answers from a copy of the registry taken once a beat, so for up to a beat two
@@ -198,7 +238,7 @@ public sealed class LiveNameLockTests : IAsyncLifetime
     }
 
     /// <summary>One replica: its own ports, its own name, somebody else's registry.</summary>
-    private void Start(string node, int ingestPort, ILiveStreamRegistry registry)
+    private void Start(string node, int ingestPort, ILiveStreamRegistry registry, int graceSeconds = 5)
     {
         var host = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
@@ -211,7 +251,7 @@ public sealed class LiveNameLockTests : IAsyncLifetime
             builder.UseSetting("Live:NodeName", node);
             builder.UseSetting("Live:IngestPort", ingestPort.ToString());
             builder.UseSetting("Live:ConsumptionPort", (ingestPort + 1).ToString());
-            builder.UseSetting("Live:GracePeriodSeconds", "5");
+            builder.UseSetting("Live:GracePeriodSeconds", graceSeconds.ToString());
             builder.UseSetting("Live:FeedTimeoutSeconds", "2");
             builder.UseEnvironment("Production");
 
@@ -239,11 +279,15 @@ public sealed class LiveNameLockTests : IAsyncLifetime
         return sender;
     }
 
-    private static LiveStream Entry(string name, string owner, DateTimeOffset heartbeat)
+    private static LiveStream Entry(
+        string name,
+        string owner,
+        DateTimeOffset heartbeat,
+        DateTimeOffset? startedAt = null)
         => new(
             name,
             LiveStreamState.Live,
-            heartbeat,
+            startedAt ?? heartbeat,
             heartbeat,
             owner,
             null,

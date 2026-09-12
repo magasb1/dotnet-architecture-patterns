@@ -133,8 +133,6 @@ public sealed class LiveConsumptionService(
                     continue;
                 }
 
-                waitingSince = DateTimeOffset.UtcNow;
-
                 if (coordinator.Owns(name))
                 {
                     // Asking for twenty seconds and receiving twenty-six is normal, since a stream
@@ -167,8 +165,19 @@ public sealed class LiveConsumptionService(
                     return;
                 }
 
-                // Whatever was feeding this viewer stopped. Only a rollback is a chosen position;
-                // resuming after a gap wants the live edge rather than the same twenty seconds again.
+                // Whatever was feeding this viewer stopped, and only now does the wait begin. Set
+                // here rather than before the attach above, because that attach can last hours:
+                // measured against its start, the grace a viewer gets is the grace period minus
+                // however long it has been watching, which for anyone watching longer than that is
+                // none at all. The symptom was a viewer on a healthy replica being dropped the
+                // instant the owning replica shut down cleanly, while a force-killed owner left a
+                // stale registry entry behind and so never reached this branch - a graceful
+                // shutdown was worse for a viewer than a crash. Observed on k3s; see
+                // .scratch/scale-to-1000/cross-pod.md.
+                waitingSince = DateTimeOffset.UtcNow;
+
+                // Only a rollback is a chosen position; resuming after a gap wants the live edge
+                // rather than the same twenty seconds again.
                 from = 0;
 
                 await Task.Delay(TimeSpan.FromMilliseconds(250), stopping);
