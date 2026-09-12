@@ -140,6 +140,11 @@ Time from launching a player to its first decoded frame, five samples each, the 
 | the **owner** | 1368, 1683, 1697, 1713, 1802, 1876, 2289, 2272 | **~1.8 s** |
 | a **non-owner**, relayed | 3241, 3494, 3680, 3709, 3830, 4010, 4050, 4657 | **~3.8 s** |
 
+> **Superseded by Phase 3.** These rows are the SRT-to-SRT relay, which no longer exists. Measured
+> again on this same rig after the hop became HTTP: **1.93 s on the owner, 1.81 s relayed** — the
+> penalty is gone rather than reduced, and the relayed median landing marginally below the direct
+> one is noise on a box this contended. The rows below are kept as the before half of that pair.
+
 **The relay roughly doubles the join, about +2 s.** That is what Phase 3 is for, and it is a larger
 number than the plan's "under 10 ms difference" acceptance target assumes is reachable today: the
 SRT-to-SRT hop pays a second handshake, a second 120 ms latency window and a second libav probe on

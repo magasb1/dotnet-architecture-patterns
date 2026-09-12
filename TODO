@@ -30,11 +30,11 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
 - [ ] Decide who sweeps abandoned registry entries. A force-killed pod leaks one per stream into
       Redis forever, and until something sweeps them a graceful shutdown cannot interrupt instead
       of delete, which is what a rolling update needs to keep a stream's start time
-- [ ] Refresh docs/replica-failover.md with the k3s numbers. Its recorded figures predate all of
-      this work and its claims about the viewer and the start time were only made true yesterday
+- [x] Refresh docs/replica-failover.md and the README's SRT section. Both described the accept
+      carousel, the log-line capture and the self-test as load-bearing; all three are deleted
 - [x] Phase 0 baseline on one container: see `.scratch/scale-to-1000/baseline.md`. Accept rate is
       at least 20/s and the rig was always the limit, not the service
-- [ ] Phase 3: the in-cluster viewer hop becomes HTTP, deleting the SRT relay and AvioStream
+- [x] Phase 3: the in-cluster viewer hop becomes HTTP, deleting the SRT relay and AvioStream
 - [x] Raise k8s/live/deployment.yaml's resources. Was 200m/512Mi with a 1Gi limit, which OOM-kills
       at about 20 camera-rate streams; now 2 cores and 3Gi with a 4Gi limit, and the arithmetic is
       in the manifest
@@ -58,6 +58,6 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
 - [ ] Phase 5: optional SRT passphrase, enforced during the handshake
 - [ ] Phase 6: pulled streams survive their pod, claimed by the heartbeat under the existing lock
 - [ ] Lengthen SrtSocketStream's receive timeout, now that srt_close is proven to unblock a read
-- [ ] Rewrite the README's "About SRT" section and CONTEXT.md's "Claim": both still describe the
-      accept carousel, the log-line capture and newest-connection-wins
-- [ ] docs/design/server-side-stream-ingest.md is linked from the README and is not in the repo
+- [x] Rewrite the README's "About SRT" section and CONTEXT.md's "Claim"
+- [x] Drop the README's link to docs/design/server-side-stream-ingest.md, which was never in the
+      repo. CONTEXT.md, the drawio and replica-failover.md carry what it would have said

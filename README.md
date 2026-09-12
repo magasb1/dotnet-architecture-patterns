@@ -197,23 +197,28 @@ An encoder connects to one address, names itself, and the stream exists from tha
 is requested first, nothing is written to disk unless somebody asks for it, and recordings and
 snapshots continue whether or not any client is watching.
 
-The design and the reasoning behind every decision are in
-[docs/design/server-side-stream-ingest.md](docs/design/server-side-stream-ingest.md); the
-vocabulary it uses is defined in [CONTEXT.md](CONTEXT.md). For the shape of it in three pictures,
-including what makes it scale in Kubernetes and what does not, open
-[docs/video-server.drawio](docs/video-server.drawio).
+The vocabulary all of this uses is defined in [CONTEXT.md](CONTEXT.md). For the shape of it in
+four pictures, including what is built and what is only planned, open
+[docs/video-server.drawio](docs/video-server.drawio). What a replica disappearing actually costs a
+producer and a viewer is measured in [docs/replica-failover.md](docs/replica-failover.md).
 
 ### Three ports, one sentence each
 
 | Port | Reaching it lets you |
 | --- | --- |
-| Ingest, SRT on 9000 | push a stream, and nothing else |
+| Ingest, SRT on 9000 and up | push a stream, and nothing else |
 | Consumption, SRT on 9010 | watch live streams, and nothing else |
 | API, 8080 and 5080 | everything else |
 
 That is the whole reason they are separate: each can be exposed to a different network, and the
 firewall statement stays short enough to be useful. Finished recordings and snapshots are documents
-and stay on the API.
+and stay on the API. Ingest is a range rather than a port when `IngestPortCount` is raised, for a
+reason that is about one receive thread per bound port and is below.
+
+The API port carries one thing that is not an API call: a viewer that lands on a replica which does
+not own its stream is served from the owner over HTTP, pod to pod. Media still never reaches a
+player that way — the player is on the consumption port either way — so this changes nothing in a
+firewall statement except between replicas.
 
 ### Pushing a stream
 
@@ -383,34 +388,60 @@ write a hole into a file that claims to be a recording.
 
 ### About SRT
 
-SRT is a build choice, not a code one, and the whole ingest design rests on what the bundled libav
-can actually do. That was established empirically rather than assumed; see
+SRT reaches this service two ways and they are not the same library. **Listening is libsrt, called
+directly. libav keeps the caller side**, which is what a pulled stream dials out with. That split is
+a build choice as much as a code one, since it puts a second SRT stack in the process, so it is
+worth saying what it buys and what it costs.
+
+**The service owns its listener.** A socket per port, the options set on it, a listen callback
+installed, `srt_listen` with a backlog of 128, then a thread per port doing nothing but
+`srt_accept`. Three properties follow and the rest of the design leans on all three:
+
+- **The identifier is a socket option.** `SRTO_STREAMID`, handed to the handshake callback and read
+  back off the accepted socket. Nothing scrapes it out of a log line, so there is nothing to
+  self-test.
+- **The backlog is real.** Twenty encoders started together were all accepted in 211 ms; the Linux
+  container suite asserts a five-second bound on every run. A fleet cold-starting is a ramp rather
+  than a retry storm.
+- **A connection can be refused before it exists.** The callback runs on libsrt's receiver thread
+  when the conclusion handshake arrives, with the name in hand and no connection yet. It returns an
+  `SRT_REJX_*` code — 1400 for a name that will not parse or the wrong direction for the port, 1409
+  for a name that is live and held elsewhere — and that code reaches the caller intact. Nothing is
+  accepted and then dropped, which is what makes any rule about who may push possible at all.
+
+**What that replaced, and why it was worth replacing.** A libav SRT listener accepts exactly one
+caller and then closes its own listening socket, so the listener has to be reopened after every
+accept: a carousel, and roughly two or three accepts a second per port. The name was not available
+until after the accept, in a verbose log line FFmpeg writes and stores nowhere reachable, so a
+custom log callback captured it and a boot-time self-test existed solely to prove that capture
+still worked after an FFmpeg upgrade. Anything unwanted had to be accepted and then dropped. The
+carousel, the scrape, the self-test and the accepted-then-dropped path are all gone together; the
+reasoning that led there, and the objection this reverses, is in
 [.scratch/server-side-ingest/issues/01-srt-listener-streamid.md](.scratch/server-side-ingest/issues/01-srt-listener-streamid.md).
 
-**A libav SRT listener accepts exactly one caller and then closes the listening socket.** Many
-concurrent streams on one port are still possible, because libsrt multiplexes its sockets over one
-shared UDP port per process and libav sets the reuse-address option, so the listener is re-opened
-immediately after each accept while earlier connections keep running. Both media ports run one of
-these carousels.
+**What it costs is a second SRT stack, and on Windows a toolchain.** libsrt is linked statically
+into libavformat and its symbols are not re-exported, so calling it directly loads a second copy of
+it. The two never share a socket and the loader has nothing to resolve twice, so the price is a
+dependency and some binary size rather than a conflict — which, against an accept ceiling of two or
+three a second and no way to refuse anybody, is the cheaper side of the trade. The dependency is
+real all the same:
 
-Three consequences are load-bearing and are not going away:
+| | Where libsrt comes from |
+| --- | --- |
+| The container image | `apt-get install libsrt1.5-openssl` in the Dockerfile: 1.5.3 on Ubuntu noble, `libsrt.so.1.5` |
+| A Windows developer | `vcpkg install libsrt:x64-windows`, copied next to the fetched FFmpeg by `scripts/fetch-libsrt.sh` |
 
-- **The identifier is only reachable through a log line.** FFmpeg reads it on accept and logs it at
-  verbose level without storing it anywhere the application can reach. A custom log callback
-  captures it without raising the global log level, and a **boot-time self-test** confirms the
-  capture still works and fails loudly if it does not. Upgrade FFmpeg and that is what tells you.
-- **The backlog is one**, giving roughly two or three accepts a second, on each port. Senders and
-  players must retry, which encoders do by nature.
-- **The name arrives after accept, never before.** Nothing can be refused by name; an unwanted
-  connection is accepted and then dropped. Any rule about who may push has to act during the
-  handshake instead, which is why an SRT passphrase is the stronger authentication candidate.
+**There is no prebuilt Windows DLL.** The only Windows asset upstream publishes is a 136 MB
+installer, so vcpkg is the route, and vcpkg builds libsrt and OpenSSL from source: it needs the
+MSVC C++ toolchain, several gigabytes and an administrator, and a Visual Studio carrying only the
+.NET workloads is not enough — it reports "Unable to find a valid Visual Studio instance" and
+stops. Linux developers and the image need none of that, which is also the platform this deploys
+to. Without libsrt everything still builds and runs, minus live streaming: `Srt.IsAvailable` is
+false and the replica takes itself out of the Service rather than accepting encoders it could not
+serve.
 
-Calling libsrt directly was investigated and rejected: it is statically linked into libavformat and
-not re-exported, so going direct means vendoring another binary for every platform and running a
-second SRT stack beside the one already loaded.
-
-**Two builds are in play.** The NuGet package is LGPL and has no libsrt, so it is replaced by one
-that does:
+**Two FFmpeg builds are in play**, and libav needs SRT of its own for the caller side. The NuGet
+package is LGPL and has no libsrt, so it is replaced by one that does:
 
 | | Where it comes from | Transports |
 | --- | --- | --- |
@@ -472,9 +503,13 @@ is lost if the pod goes. `Documents__PublicBaseUrl` is how the desktop client kn
 a long recording from; without it the client downloads instead, which is right for ordinary files
 and painful for a six hour one.
 
-**Readiness is about the media ports**, not only about storage and a database. A replica whose
-ingest port is not accepting, whose stream identifier self-test failed, or whose FFmpeg has no SRT
-takes itself out of the Service rather than swallowing encoders it cannot serve.
+**Readiness is about the media ports**, not only about storage and a database. A replica that has
+no libsrt to open them with, or that failed to bind or listen on one of them, takes itself out of
+the Service rather than swallowing encoders it cannot serve. `srt_bind` and `srt_listen` either
+succeed or return an error, so this is a fact rather than something inferred from how long an
+attempt took, and with a range bound the replica counts its listeners against the number it
+expected: three ports of four up would otherwise read as healthy while a quarter of the encoders
+sent there failed.
 
 Compose publishes both upward, offset by one from the container ports so a local `dotnet run` and
 the stack can coexist: ingest on 9001, consumption on 9011.
@@ -556,8 +591,12 @@ Each of these is a deliberate trade, not an oversight.
 - Viewers of one stream all funnel through its owner, so adding replicas does nothing for a single
   popular stream. Correct for contribution, where streams outnumber viewers; wrong for
   distributing one stream to an audience.
-- The stream identifier is captured from a log line, guarded by a boot-time self-test.
-- Nothing can be refused by name; only accepted and dropped.
+- Nothing authenticates a publisher. A live name is locked, but the lock is a collision guard: an
+  impostor arriving while the real encoder is down is admitted, and the real encoder is then locked
+  out until the impostor stops. An SRT passphrase is what would stop that and is not built.
+- Live streaming needs libsrt, a second native dependency beside FFmpeg. On Linux that is one apt
+  package; on Windows it is a vcpkg build with the MSVC C++ toolchain, because no usable prebuilt
+  DLL exists. Owning the listener was judged worth that, and the reasoning is in **About SRT**.
 
 ## Why uploads feel instant
 
