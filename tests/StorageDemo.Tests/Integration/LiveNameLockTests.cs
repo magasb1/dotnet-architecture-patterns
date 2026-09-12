@@ -131,6 +131,62 @@ public sealed class LiveNameLockTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// The graceful twin of the test above, and the one a rolling update exercises. A pod that is
+    /// stopped cleanly used to remove its entries, so the replica taking the name over found nothing
+    /// to resume from and the stream came back new: a crash kept the start time and a clean shutdown
+    /// lost it. Now a stopping pod leaves each entry interrupted, which is the same thing a reconnect
+    /// finds after a dropped feed, and the same claim carries the start time forward.
+    ///
+    /// The fixture's dispose is the graceful path: the host stops, the heartbeat with it, and the
+    /// coordinator is disposed by the container as it would be by SIGTERM.
+    /// </summary>
+    [Fact]
+    public async Task A_name_resumed_after_a_graceful_shutdown_keeps_its_start_time()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, LiveReplicas.NoLibsrt);
+        Assert.SkipUnless(LiveReplicas.HasSrt(), LiveReplicas.NoFfmpegSrt);
+
+        const string name = "updated-camera";
+
+        // The production grace period, for the same reason as above: at five seconds the entry A
+        // leaves behind would be gone before B's encoder reconnects.
+        var a = _replicas.Start("pod-a", _aIngest, graceSeconds: 30);
+        _replicas.Start("pod-b", _bIngest, graceSeconds: 30);
+
+        var first = _replicas.Send(_aIngest, name);
+
+        await LiveReplicas.Until(
+            async () => await _replicas.Registry.GetAsync(name) is { Owner: "pod-a", State: LiveStreamState.Live, Packets: > 0 },
+            TimeSpan.FromSeconds(40),
+            "A never went live");
+
+        var began = (await _replicas.Registry.GetAsync(name))!.StartedAt;
+
+        await a.DisposeAsync();
+        SrtSenders.Kill(first);
+
+        var left = await _replicas.Registry.GetAsync(name);
+
+        Assert.NotNull(left);
+        Assert.Equal(LiveStreamState.Interrupted, left.State);
+        Assert.Equal("pod-a", left.Owner);
+
+        // One full beat, which is how long B's handshake copy of the registry may still say A holds
+        // the name live. A real encoder retries through that window; ffmpeg here does not.
+        await Task.Delay(LiveStreamCoordinator.Beat + TimeSpan.FromSeconds(1));
+
+        var second = _replicas.Send(_bIngest, name);
+
+        await LiveReplicas.Until(
+            async () => await _replicas.Registry.GetAsync(name) is { Owner: "pod-b", State: LiveStreamState.Live },
+            TimeSpan.FromSeconds(40),
+            $"B never took the name A left behind ({SrtSenders.Complaints([second])})");
+
+        Assert.Equal(began, (await _replicas.Registry.GetAsync(name))!.StartedAt);
+        Assert.Single(await _replicas.Registry.ListAsync());
+    }
+
+    /// <summary>
     /// The second enforcement point, on its own.
     ///
     /// The handshake answers from a copy of the registry taken once a beat, so for up to a beat two

@@ -773,8 +773,16 @@ public sealed class LiveStreamCoordinator(
         {
             try
             {
+                // Left as interrupted rather than removed, so the replica that takes the name over
+                // finds the entry and resumes the same stream: a rolling update is a move, not an
+                // end, and deleting here reset every stream's start time once per update while a
+                // crash preserved it (.scratch/scale-to-1000/cross-pod.md). The heartbeat written
+                // here is the last this entry gets, and that is what starts the clocks: readers
+                // stop listing it after the grace period, and the retention sweeper deletes it
+                // once the owner has been silent long enough. Written before the entry is torn
+                // down, while the hub can still be described.
+                await registry.UpsertAsync(Describe(entry, LiveStreamState.Interrupted), CancellationToken.None);
                 await entry.DisposeAsync();
-                await registry.RemoveAsync(entry.Name, CancellationToken.None);
             }
             catch (Exception ex)
             {
