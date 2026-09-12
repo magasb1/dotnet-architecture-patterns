@@ -57,6 +57,9 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
 - [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and
       returns detections and the preview. Detection runs on every stream, so decoding on demand
       answers nothing; KLV needs no decode at all and must not argue for any
+- [x] Validate the KLV decoder against a real MISB stream. Esri's FMV sample: 711 packets, every
+      checksum verified, and the slant range agrees with the geometry from four independently
+      scaled encodings to under two metres. No scale was wrong
 - [ ] Benchmark RF-DETR on the target GPU before sizing the worker tier: frames per second per GPU
       at a useful batch size, and whether NVDEC or the model saturates first
 - [ ] Separate detection rate from tracking rate. Pattern of life needs stable identities, which is

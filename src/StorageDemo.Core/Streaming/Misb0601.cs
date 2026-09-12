@@ -79,9 +79,13 @@ public sealed record Misb0601Set
 ///   outside the NGA registry. ST 0601 has never changed the encoding of an existing item, so
 ///   these hold for 0601.14; none of the minimum set uses ST 1201 IMAPB, which 0601 adopted only
 ///   for items added later. The checksum is ST 0601.8 section 6.8.
-/// - ST 0902.8 itself sits behind the NGA registry's CAPTCHA and could not be fetched; the
-///   membership of the set is as the project owner stated it and is not independently verified.
-///   The scale of each member is.
+/// - ST 0902.8 itself sits behind the NGA registry's CAPTCHA and could not be fetched, so the
+///   membership of the set was taken from the project owner. Esri's public FMV sample stream
+///   carries every one of these items and nothing is missing from it, which corroborates the
+///   membership without proving it; see Misb0601RealStreamTests.
+/// - Every scale here is checked against that stream: over its 711 packets the slant range agrees
+///   with the distance computed from the sensor and frame centre positions and elevations to
+///   within four metres, which it cannot do if any of those five scales is wrong.
 /// - ST 0102 tag numbers and classification codes are as implemented by jmisb (WestRidgeSystems),
 ///   which tracks ST 0102.12: local set tag 1, one byte, 1 UNCLASSIFIED through 5 TOP SECRET.
 ///

@@ -235,6 +235,61 @@ internal static unsafe class Misb
         }
     }
 
+    /// <summary>
+    /// Every KLV packet in a transport stream, paired with its presentation timestamp or null when
+    /// the carriage is asynchronous. Reading it through libav is what makes the answer meaningful:
+    /// the demuxer strips the ST 1402 metadata AU cell header, so this is byte for byte what the
+    /// KLV extractor hands the decoder in production.
+    /// </summary>
+    public static List<(long? Pts, byte[] Data)> ReadKlv(string path)
+    {
+        FfmpegLibrary.EnsureLoaded();
+
+        AVFormatContext* input = null;
+        var packet = ffmpeg.av_packet_alloc();
+        var klv = new List<(long?, byte[])>();
+
+        try
+        {
+            Check(ffmpeg.avformat_open_input(&input, path, null, null), "open input");
+            Check(ffmpeg.avformat_find_stream_info(input, null), "read input");
+
+            var index = -1;
+
+            for (var i = 0; i < input->nb_streams; i++)
+            {
+                if (input->streams[i]->codecpar->codec_id == AVCodecID.AV_CODEC_ID_SMPTE_KLV)
+                {
+                    index = i;
+                }
+            }
+
+            if (index < 0)
+            {
+                return klv;
+            }
+
+            while (ffmpeg.av_read_frame(input, packet) >= 0)
+            {
+                if (packet->stream_index == index)
+                {
+                    var data = new byte[packet->size];
+                    Marshal.Copy((IntPtr)packet->data, data, 0, packet->size);
+                    klv.Add((packet->pts == ffmpeg.AV_NOPTS_VALUE ? null : packet->pts, data));
+                }
+
+                ffmpeg.av_packet_unref(packet);
+            }
+
+            return klv;
+        }
+        finally
+        {
+            ffmpeg.av_packet_free(&packet);
+            ffmpeg.avformat_close_input(&input);
+        }
+    }
+
     private static void Check(int result, string step)
     {
         if (result < 0)
