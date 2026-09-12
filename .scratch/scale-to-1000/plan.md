@@ -1185,6 +1185,13 @@ route does; a KLV call returning the ST 0902 minimum set and the raw packet; the
 when Phase 8 exists; and whatever retention exposes. The client plan lists which are a field on an
 existing message and which are a new RPC, in the order its phases need them.
 
+**They are not guarded, and the README says they are.** The client plan checked: the gRPC service
+reads no token and nothing registers an interceptor or an authorization policy, so `SnapshotLive`,
+`RecordLive` and `StopLiveRecording` are open to anyone who can reach the gRPC port, while the same
+actions over REST require `X-Storage-Token`. The README's "required on every API call" is true of
+REST and false of gRPC. Fix it here with a metadata interceptor that checks the same token, and
+have the client send it on every call. Earlier drafts of this section said:
+
 Whether the live RPCs are guarded at all is a question to answer while in there: the REST live
 routes require a token, and a gRPC surface that bypasses it would be a hole rather than a
 convenience.

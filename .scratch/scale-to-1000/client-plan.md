@@ -16,6 +16,9 @@ Fixed by the repository owner:
   minimum metadata set, and inside it the ST 0102 security local set. **Imagery is never shown
   without its classification marking.** Not a details-panel row: on the tile, on the wall, on the
   player, in fullscreen.
+- **The desktop client stays gRPC.** REST is the surface for AI agents and command-line tools.
+  Every live feature the client needs arrives on `protos/documents.proto`, and the service-side
+  list of those additions is part of this plan.
 - Nothing under `src/` changes for this document. It is a plan.
 
 ## What is wrong today, in one line each
@@ -27,9 +30,9 @@ Fixed by the repository owner:
 | A thousand `Image` controls, none virtualised | `WrapPanel` as the items panel; a `ListBox` only virtualises with a virtualizing panel | Phase C3 |
 | Nine property-change notifications per stream per tick | `DocumentItem.Apply` raises everything whether or not it moved | Phase C3 |
 | A thousand "Live stream started" status lines on connect | `SetStatus` per new stream | Phase C3 |
-| In a cluster, most tiles show a "VID" icon, not a picture | gRPC `DownloadLivePreview` deliberately does not proxy to the owner; only the REST route does | The decision below |
-| A stream can be a fifth delivered and look fine | `packetsLost` / `packetsDropped` exist on `LiveStream` and on `GET /api/live`, and are not on the proto | Phase C0, after the decision |
-| No marking anywhere | The client predates KLV | Phase C1 |
+| In a cluster, most tiles show a "VID" icon, not a picture | gRPC `DownloadLivePreview` deliberately does not proxy to the owner; only the REST route does | Service item 3, Phase C3 |
+| A stream can be a fifth delivered and look fine | `packetsLost` / `packetsDropped` exist on `LiveStream` and on `GET /api/live`, and are not on the proto | Service item 1, Phase C0 |
+| No marking anywhere | The client predates KLV | Service item 2, Phase C1 |
 | One player, one host, hard-wired | `_player`, `PlayerHost`, the transport controls, the position timer and the shortcuts all assume exactly one | Phase C2 |
 | Watching is a side-effect of selection | Click another tile and the stream you were watching is gone | Phase C2 |
 
@@ -50,9 +53,11 @@ Say it plainly, because a plan this long reads as one otherwise.
   players; it does not replace this one.
 - **`FlyleafEngine`.** `EnsureStarted` and `TuneFor` are right and stay. `TuneFor` is per-player
   already, which is what makes the wall cheap.
-- **The server switcher and `ServerList`.** It gains one field. See the decision.
-- **`DocumentsApi` for documents.** List, get, download, upload, delete, watch, thumbnails: gRPC,
-  as documented. Nothing here changes.
+- **The server switcher and `ServerList`.** Untouched, unless the token question below is closed.
+- **`DocumentsApi`, all of it.** One channel, one generated client, one contract file compiled
+  by both sides. Every new live call is one more method in the same class, in the same style as
+  `ListLiveAsync` and `RecordLiveAsync`, including the `Unimplemented` catch that lets the client
+  run against an older server.
 - **Streams and documents in separate tabs.** Still right. What changes is what a stream tile
   fetches and when.
 - **Polling the live list.** Two seconds, one call, whole list. At a thousand streams that is one
@@ -60,87 +65,101 @@ Say it plainly, because a plan this long reads as one otherwise.
   heartbeat anyway. There is no reason to build a push feed for streams. What has to stop is the
   thousand *other* calls each tick makes.
 
-## The decision before any of this starts
+## The decision, made: gRPC, and what it costs and buys
 
-**The client is gRPC-only by design, and the live surface has moved to REST.** `DocumentsApi.cs`
-says it in its first comment: "gRPC only: no REST call is made from here, the REST surface exists
-for curl and Swagger." That was true and good when live streaming was five RPCs. It is no longer
-where the service is putting things:
+The first draft of this plan asked whether the client should speak REST for the live surface,
+because that is where the health figures, the cross-replica preview, KLV and detection were all
+landing, and recommended it. **The owner decided against, and the reason is a real one:** one
+connection, one surface, one contract file the server and the client both compile so the two can
+never drift, and the desktop client stays exactly what the README says it is. REST is for agents
+and the command line. A client with two transports is a client with two ways to be wrong about
+the same stream, and a token on one of them and not the other, which is precisely the state the
+service is in today (see below).
 
-| The client needs | gRPC `ListLive` / `DownloadLivePreview` | REST `/api/live` |
-| --- | --- | --- |
-| `packetsLost`, `packetsDropped` (Phase 9) | Not on the proto, not mapped in `DocumentsGrpcService.ListLive` | Yes: `LiveStream` is serialised as-is |
-| A preview for a stream another replica owns | No, on purpose: "the REST endpoint proxies across replicas; this one deliberately does not" | Yes |
-| KLV, ST 0902 fields, the ST 0102 marking | Nothing planned | `GET /api/live/klv/{name}`, being built now |
-| "has KLV", last KLV packet time on the list | Would need proto fields and mapping | Free, the moment `LiveStream` gains them |
-| The detection toggle (Phase 8) | Nothing planned | Will be REST; the controller's own comment says the live control plane is "REST rather than gRPC on purpose" |
-| Manual streams, drop a stream | No | Yes |
+What it costs is that **every phase below has a service-side item in front of it**, and the
+client cannot start any of them until its item has landed, because the client compiles the same
+`documents.proto`. The items are listed in phase order under "Service-side gRPC work, in order".
+Most are a field or two on `LiveStreamMessage`; three are new RPCs. None is large, but they are
+sequential with the client work rather than parallel to it, and the estimates below say so.
 
-Two ways out, and the owner picks:
+### The token, checked rather than assumed
 
-**A. Stay gRPC-only and extend the proto each time.** Two `int32` fields on `LiveStreamMessage`
-and two lines of mapping gets the health figures today, an hour of work. But it is an hour per
-feature for the life of the client, and the client is then always one proto change behind the two
-agents building KLV and detection as REST. It also leaves the cross-replica preview gap unless
-`DownloadLivePreview` is taught to proxy, which the service chose not to do.
+The REST live routes are guarded: `LiveStreamsController.Guard` refuses anything without a
+matching `X-Storage-Token` when `Live__Token` is set, and the README says the token is "required
+in X-Storage-Token on every API call". **The gRPC live RPCs are not guarded at all.**
+`DocumentsGrpcService` has no token parameter, no metadata read and no interceptor; its
+`RequireLive()` checks only `Live__Enabled`, and `Program.cs` maps the service with no
+authorization policy. `SnapshotLive`, `RecordLive` and `StopLiveRecording` are reachable by anyone
+who can reach the gRPC port.
 
-**B. The client speaks REST for the live surface and keeps gRPC for documents.** `HttpClient` and
-`System.Text.Json`, both in the box. And the DTO already exists: the client references
-`StorageDemo.Core` today for content types, and `StorageDemo.Core.Streaming.LiveStream` is the
-record the REST route serialises. `GET /api/live` deserialises straight into
-`LiveStatusResponse(Transports, Streams)` with no client-side mirror to keep in step. What it costs
-is one real thing: the REST live routes are guarded by `X-Storage-Token`, and the client has no
-notion of a token. `ServerEntry` gains an optional `Token`, the server box gets a field for it, and
-the client sends it on live calls. That is also simply correct: today the client talks to the live
-control plane without one because gRPC does not check.
-
-The recommendation is B. It is smaller over any horizon longer than a week, and it is the only
-option that makes the tiles show pictures in a cluster. It reverses a documented principle, so it
-is the owner's call, and **nothing below starts until it is made**: Phase C0 is "a day" under B
-and "an hour plus a proto change" under A, and everything from C1 on assumes B.
-
-Under B, `DocumentsApi` keeps its name and its gRPC half; a `LiveApi` beside it holds the REST
-half, and the comment at the top of `DocumentsApi` is rewritten to say which surface is which and
-why.
+So under gRPC the client needs no token today, and the service asks for none. That is a service
+gap, not a client one, and it is not this plan's to fix; it is written down here because the
+README claims otherwise. If the owner closes it, the shape is a server interceptor reading an
+`x-storage-token` metadata entry and refusing the live RPCs without it, and on the client a
+`Token` on `ServerEntry`, a field in the server box, and the header on every call from
+`DocumentsApi`. A couple of hours each side, and it should land before the wall (C2) rather than
+after, since that is the first phase that makes the client a permanent presence on the port.
 
 ## Order
 
 ```
-C0  Health on the tiles that exist        a day, once the decision is made
-C1  The marking                           first-class; blocks on the KLV route landing
-C2  Monitored, and the wall               a spike on multiple players, then the feature
-C3  The grid at a thousand                virtualisation, preview on visibility, the poll shape
-C4  KLV as text                           ST 0902 panel for the stream being watched; no map
-C5  Detection                             toggle and overlay, against an assumed wire format
-C6  Retention in the explorer             blocked on the service exposing a date
+C0  Health on the tiles that exist        service: half a day; client: a day, after it
+C1  The marking                           first-class; blocks on the KLV route and its proto fields
+C2  Monitored, and the wall               a spike on multiple players, then the feature; no service work
+C3  The grid at a thousand                virtualisation, preview on visibility; needs preview proxying
+C4  KLV as text                           ST 0902 panel for the stream being watched; new RPC; no map
+C5  Detection                             toggle and overlay; two new RPCs against an assumed shape
+C6  Retention in the explorer             one field on ProviderResponse
 ```
 
 C0 first because it is the cheapest fix to the worst defect: the service can say a stream is
 healthy while delivering a fifth of it, and the figures that say otherwise are already computed.
 C1 next because the owner ranks it ahead of anything decorative, and it needs the same list-row
 plumbing as C0. C2 before C3 because the wall is what the people who use this all day look at,
-and the multi-player question has to be answered by running it, not by reading. C3 is the
+the multi-player question has to be answered by running it, and it is the one phase with no
+service dependency, so it can run while the proto items for C3 and C4 are being built. C3 is the
 largest piece and the only one that is actually about a thousand. C4 and C5 are per-watched-stream
-features and work as well on a grid of ten as of a thousand, so they follow. C6 is small and
-blocked.
+features and work as well on a grid of ten as of a thousand, so they follow. C6 is small.
 
-C1 and C4 depend on the KLV route, which is being built in parallel. Everything in them that
-touches the wire is stated as an assumption, and what the client asks of the route is listed in
-one place so the KLV agent can read it.
+C1 and C4 depend on the KLV work, which is being built in parallel and is landing as a REST route
+first. What the client needs from it in proto form is stated under "Service-side gRPC work" so the
+KLV agent can read it in one place.
+
+---
+
+## Service-side gRPC work, in order
+
+Every item is in `protos/documents.proto` plus its mapping in `DocumentsGrpcService.cs`; the
+client regenerates on build because the `.csproj` links the same file. Numbers continue from
+`LiveStreamMessage`'s field 13 and `ProviderResponse`'s field 3.
+
+| # | For | What | Shape | Size |
+| --- | --- | --- | --- | --- |
+| 1 | C0 | `packets_lost`, `packets_dropped` on `LiveStreamMessage` | Two `int32` fields, two lines in `ListLive` | An hour, plus a test asserting they round-trip |
+| 2 | C1 | `has_klv`, `last_klv_at`, and the ST 0102 marking on `LiveStreamMessage`: `classification` as an enum, the marking text, `classifying_country`, `releasing_instructions`, `caveats` | Fields on an existing message, mapped from whatever the KLV agent puts on `LiveStream` | Half a day once `LiveStream` carries them; nothing until then |
+| 3 | C3 | `DownloadLivePreview` proxies to the owning replica, as the REST route does through `LivePeerProxy` | No proto change; a branch in the existing RPC | Half a day. Without it a cluster's tiles are icons whatever the client does |
+| 4 | C4 | `GetLiveKlv(LiveStreamName) returns (LiveKlvMessage)`: the ST 0902 minimum set as typed fields, the ST 0102 set, the packet's timestamp, and the raw packet as `bytes` | **New RPC**, new message | A day, mirroring the REST route's body |
+| 5 | C5 | `SetLiveDetection(SetLiveDetectionRequest) returns (LiveStreamMessage)` with `enabled` and a rate; a `detection` sub-message on `LiveStreamMessage` (enabled, rate, worker); `GetLiveDetections(LiveStreamName) returns (LiveDetectionsMessage)` with class, score, normalised box and frame timestamp per detection | **Two new RPCs**, one new field | Unknowable until Phase 8 has a wire format; the shape here is the client's assumption |
+| 6 | Optional | `CreateManualLive` and `DropLive`, if the client is to create pulled streams and end streams | **Two new RPCs** | Not needed by any phase in this plan. Listed because the REST surface has them and a client that stays gRPC-only can never reach them otherwise |
+| 7 | C6 | `retention_enabled`, `retention_max_age_days` on `ProviderResponse` | Two fields, mapped from `RetentionOptions` | An hour |
+
+Items 1 and 3 can be done today by anyone. Item 2 waits on the KLV agent's `LiveStream` fields.
+Item 4 waits on the KLV route. Item 5 waits on Phase 8. Item 7 waits on nothing.
 
 ---
 
 ## Phase C0: Health on the tiles that exist
 
-A day. Nothing structural.
+**Service side first: item 1, about half a day including the test.** The client cannot compile
+against fields that are not in the proto, so this is a half-day the client waits, not a half-day
+alongside. Client side, a day. Call it a day and a half, sequential.
 
 ### Build
 
-- `LiveStream.PacketsLost` and `PacketsDropped` reach the tile. Under B they are already in the
-  record the client deserialises; under A they are two proto fields and two mapping lines.
+- `packets_lost` and `packets_dropped` reach the tile through `DocumentItem.Apply`.
 - **One mark per tile, no number.** A 3 px bar along the bottom of the preview frame, the full
-  width of the tile: green when both figures are zero, amber when only `packetsDropped` moved,
-  red when `packetsLost` moved, grey when the stream is interrupted. It reads across a grid of a
+  width of the tile: green when both figures are zero, amber when only `packets_dropped` moved,
+  red when `packets_lost` moved, grey when the stream is interrupted. It reads across a grid of a
   thousand at a glance because it is colour and position, not text. `Startable == false` and
   `CeilingBinding` fold into amber: they already exist as warnings and are the same kind of "look
   at this, it is not dead".
@@ -153,6 +172,7 @@ A day. Nothing structural.
   title says `(degraded)` beside `(live from pod-3)`.
 - Amber and red must not be the only difference. The bar gets a one-letter glyph at its left end
   (`L`, `D`) for anyone who cannot tell the colours apart, and the tooltip always has the words.
+- The bar draws whether or not the tile has a picture, so C0 does not wait on item 3.
 
 ### Done when
 
@@ -170,17 +190,15 @@ requirement with its own done-when and it precedes anything decorative.
 
 ### What is assumed about the wire
 
-The KLV agent is decoding the ST 0902 set now. This phase assumes:
+The KLV agent is decoding the ST 0902 set now, into a REST route first. This phase assumes:
 
-- `GET /api/live/klv/{name}` returns, among the rest, a `security` object with the ST 0102
-  fields the set carries: `classification` (the enumeration, plus its text), `classifyingCountry`,
-  `releasingInstructions`, `caveats`, and the ST 0102 version. Names are assumed camelCase; the
-  exact ones are a find-and-replace when the route lands.
-- **The marking is also on the list.** `LiveStream` is gaining `hasKlv` and a last-packet time;
-  it needs the classification beside them. A thousand tiles cannot each call the KLV route to
-  find out what to print, and a tile that shows a picture without a marking is the exact failure
-  this phase exists to prevent. This is the one thing the client plan asks of the KLV agent, and
-  it is listed again under "Asks of the KLV route" below.
+- `LiveStream` gains `hasKlv`, a last-KLV-packet time, and the ST 0102 fields, and item 2 puts
+  them on `LiveStreamMessage`. **The marking has to be on the list.** A thousand tiles cannot
+  each make a KLV call to find out what to print, and a tile that shows a picture without a
+  marking is the exact failure this phase exists to prevent. This is the one thing the client
+  plan asks of the KLV agent beyond the route itself.
+- The full ST 0102 text for the banner comes from the same fields; item 4's `GetLiveKlv` is not
+  needed for the marking, only for C4.
 
 ### Build
 
@@ -196,9 +214,10 @@ The KLV agent is decoding the ST 0902 set now. This phase assumes:
 - **Absence is shown, never blank.** A stream with no KLV, or KLV without an ST 0102 set, shows
   `UNMARKED` on a warning colour on every one of those surfaces. It is not an error state and it
   is not hidden: a plain camera with no metadata is exactly the picture that must not be mistaken
-  for an unclassified one. `hasKlv == false` is `UNMARKED`; `hasKlv == true` with no security set
-  is also `UNMARKED`; a last-KLV time older than a few seconds is `UNMARKED (stale)`, because a
-  marking that stopped arriving is not a marking.
+  for an unclassified one. `has_klv == false` is `UNMARKED`; `has_klv == true` with no security
+  set is also `UNMARKED`; a last-KLV time older than a few seconds is `UNMARKED (stale)`, because
+  a marking that stopped arriving is not a marking. An older server that does not send the fields
+  at all reads as `UNMARKED` too, which is proto3's default doing the right thing for once.
 - **Colours are a table, not a rule.** Marking colours are a convention of the deployment, not of
   the standard, so they live in one small map from classification to brush, with the text always
   present and the colour never the only signal.
@@ -210,23 +229,25 @@ The KLV agent is decoding the ST 0902 set now. This phase assumes:
   of this phase. If it does not, `ToggleFullScreenOnDoubleClick` and the `F` key are disabled
   for a stream that is not `UNCLASSIFIED`, and that is stated in the UI rather than silently.
 - **Snapshots and recordings inherit the question.** A document made from a marked stream is
-  itself marked imagery. The client can show a chip on a document tile if the document's
-  metadata carries the marking; whether the service writes it there is a service decision and is
-  listed under asks. Until it does, the explorer shows nothing on documents, and this plan says so
-  rather than pretending the problem stops at live.
+  itself marked imagery. `DocumentMessage.metadata` is an ordered list of key/value pairs already,
+  so if the service writes the marking there when it takes the snapshot or starts the recording,
+  the client can show a chip on the document tile with no proto change at all. Whether the service
+  writes it is a service decision. Until it does, the explorer shows nothing on documents, and this
+  plan says so rather than pretending the problem stops at live.
 
 ### Done when
 
 - A stream with an ST 0102 set shows its marking on its tile, on the single player, on every wall
   player, and in fullscreen, or fullscreen is refused for it.
 - A stream without one shows `UNMARKED` on the same surfaces.
-- Pulling the marking out of the list response leaves no surface blank: the client falls back to
-  `UNMARKED` rather than to nothing.
+- Running against a server without item 2 leaves no surface blank: every tile reads `UNMARKED`.
 - Someone who cannot distinguish the colours can still read every marking.
 
 ---
 
 ## Phase C2: Monitored, and the wall
+
+No service work. This is the phase to run while items 2, 3 and 4 are being built.
 
 ### What `FlyleafEngine.cs` and the package say about several players at once
 
@@ -297,20 +318,24 @@ checked for.
 
 The arithmetic first, because it is what the phase is answering. A thousand tiles, each refetching
 a JPEG every two seconds, is five hundred requests a second from one client. Under the current
-gRPC path most of them would return NOT_FOUND in a cluster anyway, since only the owning replica
-answers; under REST each miss is proxied pod-to-pod, so the client would be generating five hundred
-cross-pod requests a second against a service whose receive thread is the thing it is short of.
-Then each JPEG that does arrive is decoded on the dispatcher at full size. It does not matter how
-good the virtualisation is if that stays.
+`DownloadLivePreview` most of them return NOT_FOUND in a cluster anyway, since only the owning
+replica answers; once item 3 makes the RPC proxy the way the REST route does, each miss becomes a
+pod-to-pod request, so the client would be generating five hundred cross-pod requests a second
+against a service whose receive thread is the thing it is short of. Then each JPEG that does
+arrive is decoded on the dispatcher at full size. It does not matter how good the virtualisation
+is if that stays.
+
+**Item 3 goes first.** Without it the grid in a cluster is icons, and a grid of a thousand icons
+is not worth virtualising.
 
 ### Build
 
-**The list.** One `GET /api/live` every two seconds, as now. Diff it against a `Dictionary` of
-tiles by name instead of `FirstOrDefault` per stream; `Apply` compares before raising and raises
-only what moved, which at a thousand streams is usually `Packets`, `Bytes` and the health pair.
-The `SetStatus` per started stream becomes one line, `418 streams on air`, and a per-stream line
-only when the count changed by one or two. `_streams.Insert(0, ...)` newest-first stays; it is a
-list insert, not a sort.
+**The list.** One `ListLive` every two seconds, as now. Diff it against a `Dictionary` of tiles
+by name instead of `FirstOrDefault` per stream; `Apply` compares before raising and raises only
+what moved, which at a thousand streams is usually `Packets`, `Bytes` and the health pair. The
+`SetStatus` per started stream becomes one line, `418 streams on air`, and a per-stream line only
+when the count changed by one or two. `_streams.Insert(0, ...)` newest-first stays; it is a list
+insert, not a sort.
 
 **Virtualisation.** The `ListBox` is virtualising already; the `WrapPanel` is what stops it.
 Three options, in the order to try them:
@@ -332,7 +357,8 @@ are therefore the visibility signal, and WPF gives them for free. A tile fetches
 its container loads and every two seconds while it stays loaded; it stops when the container
 unloads. At three tiles across the sidebar and eight rows visible that is about twenty-four
 previews every two seconds, twelve a second, whatever the list length. A tile nobody has scrolled
-to fetches nothing but its row in the list.
+to fetches nothing but its row in the list. Each preview is one server-streaming `DownloadLivePreview`
+call, which is what it is today; a dozen a second on one HTTP/2 channel is nothing.
 
 **The picture stays when the tile scrolls away.** It is not refreshed, but it is not dropped
 either. With `DecodePixelWidth` set to the tile's width, a decoded preview is about 30 KB; a
@@ -350,15 +376,15 @@ and the Streams tab gets a `Problems only` checkbox that filters to amber and re
 the collection view exactly as the document filters do. Monitored first, then degraded, then name;
 "newest first" was right at ten streams and is noise at a thousand.
 
-**What is not built.** No push feed for the live list, no incremental list endpoint, no
-server-side paging. A 150 KB poll every two seconds is fine and everything else is cheaper on the
-client.
+**What is not built.** No push feed for the live list, no incremental list RPC, no server-side
+paging. A 150 KB poll every two seconds is fine and everything else is cheaper on the client.
 
 ### Done when
 
 - The load rig's thousand-stream case, or the largest it will run, against this client: the
   window scrolls without stutter, the dispatcher is under ten percent between ticks, and the
   service sees about a dozen preview requests a second from the client whatever the list length.
+- Against two replicas, a tile owned by the other replica shows a picture.
 - A tile scrolled into view shows a picture within one tick.
 - `Problems only` with the baseline's 250 overloaded streams shows the degraded ones and nothing
   else.
@@ -369,6 +395,7 @@ client.
 ## Phase C4: KLV as text
 
 For the stream being watched, the ST 0902 minimum set, shown as text. No map in this phase.
+Needs item 4, the `GetLiveKlv` RPC, which mirrors the REST route the KLV agent is building.
 
 ### Build
 
@@ -378,10 +405,10 @@ For the stream being watched, the ST 0902 minimum set, shown as text. No map in 
   vertical field of view, sensor relative azimuth, elevation and roll, slant range, frame centre
   latitude, longitude and elevation, and the UAS LS version. The security set is C1's banner, not
   a row here.
-- Polled from `GET /api/live/klv/{name}` once a second for the selected stream and for each wall
-  player, six or seven requests a second at most. It is a per-watched-stream fetch; nothing about
-  it scales with the grid.
-- The raw packet the route returns goes behind a `Raw` expander as hex, for the day a field is
+- Polled with `GetLiveKlv` once a second for the selected stream and for each wall player, six or
+  seven calls a second at most. It is a per-watched-stream fetch; nothing about it scales with
+  the grid.
+- The raw packet the RPC returns goes behind a `Raw` expander as hex, for the day a field is
   wrong and someone needs to see what the sensor actually sent.
 - Position and frame centre get a `Copy` beside them as `lat, lon`, because pasting into whatever
   map the operator already has open is the map for now.
@@ -397,7 +424,8 @@ values are already in the view model. Deciding to build it is separate from this
 
 A stream carrying ST 0902 shows every field in the set updating once a second under the player,
 and the same fields for a wall player when it is focused. A stream without KLV shows the group
-collapsed with `No KLV on this stream`, not an empty panel.
+collapsed with `No KLV on this stream`, not an empty panel. Against a server without item 4 the
+group is absent, through the same `Unimplemented` catch `ListLiveAsync` uses.
 
 ---
 
@@ -405,19 +433,20 @@ collapsed with `No KLV on this stream`, not an empty panel.
 
 Phase 8 is planned, not built, and its wire format does not exist. What can be planned is the
 client side of turning it on and seeing results, with the assumptions written down so they can be
-struck through when the real shape lands.
+struck through when the real shape lands. Item 5 is the proto form of those assumptions.
 
 ### What is assumed
 
-- **The toggle** is a REST call on the live control plane, `POST /api/live/detect/{name}` with a
-  body carrying the per-stream detection rate Phase 8 says is a setting, and `DELETE` to turn it
-  off. The same path a detector would use to trigger a recording, in the same style as record.
-- **The state** comes back on `LiveStream`: something like `detection: { enabled, rate, worker }`,
-  so the list says which streams are on without another call per tile.
-- **The results** come from a route per stream, `GET /api/live/detections/{name}`, returning the
-  most recent set: for each detection a class, a score, a box in normalised frame coordinates, and
-  the presentation timestamp of the frame it was found in. Whether that is a poll or a stream is
-  unknown; the client polls at the detection rate until told otherwise.
+- **The toggle** is `SetLiveDetection` with the stream name, `enabled`, and the per-stream
+  detection rate Phase 8 says is a setting. The same shape as `RecordLive`: a person and a
+  detector are one caller.
+- **The state** comes back on `LiveStreamMessage` as a `detection` sub-message (enabled, rate,
+  worker), so the list says which streams are on without another call per tile.
+- **The results** come from `GetLiveDetections` per stream, returning the most recent set: for
+  each detection a class, a score, a box in normalised frame coordinates, and the presentation
+  timestamp of the frame it was found in. Whether that is a unary call or a server stream is
+  unknown; the client polls at the detection rate until told otherwise, and a server-streaming
+  version is a one-method change in `DocumentsApi` later.
 
 ### Build
 
@@ -453,16 +482,16 @@ format, so the alignment work has a number to beat.
 ## Phase C6: Retention in the explorer
 
 Documents produced by live streaming expire after `Retention__MaxAgeDays`. The explorer could say
-when, and cannot today: nothing on `DocumentMessage`, `ProviderResponse` or any REST route exposes
-the age ceiling or a per-document expiry.
+when, and cannot today: nothing on `DocumentMessage` or `ProviderResponse` exposes the age
+ceiling or a per-document expiry. Item 7 is two fields on `ProviderResponse`, which the client
+already calls on connect.
 
-### Build, once the service exposes it
+### Build
 
-The smallest useful service change is the retention configuration on `GetProviders`, since the
-client already calls it on connect: enabled, and the age in days. From that and `CreatedAt` the
-client computes `expires in 3 days` on the tile's `Details` line and in the metadata panel, for
-documents whose metadata marks them as a recording or a snapshot, which is the mark retention
-itself looks for. A document uploaded by hand shows nothing, because retention leaves it alone.
+From `retention_max_age_days` and `CreatedAt` the client computes `expires in 3 days` on the
+tile's `Details` line and in the metadata panel, for documents whose metadata marks them as a
+recording or a snapshot, which is the mark retention itself looks for. A document uploaded by hand
+shows nothing, because retention leaves it alone.
 
 A per-document expiry field would be more accurate and is not worth asking for until per-stream
 overrides exist, which Phase 10 says nothing has asked for.
@@ -470,43 +499,26 @@ overrides exist, which Phase 10 says nothing has asked for.
 ### Done when
 
 A recording older than the configured age minus a day shows `expires tomorrow`; an uploaded file
-of any age shows nothing; with retention off, nothing shows anywhere.
+of any age shows nothing; with retention off, or against a server without item 7, nothing shows
+anywhere.
 
 ---
-
-## Asks of the service, in one place
-
-For the KLV agent, working in parallel:
-
-1. The ST 0102 classification on `LiveStream`, on the list, beside `hasKlv` and the last-packet
-   time. The client cannot mark a thousand tiles from a per-stream route.
-2. The `security` object on `GET /api/live/klv/{name}` with the full ST 0102 fields, for the
-   banner text.
-3. A recording or snapshot taken from a marked stream carrying the marking in its document
-   metadata, so the explorer can mark it too. Not blocking the client; blocking the day someone
-   asks why a snapshot has no marking.
-
-For the owner, before anything: the gRPC-or-REST decision above. Under B, nothing else is asked of
-the service for C0, C2, C3 or C4.
-
-For Phase 8, when it is designed: whether detection results carry the frame timestamp, and whether
-the worker will draw into the preview.
-
-For Phase 10: the retention configuration on `GetProviders`, or an equivalent.
 
 ## Documentation, as each phase lands
 
 - `README.md`, "The desktop client": the wall, monitored streams, the marking, the health bar
-  and what its colours mean, and which surface the client uses for what once the decision is made.
+  and what its colours mean.
 - `README.md`, "Watching a stream": the paragraph describing the tiles is rewritten for
   visibility-gated previews.
-- `DocumentsApi.cs` header comment: reversed or reworded, per the decision.
-- This file: the assumptions in C1, C4 and C5 struck through as the routes land.
+- `README.md`, "Running it": the sentence claiming the token is required on every API call is
+  corrected to say REST, or the gRPC interceptor lands and it becomes true.
+- `README.md`, "API": the new RPCs as they land, in the existing list.
+- This file: the assumptions in C1, C4 and C5 struck through as the proto items land.
 
 ## Acceptance, end to end
 
-Against the rig, at the largest stream count it will hold, with six streams monitored and the
-baseline's overload case induced on a pod:
+Against the rig, at the largest stream count it will hold, two replicas, with six streams
+monitored and the baseline's overload case induced on one pod:
 
 | Claim | Measurement | Target |
 | --- | --- | --- |
@@ -514,5 +526,7 @@ baseline's overload case induced on a pod:
 | No imagery without a marking | Walk every surface with a marked stream and an unmarked one | Marking or `UNMARKED` on tile, player, wall, fullscreen; never blank |
 | The wall does not depend on the rest of the window | Six monitored, open a recording, upload, switch tabs, come back | Six players never stopped |
 | The client does not load the service | Count preview requests at the service from one client | About a dozen a second, independent of list length |
+| A cluster's tiles show pictures | Two replicas, tiles owned by each | Every visible tile has a picture within one tick |
 | The window stays usable at a thousand | Scroll the grid end to end | No stutter; dispatcher under ten percent between ticks |
 | KLV is readable | Select a stream with ST 0902 | Every field in the set, updating once a second |
+| An older server still works | Point the client at a build without items 1 to 7 | Tiles unmarked, no health bar, no KLV group, no crash |

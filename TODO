@@ -44,6 +44,9 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
       service did, so the ratio is "about two" rather than a number
 - [ ] Measure whether pooling StreamDemuxer.Pump's per-packet byte[] moves the per-stream thread
       cost. Two threads per stream at ~1.7% of a core is what actually dominates, not the preview
+- [ ] gRPC live RPCs are unguarded: SnapshotLive, RecordLive and StopLiveRecording need no token
+      while the same REST routes do. The README claims otherwise. Interceptor server-side, header
+      client-side, before the client becomes a permanent presence on the port
 - [ ] Phase 11: the gRPC surface catches up with REST, in one proto change. The client stays gRPC
       by decision; health, marking, a proxied preview and KLV must reach ListLive and friends
 - [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and
