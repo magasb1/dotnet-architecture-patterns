@@ -35,6 +35,16 @@ public interface IDocumentService
 
     Task<IReadOnlyList<Document>> GetAllAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Every recording and snapshot one detection caused, newest first as the listing gives them.
+    ///
+    /// Asked here rather than of the live stream because by the time anyone asks, the stream may be
+    /// long gone: the document is the thing that survives the detection.
+    /// </summary>
+    Task<IReadOnlyList<Document>> FindByDetectionAsync(
+        Streaming.DetectionReference detection,
+        CancellationToken cancellationToken = default);
+
     Task DeleteAsync(Guid id, CancellationToken cancellationToken = default);
 
     /// <summary>

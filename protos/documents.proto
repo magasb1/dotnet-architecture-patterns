@@ -13,6 +13,10 @@ service Documents {
 
   rpc Get(DocumentId) returns (DocumentMessage);
 
+  // Every recording and snapshot one detection caused. Asked of documents rather than of the live
+  // stream because by the time anyone asks, the stream may be long gone.
+  rpc ListByDetection(DetectionReferenceMessage) returns (ListResponse);
+
   // Server streaming: the file is chunked so a large object never sits in memory whole.
   rpc Download(DocumentId) returns (stream Chunk);
 
@@ -42,8 +46,9 @@ service Documents {
   // is missing or wrong; nothing is required when the server has no token configured.
   //
   // Takes a picture now and stores it as a document. A person pressing the button and a detector
-  // firing are the same caller.
-  rpc SnapshotLive(LiveStreamName) returns (DocumentId);
+  // firing are the same caller; the only difference is that the detector says which detection
+  // caused it, and the stored document then says so too.
+  rpc SnapshotLive(SnapshotLiveRequest) returns (DocumentId);
 
   // Starts a recording, or extends the one already running. It continues whether or not any
   // client is connected, and becomes a document when it ends.
@@ -63,11 +68,36 @@ message LiveStreamName {
   string name = 1;
 }
 
+// Which detection caused a capture, and what to ask for its documents by: the three things that
+// identify a detection uniquely on the wire, and there is no fourth. The stream it was seen on,
+// the MISB ST 0903 VMTI precision timestamp of the frame, and the target id within that frame.
+//
+// It reaches a document as one metadata entry rather than three, reading "stream@moment#target",
+// so a person looking at a document's properties can see what caused it.
+message DetectionReferenceMessage {
+  string stream = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  int32 target_id = 3;
+}
+
+// A separate message from LiveStreamName, which is only ever a name: a snapshot is the one live
+// call that can be caused by something other than a person. Field 1 is the name, so a client
+// built against the older LiveStreamName is wire-compatible with this.
+message SnapshotLiveRequest {
+  string name = 1;
+
+  // Absent when a person pressed the button, and the document is then byte-for-byte what it was.
+  DetectionReferenceMessage detection = 2;
+}
+
 message RecordLiveRequest {
   string name = 1;
 
   // Zero means the server's default. A clip is a recording whose stop time was set at the start.
   double seconds = 2;
+
+  // Absent when a person pressed record. Present, every part the recording stores carries it.
+  DetectionReferenceMessage detection = 3;
 }
 
 message LiveRecordingMessage {

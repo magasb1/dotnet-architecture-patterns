@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Hosting;
@@ -265,6 +266,11 @@ public sealed class LiveStreamTests : IAsyncLifetime
         Assert.NotNull(snapshotDocument);
         Assert.True(snapshotDocument.Size > 0, "the snapshot is empty");
 
+        // Nobody asked for it on behalf of a detection, so it says nothing about one. This is the
+        // half of provenance that must not change: a person pressing the button gets what they
+        // always got.
+        Assert.DoesNotContain("Detection", snapshotDocument.Metadata.Keys);
+
         // A short recording, which reaches back into the buffer and becomes a document at the end.
         var started = await _client.PostAsJsonAsync($"/api/live/record/{name}", new RecordRequest(5));
         Assert.Equal(HttpStatusCode.Accepted, started.StatusCode);
@@ -276,11 +282,99 @@ public sealed class LiveStreamTests : IAsyncLifetime
         Assert.NotNull(recording);
         Assert.True(recording.Size > 0, "the recording is empty");
         Assert.Equal("video/mp2t", recording.ContentType);
+        Assert.DoesNotContain("Detection", recording.Metadata.Keys);
 
         // Named by stream and start time, so several from one stream sit together and read as
         // related. The name's slash is flattened, because a file name may not carry one.
         Assert.StartsWith("live-match-of-the-day-", recording.FileName, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// Provenance, on one stream because the steps only mean anything together: a detection
+    /// triggers a snapshot and a recording through the same routes a person uses, both documents
+    /// name the detection that caused them, the recording names it from its first stored part
+    /// rather than only once it finishes, and the detection finds both documents again afterwards.
+    /// </summary>
+    [Fact]
+    public async Task A_detection_that_triggered_a_capture_is_named_by_every_document_it_produced()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
+
+        const string name = "detected-camera";
+
+        // Microseconds, because that is what the VMTI precision timestamp carries and what tells
+        // one frame from the next.
+        var frame = new DateTimeOffset(2026, 9, 12, 10, 31, 2, TimeSpan.Zero).AddTicks(1234560);
+        var detection = new DetectionReference(name, frame, 7);
+        var reference = detection.ToString();
+
+        Push(name);
+
+        Assert.NotNull(await WaitForStreamAsync(name, TimeSpan.FromSeconds(40)));
+
+        var snapshot = await _client.PostAsJsonAsync($"/api/live/snapshot/{name}", detection);
+        Assert.Equal(HttpStatusCode.OK, snapshot.StatusCode);
+
+        var picture = await WaitForDocumentAsync(
+            document => document.FileName.EndsWith(".jpg", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(30));
+
+        Assert.NotNull(picture);
+        Assert.Equal(reference, picture.Metadata["Detection"]);
+
+        // Long enough to cross several part boundaries at the shortened part length above, so that
+        // what is asserted below is about parts rather than about one file.
+        var started = await _client.PostAsJsonAsync(
+            $"/api/live/record/{name}",
+            new RecordRequest(25, detection));
+
+        Assert.Equal(HttpStatusCode.Accepted, started.StatusCode);
+
+        var recording = await WaitForDocumentAsync(
+            document => document.FileName.EndsWith(".ts", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(40));
+
+        Assert.NotNull(recording);
+
+        // It appeared with its first part and already names the detection: a part is what gets
+        // stored, so a six-hour recording cannot wait until the end to say what caused it.
+        Assert.Equal(reference, recording.Metadata["Detection"]);
+
+        Assert.True(
+            await WaitAsync(
+                async () => await Get(name) is { Recording: null },
+                TimeSpan.FromSeconds(90)),
+            "the recording never finished");
+
+        var finished = await Get(recording.Id);
+
+        Assert.NotNull(finished);
+        Assert.Equal(reference, finished.Metadata["Detection"]);
+        Assert.True(
+            int.Parse(finished.Metadata["Recording parts"], CultureInfo.InvariantCulture) > 1,
+            "the recording was a single part, so nothing here was proved about the others");
+
+        // And the other direction, which is the point: from a detection to everything it produced.
+        var found = await _client.GetFromJsonAsync<List<DocumentResponse>>(ByDetection(detection));
+
+        Assert.Equal(
+            new[] { picture.Id, recording.Id }.OrderBy(id => id),
+            found!.Select(document => document.Id).OrderBy(id => id));
+
+        // The target beside it in the very same frame is a different detection, which is why the
+        // target id is part of the key rather than the frame alone.
+        var neighbour = await _client.GetFromJsonAsync<List<DocumentResponse>>(
+            ByDetection(detection with { TargetId = 8 }));
+
+        Assert.Empty(neighbour!);
+    }
+
+    private static string ByDetection(DetectionReference detection)
+        => "/api/documents/by-detection"
+            + $"?stream={Uri.EscapeDataString(detection.Stream)}"
+            + $"&timestamp={Uri.EscapeDataString(detection.Timestamp.ToString("O", CultureInfo.InvariantCulture))}"
+            + $"&targetId={detection.TargetId}";
 
     /// <summary>
     /// A long recording is written in segments and stored as it goes, so no pod ever holds the

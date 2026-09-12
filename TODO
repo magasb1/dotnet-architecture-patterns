@@ -56,8 +56,13 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
       by decision; health, marking, a proxied preview and KLV must reach ListLive and friends
 - [x] MISB ST 0903 encoder: the VMTI wire format detections leave as, round-tripped through a
       reader written from the standard. Nothing produces one yet
-- [ ] Decide whether VMTI rides standalone or embedded as ST 0601 tag 74. It changes the checksum
-      range and the available geo items, so it must be settled before a consumer exists
+- [x] Decided: VMTI rides standalone as its own KLV stream. Never burned into the picture, never
+      nested in ST 0601 tag 74, so recorded imagery is byte-for-byte what the encoder sent
+- [x] Detection provenance: a capture carries the detection that caused it, on both surfaces, and
+      documents are findable by detection. An alert is that document appearing on the change feed
+- [ ] Flaky under a full-suite run: A_reconnect_under_the_same_name_resumes_the_same_stream. Passed
+      3/3 alone, 16/16 in its class and on a repeat full run; the SRT timing tests share ports and
+      ffmpeg senders with the rest of the suite
 - [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and
       returns detections and the preview. Detection runs on every stream, so decoding on demand
       answers nothing; KLV needs no decode at all and must not argue for any

@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Net.Http.Headers;
 using StorageDemo.Api.Uploads;
 using StorageDemo.Core.Documents;
+using StorageDemo.Core.Streaming;
 
 namespace StorageDemo.Api.Controllers;
 
@@ -27,6 +28,26 @@ public sealed class DocumentsController(
     [HttpGet]
     public async Task<IReadOnlyList<DocumentResponse>> GetAll(CancellationToken cancellationToken)
         => (await documents.GetAllAsync(cancellationToken)).Select(DocumentResponse.From).ToList();
+
+    /// <summary>
+    /// Every recording and snapshot one detection caused. The three parameters are the three things
+    /// that identify a detection: the stream, the VMTI precision timestamp of the frame, and the
+    /// target id within it.
+    ///
+    /// It is here rather than on the live surface because by the time anyone asks, the stream may
+    /// be long gone and the document is what survives.
+    /// </summary>
+    [HttpGet("by-detection")]
+    public async Task<IReadOnlyList<DocumentResponse>> GetByDetection(
+        [FromQuery] string stream,
+        [FromQuery] DateTimeOffset timestamp,
+        [FromQuery] int targetId,
+        CancellationToken cancellationToken)
+        => (await documents.FindByDetectionAsync(
+                new DetectionReference(stream, timestamp, targetId),
+                cancellationToken))
+            .Select(DocumentResponse.From)
+            .ToList();
 
     [HttpGet("{id:guid}")]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

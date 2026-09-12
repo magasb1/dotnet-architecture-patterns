@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using StorageDemo.Core.Storage;
+using StorageDemo.Core.Streaming;
 
 namespace StorageDemo.Core.Documents;
 
@@ -155,6 +156,22 @@ public sealed class DocumentService(
 
     public Task<IReadOnlyList<Document>> GetAllAsync(CancellationToken cancellationToken = default)
         => repository.GetAllAsync(cancellationToken);
+
+    public async Task<IReadOnlyList<Document>> FindByDetectionAsync(
+        DetectionReference detection,
+        CancellationToken cancellationToken = default)
+    {
+        var reference = detection.ToString();
+
+        // ponytail: a scan of the listing, because the reference is one string inside a metadata
+        // blob and neither store indexes into it. Honest while a listing is a page of documents,
+        // which is what every other read here already assumes. Index the metadata key when the
+        // listing itself stops fitting in one call - the two problems arrive together.
+        return [.. (await repository.GetAllAsync(cancellationToken))
+            .Where(document =>
+                document.Metadata.TryGetValue(DetectionReference.MetadataKey, out var value)
+                && string.Equals(value, reference, StringComparison.Ordinal))];
+    }
 
     public SegmentedDocument BeginSegmented(
         string fileName,

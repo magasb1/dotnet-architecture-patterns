@@ -64,6 +64,38 @@ public sealed record VmtiFrame(
     string? Ontology = null);
 
 /// <summary>
+/// Which detection caused a capture: the three things that identify one uniquely on the wire, and
+/// there is no fourth. The stream it was seen on, the VMTI precision timestamp of the frame
+/// (<see cref="VmtiFrame.Timestamp"/>), and the target id within that frame
+/// (<see cref="VmtiDetection.Id"/>).
+///
+/// It never travels as a detection; it travels as a reference to one. A recording or a snapshot
+/// carries it in the document's metadata beside the stream name, the capture time and the
+/// classification, which is what lets a document name the detection that caused it and a detection
+/// find every document it produced.
+/// </summary>
+public sealed record DetectionReference(string Stream, DateTimeOffset Timestamp, int TargetId)
+{
+    /// <summary>
+    /// Where it lands, beside "Live stream", "Captured" and "Classification". One entry rather
+    /// than three, so that finding documents by detection is one exact comparison rather than a
+    /// three-way match, and so that the retention sweeper's keys are untouched.
+    /// </summary>
+    public const string MetadataKey = "Detection";
+
+    /// <summary>
+    /// The whole reference as one line a person can read in a document's properties without
+    /// knowing this format exists: stream, at a moment, target number.
+    ///
+    /// Microseconds because that is the resolution of the precision timestamp (MISB ST 0603).
+    /// Rounding it would name a different frame, and the frame is half of what makes the target id
+    /// mean anything.
+    /// </summary>
+    public override string ToString()
+        => $"{Stream}@{Timestamp.ToUniversalTime():yyyy-MM-ddTHH:mm:ss.ffffff}Z#{TargetId}";
+}
+
+/// <summary>
 /// Encodes a standalone MISB ST 0903 VMTI Local Set: the detections from one frame, as a KLV
 /// packet a STANAG 4609 consumer already knows how to read.
 ///

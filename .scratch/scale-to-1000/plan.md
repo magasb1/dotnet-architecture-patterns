@@ -1090,6 +1090,47 @@ here. Pattern of life is a track question, and ST 0903 carries tracks as well as
 is the other half of why it fits. Fetch the standard before designing the wire format; do not work
 from a library's tag list.
 
+### Decided: detections never touch the picture, and a capture says what caused it
+
+Two requirements from the owner, 2026-09-12.
+
+**Detections are not embedded in the image.** Not burned into the pixels, and not nested inside the
+platform metadata as ST 0601 tag 74 either. The VMTI set rides as **its own KLV stream** in the
+transport, on the same presentation clock as the ST 0601 metadata. That settles the open carriage
+question, and it settles it the strict way: the video a viewer sees and a recording stores is
+exactly what the encoder sent, byte for byte. A consumer that ignores the detection stream gets
+untouched imagery, which is what makes the recording evidential rather than annotated.
+
+The cost is the one the standard warns about. Standalone means no geo-offset items, so a detection
+carries pixels and the worker computes map positions from the platform data it already receives.
+That is the right side of the trade: a burned-in box cannot be undone and a nested set changes what
+the checksum covers.
+
+**A detection must be able to raise an alert, and a capture must say which detection caused it.**
+This is less new than it sounds, because the design already made a detector a first-class caller:
+"a person pressing record and a detector firing are the same thing, which is why an automatic
+detector needs no separate path". What is missing is not the trigger but the **provenance**.
+
+So a recording or a snapshot carries the detection that caused it, in the document metadata beside
+the stream name, the capture time and the classification it already stores. A detection is
+identified by the three things that make it unique on the wire: the stream, the VMTI precision
+timestamp, and the target id within that frame. From a document you can then name the detection;
+from a detection you can find every document it produced.
+
+**A snapshot's alert is immediate; a recording's is one part late.** Found while building this,
+and it changes how a detector should be wired rather than how this works. A snapshot publishes on
+the change feed the moment it is stored. A recording's document appears with its *first stored
+part*, which is `RecordingPartMinutes` later, minutes in production. So a detection that matters
+should trigger **both**: the snapshot is the alert and its immediate evidence, the recording is the
+context that follows. Nothing enforces that pairing and nothing should; it is guidance for whoever
+writes the detector.
+
+**An alert is a capture with provenance, and needs no second mechanism.** The change feed already
+pushes new documents to every connected client, so a document appearing with a detection reference
+*is* the alert arriving, and it arrives with the evidence attached rather than as a message
+pointing at something that may not exist yet. A bare alert that captures nothing is the upgrade
+path, not the first version: it needs a feed of its own and nothing has asked for one.
+
 ### The wire format is built; five things stand between it and a consumer
 
 `Misb0903.cs` encodes a VMTI local set: the timestamp, frame size, target count, source sensor, and

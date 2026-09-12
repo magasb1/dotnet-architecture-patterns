@@ -16,7 +16,11 @@ public sealed record CreateManualStreamRequest(string Name, string Url);
 /// How long to record for. Omitted means the configured default, and a further trigger extends
 /// whatever is running rather than starting a second recording.
 /// </param>
-public sealed record RecordRequest(double? Seconds);
+/// <param name="Detection">
+/// The detection that asked for it, when one did. Omitted by a person pressing record, and the
+/// document is then exactly what it was before.
+/// </param>
+public sealed record RecordRequest(double? Seconds, DetectionReference? Detection = null);
 
 public sealed record LiveStatusResponse(
     IReadOnlyList<string> Transports,
@@ -171,12 +175,17 @@ public sealed class LiveStreamsController(
     /// Takes a picture now and stores it as a document. Served while a stream is interrupted, so
     /// the button still works while the tile shows the gap, and refused once the stream is gone.
     /// </summary>
+    /// <param name="detection">
+    /// The detection that asked for it, as a body, when one did. A person pressing the button posts
+    /// nothing at all, exactly as before.
+    /// </param>
     [HttpPost("snapshot/{*name}")]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Snapshot(
         string name,
         [FromHeader(Name = "X-Storage-Token")] string? token,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DetectionReference? detection = null)
     {
         if (Guard(token) is { } refused)
         {
@@ -187,10 +196,11 @@ public sealed class LiveStreamsController(
             name,
             $"api/live/snapshot/{name}",
             token,
-            async () => await live.SnapshotAsync(name, cancellationToken) is { } id
+            async () => await live.SnapshotAsync(name, detection, cancellationToken) is { } id
                 ? Ok(new { documentId = id })
                 : NotFound(),
-            cancellationToken);
+            cancellationToken,
+            body: detection);
     }
 
     /// <summary>
@@ -223,7 +233,11 @@ public sealed class LiveStreamsController(
             {
                 // Accepted, not Ok: the recording is running and has no further relationship with
                 // this call. The document appears when there is a file.
-                var status = await live.RecordAsync(name, duration, cancellationToken);
+                var status = await live.RecordAsync(
+                    name,
+                    duration,
+                    request?.Detection,
+                    cancellationToken);
 
                 return status is null ? NotFound() : Accepted(status);
             },

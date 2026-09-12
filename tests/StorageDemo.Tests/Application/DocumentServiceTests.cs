@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using StorageDemo.Core.Documents;
+using StorageDemo.Core.Streaming;
 
 namespace StorageDemo.Tests.Application;
 
@@ -58,6 +59,59 @@ public sealed class DocumentServiceTests
         Assert.Equal("live/camera1", document.Metadata["Live stream"]);
         Assert.Equal("2026-01-01 12:00:00Z", document.Metadata["Captured"]);
     }
+
+    /// <summary>
+    /// The other half of provenance: from a detection, every document it produced. Two captures
+    /// from the same frame and a third from the target next to them, which is the case a
+    /// three-part key exists to separate.
+    /// </summary>
+    [Fact]
+    public async Task Documents_are_found_by_the_detection_that_caused_them()
+    {
+        var frame = new DateTimeOffset(2026, 9, 12, 10, 31, 2, TimeSpan.Zero).AddTicks(1234560);
+        var wanted = new DetectionReference("live/camera1", frame, 7);
+        var neighbour = new DetectionReference("live/camera1", frame, 8);
+
+        var service = CreateService();
+        var snapshot = await Capture(service, "camera1.jpg", wanted);
+        var recording = await Capture(service, "camera1.ts", wanted);
+        await Capture(service, "other.jpg", neighbour);
+        await service.UploadAsync("holiday.jpg", Content(), "image/jpeg");
+
+        var found = await service.FindByDetectionAsync(wanted);
+
+        Assert.Equal(
+            new[] { snapshot.Id, recording.Id }.OrderBy(id => id),
+            found.Select(document => document.Id).OrderBy(id => id));
+        Assert.Empty(await service.FindByDetectionAsync(new DetectionReference("live/camera1", frame, 9)));
+    }
+
+    /// <summary>A detection on another stream is another detection, even at the same instant.</summary>
+    [Fact]
+    public async Task A_detection_on_another_stream_finds_nothing()
+    {
+        var frame = DateTimeOffset.UtcNow;
+        var service = CreateService();
+
+        await Capture(service, "camera1.jpg", new DetectionReference("live/camera1", frame, 7));
+
+        Assert.Empty(await service.FindByDetectionAsync(new DetectionReference("live/camera2", frame, 7)));
+    }
+
+    private static Task<Document> Capture(
+        DocumentService service,
+        string fileName,
+        DetectionReference detection)
+        => service.UploadAsync(
+            fileName,
+            Content(),
+            null,
+            CancellationToken.None,
+            new Dictionary<string, string>
+            {
+                ["Live stream"] = detection.Stream,
+                [DetectionReference.MetadataKey] = detection.ToString(),
+            });
 
     [Fact]
     public async Task Upload_without_metadata_carries_none()

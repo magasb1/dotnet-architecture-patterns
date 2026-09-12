@@ -107,7 +107,8 @@ public sealed class GrpcApiTests : IAsyncLifetime
     {
         var name = new LiveStreamName { Name = "guarded" };
 
-        var missing = await Assert.ThrowsAsync<RpcException>(() => _client.SnapshotLiveAsync(name).ResponseAsync);
+        var missing = await Assert.ThrowsAsync<RpcException>(
+            () => _client.SnapshotLiveAsync(new SnapshotLiveRequest { Name = "guarded" }).ResponseAsync);
         var wrong = await Assert.ThrowsAsync<RpcException>(
             () => _client.RecordLiveAsync(new RecordLiveRequest { Name = "guarded" }, WithToken("nope")).ResponseAsync);
         var listing = await Assert.ThrowsAsync<RpcException>(() => _client.ListLiveAsync(new Empty()).ResponseAsync);
@@ -130,7 +131,9 @@ public sealed class GrpcApiTests : IAsyncLifetime
 
         // Past the guard and into the service, which has no such stream to act on.
         var failure = await Assert.ThrowsAsync<RpcException>(
-            () => _client.SnapshotLiveAsync(new LiveStreamName { Name = "absent" }, WithToken(Token)).ResponseAsync);
+            () => _client.SnapshotLiveAsync(
+                new SnapshotLiveRequest { Name = "absent" },
+                WithToken(Token)).ResponseAsync);
 
         Assert.Equal(StatusCode.NotFound, failure.StatusCode);
     }
@@ -259,6 +262,66 @@ public sealed class GrpcApiTests : IAsyncLifetime
             // The one item outside the minimum set rides along raw, keyed by its tag.
             Assert.Equal(Misb.Known.TailNumber, sample.Fields.Unparsed[4].ToByteArray());
         }
+    }
+
+    /// <summary>
+    /// The client's surface for provenance, both ways round: a detector triggers a snapshot over
+    /// gRPC and names the detection, the stored document carries it, and asking by that same
+    /// detection finds it again. The timestamp crosses the wire as a protobuf Timestamp and has to
+    /// come back as the same microsecond, which is the half that would break quietly.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotLive_carries_the_detection_and_ListByDetection_finds_what_it_produced()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, LiveReplicas.NoLibsrt);
+        Assert.SkipUnless(LiveReplicas.HasSrt(), LiveReplicas.NoFfmpegSrt);
+
+        const string name = "grpc-detected-camera";
+
+        await using var replicas = new LiveReplicas();
+        var ingest = SrtSenders.FreePort();
+        var a = replicas.Start("pod-a", ingest);
+
+        replicas.Send(ingest, name);
+
+        await LiveReplicas.Until(
+            async () => await replicas.Registry.GetAsync(name) is { HasPreview: true },
+            TimeSpan.FromSeconds(40),
+            "the stream never arrived");
+
+        using var channel = GrpcChannel.ForAddress(
+            a.Server.BaseAddress,
+            new GrpcChannelOptions { HttpHandler = a.Server.CreateHandler() });
+        var client = new StorageDemo.Grpc.Documents.DocumentsClient(channel);
+        var token = new Metadata { { LiveTokenInterceptor.Header, LiveReplicas.Token } };
+
+        var frame = new DateTimeOffset(2026, 9, 12, 10, 31, 2, TimeSpan.Zero).AddTicks(1234560);
+        var detection = new DetectionReferenceMessage
+        {
+            Stream = name,
+            Timestamp = Timestamp.FromDateTimeOffset(frame),
+            TargetId = 7,
+        };
+
+        var stored = await client.SnapshotLiveAsync(
+            new SnapshotLiveRequest { Name = name, Detection = detection },
+            token);
+
+        var document = await client.GetAsync(stored, token);
+
+        Assert.Equal(
+            new DetectionReference(name, frame, 7).ToString(),
+            Assert.Single(document.Metadata, entry => entry.Key == "Detection").Value);
+
+        var found = await client.ListByDetectionAsync(detection, token);
+
+        Assert.Equal(stored.Id, Assert.Single(found.Documents).Id);
+
+        // A different target in the same frame produced nothing, so it finds nothing.
+        var neighbour = detection.Clone();
+        neighbour.TargetId = 8;
+
+        Assert.Empty((await client.ListByDetectionAsync(neighbour, token)).Documents);
     }
 
     /// <summary>

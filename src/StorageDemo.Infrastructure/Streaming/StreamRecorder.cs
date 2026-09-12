@@ -47,6 +47,9 @@ public sealed class StreamRecorder
     /// <summary>The stream's ST 0102 marking, asked for when a part is stored so the document carries it.</summary>
     private readonly Func<string?> _classification;
 
+    /// <summary>The detection that asked for this recording, when one did. Null when a person did.</summary>
+    private readonly DetectionReference? _detection;
+
     private DateTimeOffset _endsAt;
 
     /// <summary>Bytes of the parts already stored, so the running total survives a part roll.</summary>
@@ -58,13 +61,15 @@ public sealed class StreamRecorder
         IServiceScopeFactory scopeFactory,
         ILogger logger,
         TimeSpan? duration,
-        Func<string?>? classification = null)
+        Func<string?>? classification = null,
+        DetectionReference? detection = null)
     {
         _hub = hub;
         _options = options;
         _scopeFactory = scopeFactory;
         _logger = logger;
         _classification = classification ?? (() => null);
+        _detection = detection;
 
         StartedAt = DateTimeOffset.UtcNow;
         _endsAt = StartedAt + (duration ?? TimeSpan.FromSeconds(options.DefaultRecordingSeconds));
@@ -335,6 +340,14 @@ public sealed class StreamRecorder
         if (_classification() is { } marking)
         {
             metadata["Classification"] = marking;
+        }
+
+        // Written on every part rather than only at the end, because a part is what gets stored: a
+        // six-hour recording is a document from its first few minutes, and it has to say what
+        // caused it from then on rather than once it finishes.
+        if (_detection is not null)
+        {
+            metadata[DetectionReference.MetadataKey] = _detection.ToString();
         }
 
         return metadata;

@@ -111,6 +111,36 @@ public sealed class RetentionSweeperTests
         Assert.Contains(running.Id, _repository.Documents.Keys);
     }
 
+    /// <summary>
+    /// The sweeper tells a capture from an upload by one metadata key, so a capture carrying a new
+    /// one must still be swept and an upload must still be safe. A detection reference is one more
+    /// entry beside the keys it reads, never a replacement for them.
+    /// </summary>
+    [Fact]
+    public async Task A_capture_with_a_detection_reference_is_still_told_from_an_upload()
+    {
+        var detection = new DetectionReference("cam-1", Ago(30), 7);
+
+        var recording = Recording("cam-1", Ago(30), parts: 2, detection: detection);
+        var snapshot = Snapshot("cam-1", Ago(30), detection);
+
+        _storage.Objects["documents/holiday.jpg"] = [1];
+        var upload = Store(new Document
+        {
+            Id = Guid.NewGuid(),
+            FileName = "holiday.jpg",
+            StorageKey = "documents/holiday.jpg",
+            CreatedAt = Ago(3000),
+        });
+
+        var result = await CreateSweeper().SweepAsync(Week, TenMinutes);
+
+        Assert.Equal(2, result.Documents);
+        Assert.DoesNotContain(recording.Id, _repository.Documents.Keys);
+        Assert.DoesNotContain(snapshot.Id, _repository.Documents.Keys);
+        Assert.Contains(upload.Id, _repository.Documents.Keys);
+    }
+
     [Fact]
     public async Task An_uploaded_document_is_never_expired()
     {
@@ -210,7 +240,11 @@ public sealed class RetentionSweeperTests
     /// A segmented recording as the recorder leaves one: parts under recordings/, no object at its
     /// own key, and the stream name and start time in its metadata.
     /// </summary>
-    private Document Recording(string stream, DateTimeOffset startedAt, int parts = 1)
+    private Document Recording(
+        string stream,
+        DateTimeOffset startedAt,
+        int parts = 1,
+        DetectionReference? detection = null)
     {
         var id = Guid.NewGuid();
         var pieces = Enumerable
@@ -232,16 +266,16 @@ public sealed class RetentionSweeperTests
             Size = pieces.Sum(piece => piece.Size),
             CreatedAt = startedAt,
             Parts = pieces,
-            Metadata = new Dictionary<string, string>
+            Metadata = With(detection, new Dictionary<string, string>
             {
                 ["Live stream"] = stream,
                 ["Recording started"] = startedAt.ToString("u"),
-            },
+            }),
         });
     }
 
     /// <summary>A snapshot names its stream but has no start time, because nothing is still writing it.</summary>
-    private Document Snapshot(string stream, DateTimeOffset takenAt)
+    private Document Snapshot(string stream, DateTimeOffset takenAt, DetectionReference? detection = null)
     {
         var id = Guid.NewGuid();
         var key = $"documents/{id}/{stream}.jpg";
@@ -255,12 +289,24 @@ public sealed class RetentionSweeperTests
             ContentType = "image/jpeg",
             Size = 1,
             CreatedAt = takenAt,
-            Metadata = new Dictionary<string, string>
+            Metadata = With(detection, new Dictionary<string, string>
             {
                 ["Live stream"] = stream,
                 ["Captured"] = takenAt.ToString("u"),
-            },
+            }),
         });
+    }
+
+    private static Dictionary<string, string> With(
+        DetectionReference? detection,
+        Dictionary<string, string> metadata)
+    {
+        if (detection is not null)
+        {
+            metadata[DetectionReference.MetadataKey] = detection.ToString();
+        }
+
+        return metadata;
     }
 
     private Document Store(Document document)

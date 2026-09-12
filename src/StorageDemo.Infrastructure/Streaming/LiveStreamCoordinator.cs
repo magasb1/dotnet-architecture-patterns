@@ -361,7 +361,10 @@ public sealed class LiveStreamCoordinator(
         return Describe(entry, LiveStreamState.Live);
     }
 
-    public async Task<Guid?> SnapshotAsync(string name, CancellationToken cancellationToken = default)
+    public async Task<Guid?> SnapshotAsync(
+        string name,
+        DetectionReference? detection = null,
+        CancellationToken cancellationToken = default)
     {
         if (!_local.TryGetValue(name, out var entry))
         {
@@ -392,6 +395,17 @@ public sealed class LiveStreamCoordinator(
         if (entry.Klv.Classification is { } marking)
         {
             metadata["Classification"] = marking;
+        }
+
+        // Provenance, not a second trigger: a detector arrives on this same call. The document
+        // then appears on the change feed carrying this, which is the alert, with the evidence
+        // attached rather than a message pointing at something that may not exist yet.
+        //
+        // ponytail: so a detection that captures nothing raises nothing. A bare alert needs a feed
+        // of its own; add one when something asks for an alert without evidence.
+        if (detection is not null)
+        {
+            metadata[DetectionReference.MetadataKey] = detection.ToString();
         }
 
         await using var scope = scopeFactory.CreateAsyncScope();
@@ -473,6 +487,7 @@ public sealed class LiveStreamCoordinator(
     public Task<RecordingStatus?> RecordAsync(
         string name,
         TimeSpan? duration,
+        DetectionReference? detection = null,
         CancellationToken cancellationToken = default)
     {
         if (!_local.TryGetValue(name, out var entry))
@@ -483,6 +498,9 @@ public sealed class LiveStreamCoordinator(
         // One recording at a time per stream. A trigger arriving while one runs extends its end
         // rather than starting a second, so continuous detection produces one clip covering the
         // whole event instead of a drift of overlapping near-duplicates.
+        // ponytail: an extending trigger keeps the first detection's reference, so a document names
+        // what started it rather than everything that kept it going. Keep a list on the recorder if
+        // naming every detection in one clip ever matters.
         if (entry.Recorder is { Finished: false } running)
         {
             running.Extend(duration);
@@ -490,7 +508,14 @@ public sealed class LiveStreamCoordinator(
             return Task.FromResult<RecordingStatus?>(running.Status);
         }
 
-        var recorder = new StreamRecorder(entry.Hub, _options, scopeFactory, logger, duration, () => entry.Klv.Classification);
+        var recorder = new StreamRecorder(
+            entry.Hub,
+            _options,
+            scopeFactory,
+            logger,
+            duration,
+            () => entry.Klv.Classification,
+            detection);
 
         entry.Records(recorder, recorder.RunAsync(entry.Lifetime.Token));
 

@@ -39,6 +39,18 @@ public sealed class DocumentsGrpcService(
         return response;
     }
 
+    public override async Task<ListResponse> ListByDetection(
+        DetectionReferenceMessage request,
+        ServerCallContext context)
+    {
+        var response = new ListResponse();
+        response.Documents.AddRange(
+            (await documents.FindByDetectionAsync(Reference(request)!, context.CancellationToken))
+                .Select(ToMessage));
+
+        return response;
+    }
+
     public override async Task<DocumentMessage> Get(DocumentId request, ServerCallContext context)
     {
         var document = await documents.GetAsync(ParseId(request.Id), context.CancellationToken);
@@ -279,11 +291,13 @@ public sealed class DocumentsGrpcService(
             "No preview for this stream.");
     }
 
-    public override async Task<DocumentId> SnapshotLive(LiveStreamName request, ServerCallContext context)
+    public override async Task<DocumentId> SnapshotLive(
+        SnapshotLiveRequest request,
+        ServerCallContext context)
     {
         RequireLive();
 
-        var id = await live.SnapshotAsync(request.Name, context.CancellationToken)
+        var id = await live.SnapshotAsync(request.Name, Reference(request.Detection), context.CancellationToken)
             ?? throw new RpcException(new Status(
                 StatusCode.NotFound,
                 "That stream is not running on this replica, or it has nothing to capture."));
@@ -299,13 +313,30 @@ public sealed class DocumentsGrpcService(
 
         var duration = request.Seconds > 0 ? TimeSpan.FromSeconds(request.Seconds) : (TimeSpan?)null;
 
-        var status = await live.RecordAsync(request.Name, duration, context.CancellationToken)
+        var status = await live.RecordAsync(
+                request.Name,
+                duration,
+                Reference(request.Detection),
+                context.CancellationToken)
             ?? throw new RpcException(new Status(
                 StatusCode.NotFound,
                 "That stream is not running on this replica."));
 
         return ToMessage(status);
     }
+
+    /// <summary>
+    /// The wire form of a detection reference, as the rest of the service knows it. A message with
+    /// no timestamp names no frame, so it matches nothing, which is the right answer to a caller
+    /// that sent half a reference.
+    /// </summary>
+    private static DetectionReference? Reference(DetectionReferenceMessage? detection)
+        => detection is null
+            ? null
+            : new DetectionReference(
+                detection.Stream,
+                detection.Timestamp?.ToDateTimeOffset() ?? default,
+                detection.TargetId);
 
     public override async Task<Empty> StopLiveRecording(LiveStreamName request, ServerCallContext context)
     {

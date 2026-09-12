@@ -205,7 +205,7 @@ public sealed class DocumentsApi : IDisposable
         try
         {
             var document = await _client.SnapshotLiveAsync(
-                new LiveStreamName { Name = name },
+                new SnapshotLiveRequest { Name = name },
                 cancellationToken: cancellationToken);
 
             return document.Id;

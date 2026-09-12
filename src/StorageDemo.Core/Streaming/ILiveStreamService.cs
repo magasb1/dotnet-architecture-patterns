@@ -56,7 +56,14 @@ public interface ILiveStreamService
     /// preview, which is both smaller and up to a keyframe interval older. Served while a stream is
     /// interrupted, refused once it is gone.
     /// </summary>
-    Task<Guid?> SnapshotAsync(string name, CancellationToken cancellationToken = default);
+    /// <param name="detection">
+    /// The detection that asked for it, when one did. A person pressing the button passes none and
+    /// the document is exactly what it was before.
+    /// </param>
+    Task<Guid?> SnapshotAsync(
+        string name,
+        DetectionReference? detection = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Starts a recording, or extends the one already running.
@@ -70,9 +77,11 @@ public interface ILiveStreamService
     /// When given, the stop time is fixed at the start, which is what would otherwise be called a
     /// clip. Two operations for one thing would drift apart.
     /// </param>
+    /// <inheritdoc cref="SnapshotAsync" path="/param[@name='detection']"/>
     Task<RecordingStatus?> RecordAsync(
         string name,
         TimeSpan? duration,
+        DetectionReference? detection = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>Ends the recording now. It becomes a document, as it would have anyway.</summary>
