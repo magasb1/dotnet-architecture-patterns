@@ -107,14 +107,39 @@ public sealed class LiveStreamCoordinator(
     /// leaves a window where two replicas each admit the same name. <see cref="ClaimAsync"/> closes
     /// it.
     ///
+    /// A full replica also refuses here, which is the other half of the same decision and is why it
+    /// is made in one place: both answers are about whether this name may connect right now, both
+    /// are read off state only this replica has, and both have to be given before a connection
+    /// exists. <see cref="LiveOptions.MaxStreams"/> is the limit, zero meaning none, and a name
+    /// already held here is admitted whatever the count - an encoder reconnecting after a blip is a
+    /// stream this replica is already responsible for, and refusing it would strand it.
+    ///
     /// Only the ingest port asks. A viewer is not a publisher and is never refused by this rule.
     /// </summary>
     public int? AdmitPublisher(Admission admission)
-        => _known.TryGetValue(admission.Name, out var held)
+    {
+        if (_known.TryGetValue(admission.Name, out var held)
             && held.State == LiveStreamState.Live
-            && LiveStreamStaleness.OwnerAlive(held, Beat)
-                ? Srt.SRT_REJX_CONFLICT
+            && LiveStreamStaleness.OwnerAlive(held, Beat))
+        {
+            return Srt.SRT_REJX_CONFLICT;
+        }
+
+        // ponytail: a count, for a ceiling that is really a joint budget of sockets and packet
+        // rate. A replica holding ten streams at fifteen megabits is past the knee the baseline
+        // measured while one holding a hundred and fifty at half a megabit is not, and this cannot
+        // tell them apart, so the number has to be set per deployment from the expected bitrate.
+        // The honest signal exists - live.udp.receive.errors is the collapse itself, zero on a
+        // quiet pod and thirteen thousand a second on a broken one - but it arrives after the pod
+        // is already failing, and a handshake has to answer before that. Refuse on the kernel
+        // counter's recent trend instead of on a count when something is willing to own a
+        // hysteresis rule that does not flap at the knee.
+        return _options.MaxStreams > 0
+            && _local.Count >= _options.MaxStreams
+            && !_local.ContainsKey(admission.Name)
+                ? Srt.SRT_REJX_OVERLOAD
                 : null;
+    }
 
     /// <summary>
     /// Takes an accepted socket off the accept thread. Everything real happens on another thread,

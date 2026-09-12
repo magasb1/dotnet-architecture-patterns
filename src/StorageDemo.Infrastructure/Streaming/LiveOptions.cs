@@ -94,6 +94,31 @@ public sealed class LiveOptions
     public int SrtLatencyMs { get; init; } = 120;
 
     /// <summary>
+    /// How many streams this replica holds before it starts refusing new names at the handshake,
+    /// with <c>SRT_REJX_OVERLOAD</c>. Zero, the default, is unlimited, so a deployment that sets
+    /// nothing behaves exactly as it did before this existed. Only publishers are counted and only
+    /// publishers are refused: a viewer is cheap and turning one away helps nobody.
+    ///
+    /// A name this replica already holds is always admitted, whatever the count. A pod at its limit
+    /// that refused its own encoders reconnecting after a blip would abandon the streams it is
+    /// already responsible for, and they would have nowhere to come back to.
+    ///
+    /// There is no formula that turns a pod into a number here, because the ceiling is a joint
+    /// budget of open sockets and packet rate rather than either one:
+    ///
+    ///     streams/175 + pps/45000 &lt; 1
+    ///
+    /// Twenty streams carrying 300 Mbit/s sit at a third of libsrt's receive thread; seventy-five
+    /// streams carrying the same 300 collapse it. So this is set per deployment from the bitrate
+    /// the encoders pointed at it actually send. Measured knees, one ingest port, in
+    /// .scratch/scale-to-1000/baseline.md: about 150 streams at half a megabit, about 60 at a
+    /// camera-like four, fewer than 20 at fifteen. Memory and thread count bind separately and the
+    /// deployment manifest carries that arithmetic.
+    /// </summary>
+    [Range(0, 100_000)]
+    public int MaxStreams { get; init; }
+
+    /// <summary>
     /// Identifies this replica. Defaults to POD_NAME, which Kubernetes supplies from the downward
     /// API, and to the machine name elsewhere.
     /// </summary>

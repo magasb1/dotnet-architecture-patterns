@@ -49,12 +49,17 @@ internal sealed class LiveReplicas : IAsyncDisposable
     /// its handler is handed over directly; a pod resolving a URL and this resolving a handler are
     /// the same hop, and everything above the handler is the code under test.
     /// </param>
+    /// <param name="maxStreams">
+    /// How many streams this replica accepts before refusing new names. Zero, the default, is
+    /// unlimited, which is what every test that is not about capacity wants.
+    /// </param>
     public WebApplicationFactory<Program> Start(
         string node,
         int ingestPort,
         ILiveStreamRegistry? registry = null,
         int graceSeconds = 5,
-        WebApplicationFactory<Program>? peer = null)
+        WebApplicationFactory<Program>? peer = null,
+        int maxStreams = 0)
     {
         var host = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
@@ -71,6 +76,7 @@ internal sealed class LiveReplicas : IAsyncDisposable
             builder.UseSetting("Live:ConsumptionPort", (ingestPort + 1).ToString());
             builder.UseSetting("Live:GracePeriodSeconds", graceSeconds.ToString());
             builder.UseSetting("Live:FeedTimeoutSeconds", "2");
+            builder.UseSetting("Live:MaxStreams", maxStreams.ToString());
             builder.UseEnvironment("Production");
 
             // Registered last, so these instances are what the application resolves. Sharing them is

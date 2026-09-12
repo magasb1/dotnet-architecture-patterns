@@ -70,14 +70,9 @@ metadata:
   namespace: storage-demo
 spec:
   # Streams spread across replicas because the load balancer spreads connections, and each replica
-  # owns some streams and holds everything for them. Processor load is the wrong signal to scale
-  # on, because an idle stream still costs a buffer.
-  #
-  # Streams owned is not the right one either, which is a correction rather than a subtlety. At 250
-  # streams this service reported 250 of them live and contented while a fifth of the media was
-  # actually arriving, so a count reads full health at the moment every stream is broken. A signal
-  # that can tell those apart is still an open question; until there is one, this number is set by
-  # hand from the sizing below.
+  # owns some streams and holds everything for them. Set by hand from the sizing below until an
+  # autoscaler is configured; the guidance for that is at the end of this file, and so is the
+  # reason a count of owned streams is not what it should read.
   replicas: 2
   strategy:
     rollingUpdate:
@@ -152,6 +147,30 @@ spec:
             # wherever viewers are. Replace the host with its external address.
             - name: Live__PublicConsumptionUrl
               value: srt://storage-demo-consumption.storage-demo.svc.cluster.local:9010
+
+            # Refuse an encoder at the handshake once this replica holds this many streams, so a
+            # full pod turns one away in a round trip instead of accepting it and serving every
+            # stream it has badly. Unset, or zero, is unlimited and is what this was before.
+            #
+            # It must match the resources below, and both follow from the bitrate the encoders
+            # actually send rather than from a stream count alone: the ceiling is a joint budget of
+            # open sockets and packet rate, roughly streams/175 + pps/45000 < 1, so twenty streams
+            # at 300 Mbit/s sit at a third of libsrt's receive thread and seventy-five streams at
+            # the same 300 collapse it. Measured knees on one ingest port, from
+            # .scratch/scale-to-1000/baseline.md: about 150 streams at half a megabit, about 60 at
+            # a camera-like four, fewer than 20 at fifteen. Sixty is the camera-rate figure the
+            # requests below are sized for.
+            #
+            # A refused encoder retries from a fresh source port and is re-balanced to another pod
+            # under every load balancer default in play - iptables and nftables random, IPVS
+            # round-robin, Cilium random and maglev - which is why sessionAffinity stays None on
+            # both media Services above. ClientIP affinity would pin the retry to the pod that is
+            # already full.
+            #
+            # A name this pod already holds is admitted whatever the count, so an encoder
+            # reconnecting after a blip always gets back in.
+            - name: Live__MaxStreams
+              value: "60"
           lifecycle:
             preStop:
               # Kubernetes removes a pod from its Services and sends SIGTERM at the same moment, so
@@ -272,3 +291,109 @@ spec:
   selector:
     matchLabels:
       app: storage-demo
+
+# ---------------------------------------------------------------------------------------------
+# Autoscaling: what to scale on, and what to watch to know the answer is still true.
+#
+# There is no HorizontalPodAutoscaler here on purpose. One needs a metrics pipeline this repository
+# does not install, and the thing it would read is not exported yet: the service publishes its
+# figures through System.Diagnostics.Metrics under the meter StorageDemo.Live, which
+# `dotnet-counters monitor -n StorageDemo.Api --counters StorageDemo.Live` reads with no package at
+# all. Turning that into a /metrics endpoint is two calls in Program.cs plus
+# OpenTelemetry.Extensions.Hosting and OpenTelemetry.Exporter.Prometheus.AspNetCore - and that
+# exporter has never shipped a stable release (1.18.0-beta.1, so --prerelease), which is one more
+# reason not to take the dependency before there is an HPA that needs it.
+#
+# SCALE OUT ON live_streams_owned, AT A TARGET A LITTLE UNDER Live__MaxStreams.
+#
+#   apiVersion: autoscaling/v2
+#   kind: HorizontalPodAutoscaler
+#   metadata: { name: storage-demo, namespace: storage-demo }
+#   spec:
+#     scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: storage-demo }
+#     minReplicas: 2
+#     maxReplicas: 20
+#     metrics:
+#       - type: Pods
+#         pods:
+#           metric: { name: live_streams_owned }
+#           target: { type: AverageValue, averageValue: "50" }
+#
+# served by prometheus-adapter with one rule mapping the pod label:
+#
+#   rules:
+#     - seriesQuery: 'live_streams_owned{namespace!="",pod!=""}'
+#       resources: { overrides: { namespace: { resource: namespace }, pod: { resource: pod } } }
+#       name: { matches: "^live_streams_owned$", as: "live_streams_owned" }
+#       metricsQuery: 'max(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+#
+# KEDA does the same with a prometheus trigger on sum(live_streams_owned) and is only worth its
+# CRDs if scale-to-zero or a non-Prometheus trigger is also wanted.
+#
+# WHY A COUNT OF OWNED STREAMS IS THE TRIGGER AND NOT THE HEALTH SIGNAL.
+#
+# It is a trigger only because Live__MaxStreams was set from a measured bitrate above: it says how
+# much of a budget somebody chose has been spent, and scaling out before that budget is spent is
+# the point. It says nothing about whether the pod is coping. At 250 streams this service reported
+# 250 of them live, every one with packets and bytes rising, while it was demultiplexing a fifth of
+# the media being sent to it - 236 Mbit/s arriving to deliver 26, with 319,000 kernel UDP input
+# errors in fifteen seconds. An autoscaler reading only that count would have seen full health at
+# the moment every stream on the pod was broken.
+#
+# WHAT TO ALERT ON, AND TO CHECK Live__MaxStreams AGAINST.
+#
+# live_udp_receive_errors, which is the kernel's `Udp: InErrors` for the pod's network namespace
+# read through the meter, and which .scratch/scale-to-1000/health-signal.md showed equal to it to
+# the packet. It is the collapse mechanism itself rather than a proxy for it: every one of those
+# errors is the shared UDP receive buffer overflowing, which is what a receive thread past its knee
+# physically is. Measured at three loads on one pod: zero over a whole run at 50 streams, 227,135
+# over a marginal run at 100, and 13,000 a second at 250. Sustained non-zero means
+# Live__MaxStreams is set too high for the bitrate arriving, and the answer is a lower limit and
+# more pods rather than a bigger one.
+#
+# Which streams are hurt is answered by GET /api/live, not by a metric: every stream carries its
+# own packetsLost and packetsDropped per beat, and because the drops happen on the one shared UDP
+# socket every SRT socket behind it reports them, so one call names all of them.
+#
+# DECIDE OVER A WINDOW OF BEATS, NOT ON ONE.
+#
+# The per-stream figures are an interval cleared each beat, and near the knee they are noisy: at
+# 100 streams six consecutive beats read 0, 0, 27, 10, 0, 7, while at 250 every beat on every
+# socketed stream was non-zero. A rule that fires on a single beat would flap on a pod that is
+# merely marginal. Alert on a rate over at least fifteen beats - increase(live_udp_receive_errors)
+# over 30s - and leave behavior.scaleDown.stabilizationWindowSeconds at its default of 300 s for
+# the same reason: encoders that land on a pod about to go reconnect in seconds, so a scale-down is
+# cheap and there is no reason to hurry one.
+#
+# SCALE DOWN THE EMPTIEST POD FIRST.
+#
+# The HPA only sets a replica count; which pod goes is the ReplicaSet controller's choice, and the
+# only handle on it is the annotation controller.kubernetes.io/pod-deletion-cost - an int32 that
+# defaults to 0, where the lower cost is deleted first. It is beta and enabled by default since
+# v1.21, and best-effort. A pod writing its own stream count there would be drained in order of how
+# little it holds, which is the difference between a scale-down that moves five encoders and one
+# that moves sixty.
+#
+# NOTHING DOES THIS TODAY, AND IT CANNOT YET. The storage-demo ServiceAccount in
+# k8s/deployment.yaml (and its twin in k8s/talos/60-app.yaml) has no Role and no RoleBinding
+# anywhere in k8s/, so the pods hold an API token that can do nothing but discovery. Writing the
+# annotation needs both the code and this, applied in the same namespace:
+#
+#   apiVersion: rbac.authorization.k8s.io/v1
+#   kind: Role
+#   metadata: { name: storage-demo-pod-deletion-cost, namespace: storage-demo }
+#   rules:
+#     - apiGroups: [""]
+#       resources: ["pods"]
+#       verbs: ["patch"]
+#   ---
+#   apiVersion: rbac.authorization.k8s.io/v1
+#   kind: RoleBinding
+#   metadata: { name: storage-demo-pod-deletion-cost, namespace: storage-demo }
+#   roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: storage-demo-pod-deletion-cost }
+#   subjects:
+#     - { kind: ServiceAccount, name: storage-demo, namespace: storage-demo }
+#
+# Left commented because it is patch on every pod in the namespace: Kubernetes RBAC cannot say
+# "only itself", and granting that to a pod that does not use it is a standing permission for
+# nothing. Apply it with the code that writes the annotation and not before.
