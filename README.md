@@ -113,6 +113,17 @@ Selecting a stream that carries KLV fills a **Sensor** panel under the player wi
 metadata set: platform position and attitude, sensor pointing, slant range and frame centre. It is
 polled once a second while that stream is playing and not at all otherwise.
 
+**Detect**, beside Record and Snapshot, asks a worker to run object detection on the selected
+stream at 1, 5 or 25 detections a second; like a recording it is the server's state and outlives
+the window. While it is on, the newest MISB ST 0903 VMTI frame is polled once a second and its
+boxes are drawn over the picture, in the player's overlay so they follow it into fullscreen, each
+labelled with class, confidence and track, and coloured per track so one target can be followed.
+The boxes are scaled to the rectangle the renderer actually painted the video in, not to the host,
+so letterboxing does not shift them off their objects. They trail the picture by the detection and
+network delay, and the **Detections** panel under the player says how old they are rather than
+pretending they are live. Against a server without the detection calls the button is disabled with
+that reason in its tooltip, and everything else works as before.
+
 The client is deliberately a demonstration of the service rather than a monitoring product. It
 plays one stream at a time and lists what it is given; a wall of simultaneous players and a grid
 that stays fluid at a thousand streams are described in `.scratch/scale-to-1000/client-plan.md` and

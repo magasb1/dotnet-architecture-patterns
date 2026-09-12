@@ -7,8 +7,10 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using FlyleafLib.MediaFramework.MediaRenderer;
 using FlyleafLib.MediaPlayer;
 using Microsoft.Win32;
 using StorageDemo.Core.Documents;
@@ -48,6 +50,35 @@ public partial class MainWindow : Window
     /// playing: it is a per-watched-stream fetch and nothing about it belongs on a grid of tiles.
     /// </summary>
     private readonly DispatcherTimer _klvTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+
+    /// <summary>
+    /// The newest VMTI frame for the stream being watched, while detection is on for it. Same
+    /// shape as the KLV poll: per watched stream, never per tile.
+    /// </summary>
+    private readonly DispatcherTimer _detectionTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+
+    /// <summary>
+    /// One colour per track for as long as the stream is watched, so a person can follow one
+    /// target across polls. Keyed by track id, or by target id for a detector with no tracker.
+    ///
+    /// ponytail: grows for the life of a selection and is cleared on the next; bound it if a
+    /// stream is watched for days.
+    /// </summary>
+    private readonly Dictionary<string, Brush> _trackBrushes = new(StringComparer.Ordinal);
+
+    private static readonly Brush[] TrackPalette =
+    [
+        Brushes.Lime, Brushes.Cyan, Brushes.Yellow, Brushes.Magenta,
+        Brushes.Orange, Brushes.DeepSkyBlue, Brushes.HotPink, Brushes.GreenYellow,
+    ];
+
+    /// <summary>
+    /// Whether the server has the detection calls: null until asked, false once it has answered
+    /// Unimplemented, which is what today's server does and what disables the button.
+    /// </summary>
+    private bool? _detectionSupported;
+
+    private LiveDetectionsMessage? _detections;
 
     private readonly ICollectionView _view;
 
@@ -96,6 +127,7 @@ public partial class MainWindow : Window
         _positionTimer.Tick += OnPositionTick;
         _liveTimer.Tick += async (_, _) => await RefreshLiveAsync();
         _klvTimer.Tick += async (_, _) => await RefreshKlvAsync();
+        _detectionTimer.Tick += async (_, _) => await RefreshDetectionsAsync();
 
         PreviewKeyDown += OnShortcut;
 
@@ -111,6 +143,7 @@ public partial class MainWindow : Window
             _positionTimer.Stop();
             _liveTimer.Stop();
             _klvTimer.Stop();
+            _detectionTimer.Stop();
             _player?.Dispose();
             _api?.Dispose();
         };
@@ -145,6 +178,8 @@ public partial class MainWindow : Window
 
         _liveTimer.Stop();
         StopKlv();
+        StopDetection();
+        _detectionSupported = null;
         _api?.Dispose();
         _documents.Clear();
         _streams.Clear();
@@ -180,6 +215,7 @@ public partial class MainWindow : Window
 
         await RefreshAsync();
         await RefreshLiveAsync();
+        _ = ProbeDetectionAsync(_api, _connection.Token);
 
         _liveTimer.Start();
 
@@ -486,10 +522,12 @@ public partial class MainWindow : Window
                 ShowMetadata(existing);
                 UpdateLiveButtons();
 
-                // KLV can start arriving after the stream has, so the panel appears when it does.
+                // KLV can start arriving after the stream has, so the panel appears when it does;
+                // and detection is the server's state, so a toggle set elsewhere shows up here.
                 if (PlayerHost.Visibility == Visibility.Visible)
                 {
                     SyncKlv(existing);
+                    SyncDetection(existing);
                 }
             }
         }
@@ -702,6 +740,7 @@ public partial class MainWindow : Window
             // The banner rides the item, so a marking that changes mid-stream follows it.
             MarkingBanner.DataContext = item;
             SyncKlv(item);
+            SyncDetection(item);
             return;
         }
 
@@ -865,6 +904,14 @@ public partial class MainWindow : Window
                 // Without it a stream the player cannot reach, or a codec it cannot decode, is a
                 // black rectangle and no explanation at all.
                 _player.OpenCompleted += OnOpenCompleted;
+
+                // The renderer says where the picture sits inside the host, and says so again
+                // whenever letterboxing, zoom or fullscreen move it; the boxes follow. Raised off
+                // the UI thread, hence the dispatch.
+                if (_player.Renderer is { } renderer)
+                {
+                    renderer.ViewportChanged += (_, _) => Dispatcher.BeginInvoke(LayoutDetections);
+                }
             }
 
             FlyleafEngine.TuneFor(_player, live, streamId);
@@ -913,6 +960,7 @@ public partial class MainWindow : Window
             PlayerControls.Visibility = Visibility.Collapsed;
             MarkingBanner.DataContext = null;
             StopKlv();
+            StopDetection();
 
             ShowFallback($"Could not play {e.Url}: {reason}");
             SetStatus($"Playback failed: {reason}");
@@ -923,6 +971,7 @@ public partial class MainWindow : Window
     {
         _positionTimer.Stop();
         StopKlv();
+        StopDetection();
 
         // Releases the cached file, which a delete would otherwise fail to remove.
         _player?.Stop();
@@ -1278,6 +1327,346 @@ public partial class MainWindow : Window
         RecordButton.IsEnabled = stream is not null;
         SnapshotButton.IsEnabled = stream is not null;
         RecordButton.Content = stream?.IsRecording == true ? "Stop recording" : "Record";
+
+        // Off with a reason against a server that has no detection, so the rest of the client
+        // keeps working against it exactly as before.
+        var supported = _detectionSupported != false;
+        DetectButton.IsEnabled = stream is not null && supported;
+        DetectRateBox.IsEnabled = DetectButton.IsEnabled;
+        DetectButton.Content = stream?.Live?.DetectionEnabled == true ? "Stop detecting" : "Detect";
+        DetectButton.ToolTip = supported
+            ? "Ask a worker to run object detection on this stream."
+            : "This server has no detection: it answered Unimplemented to the detection calls.";
+
+        // The state is the server's, so the rate shown is the rate running, not the last pick.
+        if (stream?.Live is { DetectionEnabled: true, DetectionRate: > 0 } live)
+        {
+            DetectRateBox.SelectedIndex = live.DetectionRate switch { <= 1 => 0, >= 25 => 2, _ => 1 };
+        }
+    }
+
+    private int SelectedRate()
+        => SelectedLabel(DetectRateBox) is { } label ? int.Parse(label.TrimEnd('/', 's')) : 5;
+
+    /// <summary>
+    /// Learns once per connection whether the server has the detection calls, so the button can
+    /// say so before anyone selects a stream. Any answer but Unimplemented means they exist;
+    /// no answer at all leaves the question open for the first real call.
+    /// </summary>
+    private async Task ProbeDetectionAsync(DocumentsApi api, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await api.GetLiveDetectionsAsync(string.Empty, cancellationToken);
+            _detectionSupported = true;
+        }
+        catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unimplemented)
+        {
+            _detectionSupported = false;
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        UpdateLiveButtons();
+    }
+
+    private void MarkDetectionUnsupported()
+    {
+        _detectionSupported = false;
+        StopDetection();
+        UpdateLiveButtons();
+    }
+
+    /// <summary>
+    /// Turns detection on for the selected stream, or off. Like a recording it is the server's
+    /// state and outlives this window; the returned stream is applied at once rather than waiting
+    /// for the next list poll to say the same thing.
+    /// </summary>
+    private async void OnDetect(object sender, RoutedEventArgs e)
+    {
+        if (_api is null || Selected is not { IsLive: true } item)
+        {
+            return;
+        }
+
+        var enable = !item.Live!.DetectionEnabled;
+        var rate = SelectedRate();
+
+        try
+        {
+            var stream = await _api.SetLiveDetectionAsync(item.Id, enable, rate, _connection.Token);
+            _detectionSupported = true;
+
+            if (stream is null)
+            {
+                SetStatus($"{item.FileName} is gone.");
+                return;
+            }
+
+            SetStatus(enable
+                ? $"Detection on for {item.FileName} at {rate}/s; a worker picks it up when one is free."
+                : $"Detection off for {item.FileName}.");
+
+            if (ReferenceEquals(Selected, item))
+            {
+                item.Apply(stream);
+                ShowMetadata(item);
+                UpdateLiveButtons();
+                SyncDetection(item);
+            }
+        }
+        catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unimplemented)
+        {
+            MarkDetectionUnsupported();
+            SetStatus("This server has no detection calls.");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Detection failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Polls while detection is on for the stream on screen, and not otherwise. At the detection
+    /// rate or once a second, whichever is slower: asking faster than the worker detects only
+    /// re-reads the same frame.
+    /// </summary>
+    private void SyncDetection(DocumentItem item)
+    {
+        if (_detectionSupported == false || item.Live?.DetectionEnabled != true)
+        {
+            StopDetection();
+            return;
+        }
+
+        var rate = item.Live.DetectionRate;
+        _detectionTimer.Interval = TimeSpan.FromSeconds(Math.Max(1, rate > 0 ? 1.0 / rate : 1));
+
+        if (_detectionTimer.IsEnabled)
+        {
+            return;
+        }
+
+        DetectionPanel.Visibility = Visibility.Visible;
+        _detectionTimer.Start();
+        _ = RefreshDetectionsAsync();
+    }
+
+    private void StopDetection()
+    {
+        _detectionTimer.Stop();
+        _detections = null;
+        _trackBrushes.Clear();
+        DetectionCanvas.Children.Clear();
+        DetectionPanel.Visibility = Visibility.Collapsed;
+        DetectionList.ItemsSource = null;
+    }
+
+    private async Task RefreshDetectionsAsync()
+    {
+        if (_api is null || Selected is not { IsLive: true } item || item.Live?.DetectionEnabled != true)
+        {
+            StopDetection();
+            return;
+        }
+
+        LiveDetectionsMessage? frame;
+
+        try
+        {
+            frame = await _api.GetLiveDetectionsAsync(item.Id, _connection.Token);
+        }
+        catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unimplemented)
+        {
+            MarkDetectionUnsupported();
+            return;
+        }
+        catch (Exception)
+        {
+            // One poll that failed says nothing about the stream; the next one tells the truth.
+            return;
+        }
+
+        if (!ReferenceEquals(Selected, item))
+        {
+            return;
+        }
+
+        _detectionSupported = true;
+        _detections = frame;
+        ShowDetections(frame);
+        LayoutDetections();
+    }
+
+    /// <summary>
+    /// The panel under the player: how many, how old, and one row per target.
+    ///
+    /// The age is wall clock minus the frame's ST 0603 time, so it holds the worker's decode and
+    /// detection time, both network hops, and any clock skew between the worker and this machine.
+    /// The boxes over the picture trail it by about this much, and nothing here pretends
+    /// otherwise. Frame-accurate alignment would take the frame's presentation timestamp on the
+    /// message, the player's current position on the same clock (FlyleafLib's CurTime is relative
+    /// to the demuxer's start, so the start's PTS has to be known too), and a short ring of frames
+    /// on this side to draw the one nearest the picture showing. None of that mapping exists yet.
+    /// </summary>
+    private void ShowDetections(LiveDetectionsMessage? frame)
+    {
+        if (frame is null)
+        {
+            DetectionSummary.Text = "Detection is on; no VMTI frame has arrived yet.";
+            DetectionList.ItemsSource = null;
+            return;
+        }
+
+        var at = frame.Timestamp?.ToDateTimeOffset() ?? DateTimeOffset.MinValue;
+        var age = at == DateTimeOffset.MinValue ? "unknown age" : $"{(DateTimeOffset.UtcNow - at).TotalSeconds:0.0} s old";
+
+        DetectionSummary.Text =
+            $"{frame.Targets.Count} target(s) in a {frame.FrameWidth}x{frame.FrameHeight} frame at "
+            + $"{at.LocalDateTime:HH:mm:ss.fff}, {age}. Boxes trail the picture by about that.";
+
+        DetectionList.ItemsSource = frame.Targets
+            .Select(target => new MetadataRow(
+                Label(target),
+                target.HasTrackId
+                    ? $"track {target.TrackId}{(target.HasTrackStatus ? $", {target.TrackStatus.ToString().ToLowerInvariant()}" : string.Empty)}"
+                    : "no track"))
+            .ToList();
+    }
+
+    private static string Label(VmtiTargetMessage target)
+    {
+        var text = $"#{target.Id} {(target.HasOntologyClass ? target.OntologyClass : "object")}";
+
+        if (target.HasConfidencePercent)
+        {
+            text += $" {target.ConfidencePercent}%";
+        }
+
+        if (target.HasTrackId)
+        {
+            // Enough of a UUID to tell tracks apart on a label.
+            text += $" · {target.TrackId[..Math.Min(8, target.TrackId.Length)]}";
+        }
+
+        return text;
+    }
+
+    private Brush BrushFor(VmtiTargetMessage target)
+    {
+        var key = target.HasTrackId ? target.TrackId : $"#{target.Id}";
+
+        if (!_trackBrushes.TryGetValue(key, out var brush))
+        {
+            brush = TrackPalette[_trackBrushes.Count % TrackPalette.Length];
+            _trackBrushes[key] = brush;
+        }
+
+        return brush;
+    }
+
+    private void OnDetectionCanvasSizeChanged(object sender, SizeChangedEventArgs e) => LayoutDetections();
+
+    /// <summary>
+    /// Draws the current frame's boxes over the picture, in the host's overlay so they go
+    /// fullscreen with it. Frame pixels are scaled to the rectangle the renderer actually painted
+    /// the video in, which is smaller than the host whenever the aspect ratios differ; scaling to
+    /// the host instead puts every box beside its object rather than on it.
+    /// </summary>
+    private void LayoutDetections()
+    {
+        DetectionCanvas.Children.Clear();
+
+        if (_detections is null
+            || _detections.FrameWidth <= 0
+            || _detections.FrameHeight <= 0
+            || _player?.Renderer is not { } renderer)
+        {
+            return;
+        }
+
+        var (left, top, width, height) = VideoRectangle(renderer);
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var scaleX = width / _detections.FrameWidth;
+        var scaleY = height / _detections.FrameHeight;
+
+        foreach (var target in _detections.Targets)
+        {
+            var brush = BrushFor(target);
+
+            // ST 0903 pixels are 1-based and the box is inclusive of both corners.
+            var x = left + (target.Left - 1) * scaleX;
+            var y = top + (target.Top - 1) * scaleY;
+
+            var box = new System.Windows.Shapes.Rectangle
+            {
+                Width = Math.Max(1, (target.Right - target.Left + 1) * scaleX),
+                Height = Math.Max(1, (target.Bottom - target.Top + 1) * scaleY),
+                Stroke = brush,
+                StrokeThickness = 2,
+            };
+
+            Canvas.SetLeft(box, x);
+            Canvas.SetTop(box, y);
+            DetectionCanvas.Children.Add(box);
+
+            var label = new TextBlock
+            {
+                Text = Label(target),
+                Foreground = Brushes.Black,
+                Background = brush,
+                FontSize = 11,
+                Padding = new Thickness(3, 0, 3, 0),
+            };
+
+            Canvas.SetLeft(label, x);
+            Canvas.SetTop(label, Math.Max(0, y - 16));
+            DetectionCanvas.Children.Add(label);
+        }
+    }
+
+    /// <summary>
+    /// Where the picture sits inside the overlay, in the overlay's own units.
+    ///
+    /// The renderer reports the rectangle it painted the video in (<c>Viewport</c>) inside the
+    /// surface it paints on (<c>ControlWidth</c> by <c>ControlHeight</c>), letterboxing, zoom
+    /// and pan included, in the surface's pixels. The overlay window covers that surface exactly,
+    /// so a ratio maps one onto the other and the display's DPI cancels out. Before the first
+    /// frame the renderer has nothing to report, and the fallback fits the video's own dimensions
+    /// into the overlay the way the renderer will, uniformly and centred, which is right until
+    /// somebody zooms.
+    /// </summary>
+    private (double Left, double Top, double Width, double Height) VideoRectangle(Renderer renderer)
+    {
+        var overlayWidth = DetectionCanvas.ActualWidth;
+        var overlayHeight = DetectionCanvas.ActualHeight;
+        var viewport = renderer.Viewport;
+
+        if (renderer.ControlWidth > 0 && renderer.ControlHeight > 0 && viewport.Width > 0 && viewport.Height > 0)
+        {
+            var scaleX = overlayWidth / renderer.ControlWidth;
+            var scaleY = overlayHeight / renderer.ControlHeight;
+
+            return (viewport.X * scaleX, viewport.Y * scaleY, viewport.Width * scaleX, viewport.Height * scaleY);
+        }
+
+        var video = _player!.Video;
+        if (video.Width <= 0 || video.Height <= 0)
+        {
+            return (0, 0, 0, 0);
+        }
+
+        var scale = Math.Min(overlayWidth / video.Width, overlayHeight / video.Height);
+        var width = video.Width * scale;
+        var height = video.Height * scale;
+
+        return ((overlayWidth - width) / 2, (overlayHeight - height) / 2, width, height);
     }
 
     private async void OnDelete(object sender, RoutedEventArgs e)

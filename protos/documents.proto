@@ -60,6 +60,16 @@ service Documents {
   // alongside. Answered by the owning replica wherever the call lands, as the REST route is.
   // NOT_FOUND when the stream is unknown or carries no KLV. Guarded like ListLive.
   rpc GetLiveKlv(LiveStreamName) returns (LiveKlvMessage);
+
+  // Switches detection on or off for one stream, and at what rate, through the owner. A worker
+  // claims a stream whose toggle is set and stands down when it clears; nothing pushes work to a
+  // worker. Returns the stream as it now stands. Guarded like RecordLive.
+  rpc SetLiveDetection(SetLiveDetectionRequest) returns (LiveStreamMessage);
+
+  // The newest MISB ST 0903 VMTI frame on a stream, decoded with the raw packet alongside, from
+  // the short ring the owner keeps beside the KLV ring. NOT_FOUND when the stream is unknown or
+  // no worker has posted a frame yet. Guarded like ListLive.
+  rpc GetLiveDetections(LiveStreamName) returns (LiveDetectionsMessage);
 }
 
 // Streams are addressed by name. The name is the identity: a feed that drops and reconnects under
@@ -150,8 +160,8 @@ message LiveStreamMessage {
   // look at on one that is listed as live while most of what was sent is missing.
   //
   // Fields are only ever added here, never renumbered or removed: an older client reads zero
-  // for what it does not know and a newer one reads zero from an older server. 19 to 25 are
-  // held for further KLV fields.
+  // for what it does not know and a newer one reads zero from an older server. 19 to 21 are
+  // detection, below; 22 to 25 stay held for further KLV fields.
   int32 packets_lost = 14;
   int32 packets_dropped = 15;
 
@@ -165,6 +175,61 @@ message LiveStreamMessage {
   // picture without a marking is the failure the marking exists to prevent. Absent and empty are
   // different answers, which is why this is optional rather than a plain string.
   optional string classification = 18;
+
+  // Detection, per stream and on demand. The toggle is set through the owner and read by
+  // workers; the rate is detections per second while enabled, zero meaning the worker's default;
+  // the worker is which one holds the stream, absent until one has claimed it. An older server
+  // sends none of these, so a client reads "off" and shows nothing.
+  bool detection_enabled = 19;
+  int32 detection_rate = 20;
+  optional string detection_worker = 21;
+}
+
+message SetLiveDetectionRequest {
+  string name = 1;
+  bool enabled = 2;
+
+  // Detections per second. Zero means the worker's default.
+  int32 rate = 3;
+}
+
+// ST 0903.4 Table 16, the VTracker LS Detection Status, numbered as the standard numbers it so
+// the value casts straight onto the wire. Zero is a real status rather than "unspecified": the
+// field carrying it is optional, so absence is expressed by absence.
+enum VmtiTrackStatus {
+  VMTI_TRACK_STATUS_INACTIVE = 0;
+  VMTI_TRACK_STATUS_ACTIVE = 1;
+  VMTI_TRACK_STATUS_DROPPED = 2;
+  VMTI_TRACK_STATUS_STOPPED = 3;
+}
+
+// One VMTI frame: the detections a worker found in one picture, with the facts a consumer needs
+// to place them. Frame dimensions are not decoration: a box is in pixels of the frame the detector
+// saw, and a client cannot put it on a picture rendered at any other size without them.
+message LiveDetectionsMessage {
+  // VMTI LS tag 2, the frame's ST 0603 time. Same clock as the platform metadata's ST 0601 tag 2.
+  google.protobuf.Timestamp timestamp = 1;
+  int32 frame_width = 2;
+  int32 frame_height = 3;
+  repeated VmtiTargetMessage targets = 4;
+
+  // The ST 0903 packet exactly as the worker posted it.
+  bytes raw = 5;
+}
+
+// One VTarget Pack. The box is in frame pixels as ST 0903 counts them: 1-based, (1, 1) the top
+// left pixel, both corners inclusive. Confidence is the standard's percentage, 0 to 100. The
+// track fields are present only when a tracker, not just a detector, produced the box.
+message VmtiTargetMessage {
+  int32 id = 1;
+  int32 left = 2;
+  int32 top = 3;
+  int32 right = 4;
+  int32 bottom = 5;
+  optional int32 confidence_percent = 6;
+  optional string ontology_class = 7;
+  optional string track_id = 8;
+  optional VmtiTrackStatus track_status = 9;
 }
 
 // How a KLV packet is tied to the pictures, per MISB ST 1402.2's two carriage modes.

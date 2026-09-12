@@ -268,6 +268,47 @@ public sealed class DocumentsApi : IDisposable
         }
     }
 
+    /// <summary>
+    /// Switches detection on or off for a stream. Null when the stream is gone.
+    ///
+    /// Unlike its siblings this lets <c>Unimplemented</c> through, and so does
+    /// <see cref="GetLiveDetectionsAsync"/>: the window needs to tell "this server has no
+    /// detection" from "no frame yet", because the first disables the button with a reason and
+    /// the second is just a second's wait.
+    /// </summary>
+    public async Task<LiveStreamMessage?> SetLiveDetectionAsync(
+        string name,
+        bool enabled,
+        int rate,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _client.SetLiveDetectionAsync(
+                new SetLiveDetectionRequest { Name = name, Enabled = enabled, Rate = rate },
+                cancellationToken: cancellationToken);
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The newest VMTI frame on a stream. Null before a worker has posted one.</summary>
+    public async Task<LiveDetectionsMessage?> GetLiveDetectionsAsync(string name, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _client.GetLiveDetectionsAsync(
+                new LiveStreamName { Name = name },
+                cancellationToken: cancellationToken);
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
     public async Task DeleteAsync(string id, CancellationToken cancellationToken)
         => await _client.DeleteAsync(new DocumentId { Id = id }, cancellationToken: cancellationToken);
 

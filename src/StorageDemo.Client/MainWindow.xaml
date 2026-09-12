@@ -139,6 +139,21 @@
                     ToolTip="Record this stream. It starts a few seconds before now and keeps running if this window closes.">Record</Button>
             <Button x:Name="SnapshotButton" Click="OnSnapshot" Padding="10,3"
                     ToolTip="Store a full-resolution picture of this stream as a document.">Snapshot</Button>
+            <!--
+                Detection is the server's state, like a recording: it survives this window closing.
+                The rate is detections per second; the tracker runs at frame rate between them.
+            -->
+            <Button x:Name="DetectButton" Click="OnDetect" Padding="10,3"
+                    ToolTipService.ShowOnDisabled="True"
+                    ToolTip="Ask a worker to run object detection on this stream.">Detect</Button>
+            <ComboBox x:Name="DetectRateBox"
+                      Width="52"
+                      SelectedIndex="1"
+                      ToolTip="Detections per second">
+                <ComboBoxItem>1/s</ComboBoxItem>
+                <ComboBoxItem>5/s</ComboBoxItem>
+                <ComboBoxItem>25/s</ComboBoxItem>
+            </ComboBox>
         </ToolBar>
 
         <StatusBar DockPanel.Dock="Bottom">
@@ -254,6 +269,7 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <TextBlock x:Name="PreviewTitle"
@@ -279,20 +295,30 @@
                             Surface window, and both of them go fullscreen together. Anything drawn
                             beside the host in this window would be left behind the moment it did.
                         -->
-                        <Border x:Name="MarkingBanner"
-                                Visibility="{Binding MarkingVisibility, FallbackValue=Collapsed}"
-                                Background="{Binding MarkingBrush}"
-                                VerticalAlignment="Top"
-                                HorizontalAlignment="Stretch"
-                                IsHitTestVisible="False"
-                                Padding="6,3">
-                            <TextBlock Text="{Binding Marking}"
-                                       Foreground="White"
-                                       FontSize="13"
-                                       FontWeight="Bold"
-                                       TextAlignment="Center"
-                                       TextTrimming="CharacterEllipsis" />
-                        </Border>
+                        <Grid IsHitTestVisible="False">
+                            <!--
+                                Detection boxes, in the same overlay for the same reason. Positioned
+                                from code, because the picture's rectangle inside the host is the
+                                renderer's to report, not the layout's.
+                            -->
+                            <Canvas x:Name="DetectionCanvas"
+                                    SizeChanged="OnDetectionCanvasSizeChanged"
+                                    ClipToBounds="True" />
+
+                            <Border x:Name="MarkingBanner"
+                                    Visibility="{Binding MarkingVisibility, FallbackValue=Collapsed}"
+                                    Background="{Binding MarkingBrush}"
+                                    VerticalAlignment="Top"
+                                    HorizontalAlignment="Stretch"
+                                    Padding="6,3">
+                                <TextBlock Text="{Binding Marking}"
+                                           Foreground="White"
+                                           FontSize="13"
+                                           FontWeight="Bold"
+                                           TextAlignment="Center"
+                                           TextTrimming="CharacterEllipsis" />
+                            </Border>
+                        </Grid>
                     </fl:FlyleafHost>
 
                     <TextBox x:Name="TextPreview"
@@ -444,6 +470,34 @@
                                    Visibility="Collapsed"
                                    Foreground="#999"
                                    FontSize="11" />
+                    </StackPanel>
+                </Border>
+
+                <!--
+                    The newest VMTI frame for the stream being watched, while detection is on for
+                    it. The age is the honest part: the boxes over the picture are as old as this
+                    says, not as new as the picture.
+                -->
+                <Border x:Name="DetectionPanel"
+                        Grid.Row="5"
+                        Visibility="Collapsed"
+                        BorderBrush="#DDD"
+                        BorderThickness="0,1,0,0"
+                        Margin="0,10,0,0"
+                        Padding="0,8,0,0">
+                    <StackPanel>
+                        <TextBlock Text="Detections (MISB ST 0903)"
+                                   FontWeight="SemiBold"
+                                   Margin="0,0,0,6" />
+                        <TextBlock x:Name="DetectionSummary"
+                                   Foreground="#999"
+                                   FontSize="11"
+                                   Margin="0,0,0,6" />
+                        <ScrollViewer MaxHeight="120" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl x:Name="DetectionList"
+                                          ItemsPanel="{StaticResource TileLayout}"
+                                          ItemTemplate="{StaticResource MetadataRowTemplate}" />
+                        </ScrollViewer>
                     </StackPanel>
                 </Border>
             </Grid>

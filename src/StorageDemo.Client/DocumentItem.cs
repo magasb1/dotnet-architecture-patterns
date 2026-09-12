@@ -87,7 +87,7 @@ public sealed class DocumentItem : INotifyPropertyChanged
 
     public string Details => IsLive
         ? $"{_live!.State}{(_live.Recording is null ? string.Empty : "  REC")}"
-            + $"{HealthWord}  {HumanSize(Size)}"
+            + $"{(_live.DetectionEnabled ? "  DET" : string.Empty)}{HealthWord}  {HumanSize(Size)}"
         : IsPending
             ? "Uploading..."
             : $"{Icon}  {HumanSize(Size)}";
@@ -228,6 +228,15 @@ public sealed class DocumentItem : INotifyPropertyChanged
                         "Recording",
                         $"since {recording.StartedAt.ToDateTimeOffset().LocalDateTime:HH:mm:ss}, "
                         + HumanSize(recording.Bytes)));
+                }
+
+                if (_live.DetectionEnabled)
+                {
+                    // Which worker holds it is the one thing an operator cannot see anywhere else.
+                    rows.Add(new MetadataRow(
+                        "Detection",
+                        $"{(_live.DetectionRate > 0 ? $"{_live.DetectionRate}/s" : "default rate")}, "
+                        + (_live.HasDetectionWorker ? $"worker {_live.DetectionWorker}" : "no worker yet")));
                 }
 
                 if (!_live.Startable)
