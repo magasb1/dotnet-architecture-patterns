@@ -54,6 +54,10 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
 - [x] Phase 11, first half: health on ListLive, the preview proxying to the owner, retention on
       GetProviders, and the token guard. Fields 14-15, 4-5 The client stays gRPC
       by decision; health, marking, a proxied preview and KLV must reach ListLive and friends
+- [x] MISB ST 0903 encoder: the VMTI wire format detections leave as, round-tripped through a
+      reader written from the standard. Nothing produces one yet
+- [ ] Decide whether VMTI rides standalone or embedded as ST 0601 tag 74. It changes the checksum
+      range and the available geo items, so it must be settled before a consumer exists
 - [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and
       returns detections and the preview. Detection runs on every stream, so decoding on demand
       answers nothing; KLV needs no decode at all and must not argue for any

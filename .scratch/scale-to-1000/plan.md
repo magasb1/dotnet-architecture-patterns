@@ -1090,6 +1090,33 @@ here. Pattern of life is a track question, and ST 0903 carries tracks as well as
 is the other half of why it fits. Fetch the standard before designing the wire format; do not work
 from a library's tag list.
 
+### The wire format is built; five things stand between it and a consumer
+
+`Misb0903.cs` encodes a VMTI local set: the timestamp, frame size, target count, source sensor, and
+a VTarget pack per detection with its centroid, bounding box, confidence and class. Round-tripped
+through a reader written from the standard rather than from the encoder.
+
+Nothing produces one yet, and the encoder's author listed what a consumer still needs. These are
+Phase 8's real work, not details:
+
+- **Carriage.** The packets must ride under a KLV stream in the transport alongside the ST 0601
+  metadata, on the same presentation clock, or nothing can align a detection to a frame.
+- **Standalone or embedded.** ST 0601 tag 74 can carry a VMTI set inside the platform metadata.
+  Embedding changes what the checksum covers and unlocks the geo-offset items. Decide before a
+  consumer exists, because it changes the bytes.
+- **An ontology.** The class name travels with a URI to an OWL ontology, and something has to
+  publish one at whatever URI the detector claims.
+- **Geo-space, or not.** Pixel boxes are what a detector knows. Map positions need the geo items,
+  which the worker can fill from the ST 0601 platform data it already receives.
+- **Tracks.** Pattern of life is a track question and a VTracker local set is where track history
+  lives. It is the first thing to add.
+
+One property of the format is worth knowing before building against it: a target's position is a
+single number, column plus row times frame width, one-based from the top left. Frame width is
+therefore load-bearing rather than informational, and a consumer cannot recover a position without
+it. It is this standard's equivalent of the wrong-scale problem that made the 0601 validation worth
+doing.
+
 ### Two things that decide whether the GPU is used well
 
 **Decode and inference share the GPU.** Frames go from NVDEC into device memory and into the model

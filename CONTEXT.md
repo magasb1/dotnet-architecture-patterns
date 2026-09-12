@@ -31,6 +31,11 @@ which is what keeps it close to free at a thousand streams. The recorder already
 because it subscribes to every index, so recordings were complete before this existed; the
 extractor is for live access.
 
+**Detection.** What a detector found in one frame: an identifier, a box in pixels, and what it
+thinks the thing is. Detections leave as a MISB ST 0903.4 VMTI local set, one VTarget pack each, on
+the same timestamp as the ST 0601 metadata for that frame, so a STANAG 4609 consumer reads them
+without being told anything. The encoder exists; nothing produces detections yet.
+
 **Frame subscriber.** Something receiving decoded pictures. Exactly one decoder is itself a packet
 subscriber and republishes frames, so a stream is decoded once however many things want pictures, and
 only at the rate frame subscribers ask for.
