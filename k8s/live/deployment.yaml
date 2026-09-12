@@ -140,13 +140,11 @@ spec:
                 fieldRef:
                   fieldPath: status.podIP
 
+            # Control calls and a relayed viewer's media both take this hop. Media still never
+            # reaches a player over the API port; between two pods it does, which is the whole
+            # point of the hop being HTTP.
             - name: Live__PeerBaseUrl
               value: http://$(POD_IP):8080
-
-            # Media never travels over the API port, on either hop. A viewer that lands on a
-            # replica which does not own its stream is relayed through this address.
-            - name: Live__PeerConsumptionBaseUrl
-              value: srt://$(POD_IP):9010
 
             # What a player is told to connect to: the consumption Service, as reachable from
             # wherever viewers are. Replace the host with its external address.

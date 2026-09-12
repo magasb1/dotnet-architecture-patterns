@@ -59,6 +59,16 @@ public static class DependencyInjection
         services.AddHostedService<LiveIngestService>();
         services.AddHostedService<LiveConsumptionService>();
 
+        // Reaches whichever replica owns a stream: a forwarded control call, and a relayed viewer's
+        // media. No request timeout, because a relayed viewer is held open for as long as it
+        // watches; the connect is bounded instead, because a registry entry can name a pod that is
+        // already gone and every viewer arriving meanwhile would wait out the operating system's
+        // own connect timeout.
+        services.AddHttpClient(LiveOptions.PeerClient)
+            .ConfigureHttpClient(client => client.Timeout = Timeout.InfiniteTimeSpan)
+            .ConfigurePrimaryHttpMessageHandler(
+                () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(1) });
+
         // Readiness for this service is "am I accepting media", not only "can I reach a database".
         // A replica that cannot serve an encoder belongs out of the Service until it can.
         services.AddHealthChecks().AddCheck<LiveIngestHealthCheck>("live", tags: ["ready"]);

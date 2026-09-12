@@ -3,7 +3,7 @@ namespace StorageDemo.Infrastructure.Streaming;
 /// <summary>
 /// One SRT socket, as an ordinary .NET stream.
 ///
-/// Same job <c>AvioStream</c> did: everything downstream of the hub keeps writing to a
+/// Everything downstream of the hub keeps writing to a
 /// <see cref="Stream"/> and never learns what is on the other end, so the recorder writes to a file
 /// and a viewer writes to a socket through the same muxer and the same code.
 ///

@@ -1,4 +1,4 @@
-using FFmpeg.AutoGen.Abstractions;
+using System.Globalization;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -19,21 +19,17 @@ namespace StorageDemo.Infrastructure.Streaming;
 /// and stay on the API.
 ///
 /// One cost comes with the symmetry and is worth stating plainly: a viewer reaching a replica that
-/// does not own the stream cannot be redirected, since SRT has no such thing, so that replica calls
-/// the owner and relays the bytes.
+/// does not own the stream cannot be redirected, since SRT has no such thing, so that replica
+/// fetches the bytes from the owner over HTTP and pumps them into the viewer's socket. SRT stops at
+/// the pod the player reached; the hop behind it is the peer proxy every other forwarded call uses.
 /// </summary>
 public sealed class LiveConsumptionService(
     LiveStreamCoordinator coordinator,
     LiveListeners listeners,
+    IHttpClientFactory clients,
     IOptions<LiveOptions> options,
     ILogger<LiveConsumptionService> logger) : BackgroundService
 {
-    /// <summary>
-    /// How long to wait for the replica that owns a stream to answer. A peer inside a cluster
-    /// answers at once or is gone, and waiting longer only makes a viewer wait longer.
-    /// </summary>
-    private static readonly TimeSpan DialTimeout = TimeSpan.FromSeconds(1);
-
     private readonly LiveOptions _options = options.Value;
 
     private CancellationToken _stopping;
@@ -110,7 +106,19 @@ public sealed class LiveConsumptionService(
         CancellationToken stopping)
     {
         var timeline = 0d;
-        var waitingSince = DateTimeOffset.UtcNow;
+        var connected = DateTimeOffset.UtcNow;
+        var waitingSince = connected;
+
+        // Wall clock stands in for the timeline across a relayed hop, because the owner's answer
+        // carries no exact figure back. Stream time cannot outrun wall time except by the pre-roll
+        // of the first attach, which the maximum keeps: a small forward jump at the seam is what a
+        // player tolerates, and backwards is what breaks it.
+        //
+        // ponytail: wall clock rather than the owner's own figure. If a player visibly objects to
+        // the jump, return it as an HTTP trailer - Kestrel only writes trailers on HTTP/2, so that
+        // means pointing this client at the peer with a cleartext prior-knowledge version policy.
+        // Not before a player complains.
+        double Carried() => Math.Max(timeline, (DateTimeOffset.UtcNow - connected).TotalSeconds);
 
         try
         {
@@ -152,7 +160,9 @@ public sealed class LiveConsumptionService(
                 }
                 else
                 {
-                    await RelayAsync(stream, from, viewer, stopping);
+                    await RelayAsync(stream, from, Carried(), viewer, stopping);
+
+                    timeline = Carried();
                 }
 
                 if (viewer.Faulted)
@@ -198,19 +208,35 @@ public sealed class LiveConsumptionService(
     }
 
     /// <summary>
-    /// Calls the owner's consumption port and pumps its bytes to this viewer.
+    /// Fetches the stream from the replica that owns it and pumps its bytes into this viewer.
     ///
     /// A media relay, which an HTTP consumption port would not have needed. It is the price of a
     /// player speaking one protocol to one address: SRT has no redirect, so the replica the load
     /// balancer picked either serves the viewer or fetches for it.
+    ///
+    /// The fetch is HTTP over the peer address, the same hop a forwarded snapshot takes. Dialling
+    /// the owner's SRT consumption port instead cost a second handshake, a second latency window
+    /// and a second libav probe on this side - about two seconds on a viewer's join, measured on
+    /// k3s against 1.8 seconds joining on the owner - and none of it was ever visible to the
+    /// player. Media still never reaches a viewer over the API port; it travels over it between
+    /// two pods, which is what the peer proxy was built for.
     /// </summary>
-    private async Task RelayAsync(LiveStream stream, double from, Stream viewer, CancellationToken stopping)
+    /// <param name="timeline">
+    /// Where this viewer's output timeline has already reached, so the owner's muxer carries on
+    /// from it rather than starting again at zero.
+    /// </param>
+    private async Task RelayAsync(
+        LiveStream stream,
+        double from,
+        double timeline,
+        Stream viewer,
+        CancellationToken stopping)
     {
-        if (stream.ConsumptionAddress is not { Length: > 0 } address)
+        if (stream.OwnerAddress is not { Length: > 0 } address)
         {
             logger.LogWarning(
-                "'{Name}' is owned by {Owner}, which recorded no consumption address, so a viewer "
-                + "here cannot be served. Set Live:PeerConsumptionBaseUrl on every replica.",
+                "'{Name}' is owned by {Owner}, which recorded no address, so a viewer here cannot "
+                + "be served. Set Live:PeerBaseUrl on every replica.",
                 stream.Name,
                 stream.Owner);
 
@@ -219,66 +245,60 @@ public sealed class LiveConsumptionService(
             return;
         }
 
-        var identifier = from > 0
-            ? $"#!::r={stream.Name},user_from={from.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)},m=request"
-            : $"#!::r={stream.Name},m=request";
+        // The name is the trailing catch-all of that route and may contain slashes, so it goes in
+        // unescaped exactly as every other forwarded call writes it.
+        var url = $"{address.TrimEnd('/')}/api/live/peer/view/{stream.Name}"
+            + $"?from={Figure(from)}&continue={Figure(timeline)}";
 
-        // Bounded, because the address may belong to a replica that has already gone. A pod that
-        // is force-killed leaves its registry entry behind until its heartbeat goes stale, so
-        // every viewer arriving here in the meantime dials an address nobody is answering. libav's
-        // own connect timeout is several seconds; inside a cluster a peer answers in milliseconds
-        // or not at all, and the difference is the whole of what a viewer waits for.
-        var url = $"{address.TrimEnd('/')}?mode=caller&connect_timeout={(int)DialTimeout.TotalMilliseconds}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
 
-        logger.LogInformation("Relaying '{Name}' from its owner {Owner}", stream.Name, stream.Owner);
-
-        // The identifier goes as an option rather than in the URL. It begins with '#', which starts
-        // a fragment in a URL, so in one it has to be written %23 - and FFmpeg versions disagree
-        // about whether they decode that before or after splitting the query. One of them puts the
-        // '#' back and truncates everything after it, which arrives as an empty identifier and is
-        // refused. An option is read by nothing that parses URLs.
-        using var upstream = Open(url, identifier);
-
-        if (upstream is null)
+        if (_options.Token is { Length: > 0 } token)
         {
-            // Straight round the loop: the registry is re-read every pass, so the moment the
-            // encoder reconnects somewhere this viewer follows it.
-            await Task.Delay(TimeSpan.FromMilliseconds(250), stopping);
-            return;
+            request.Headers.Add("X-Storage-Token", token);
         }
-
-        await upstream.CopyToAsync(viewer, stopping);
-    }
-
-    private AvioStream? Open(string url, string streamId)
-    {
-        var opened = OpenTransport(url, streamId);
-
-        if (opened == IntPtr.Zero)
-        {
-            logger.LogWarning("Could not reach {Url} to relay a viewer", url);
-            return null;
-        }
-
-        return new AvioStream(opened, writable: false);
-    }
-
-    private static unsafe IntPtr OpenTransport(string url, string streamId)
-    {
-        AVIOContext* transport = null;
-        AVDictionary* options = null;
 
         try
         {
-            ffmpeg.av_dict_set(&options, "streamid", streamId, 0);
+            using var response = await clients.CreateClient(LiveOptions.PeerClient)
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, stopping);
 
-            return ffmpeg.avio_open2(&transport, url, ffmpeg.AVIO_FLAG_READ, null, &options) < 0
-                ? IntPtr.Zero
-                : (IntPtr)transport;
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogWarning(
+                    "{Url} answered {Status} for a relayed viewer", url, (int)response.StatusCode);
+            }
+            else
+            {
+                logger.LogInformation(
+                    "Relaying '{Name}' from its owner {Owner}, from {Given}s back (asked for {Asked})",
+                    stream.Name,
+                    stream.Owner,
+                    response.Headers.TryGetValues("X-Live-Preroll", out var given)
+                        ? given.FirstOrDefault()
+                        : "?",
+                    Figure(from));
+
+                await using var upstream = await response.Content.ReadAsStreamAsync(stopping);
+
+                await upstream.CopyToAsync(viewer, stopping);
+
+                return;
+            }
         }
-        finally
+        catch (Exception ex)
+            when (ex is HttpRequestException or TaskCanceledException && !stopping.IsCancellationRequested)
         {
-            ffmpeg.av_dict_free(&options);
+            // The address may belong to a replica that has already gone: a force-killed pod leaves
+            // its registry entry behind until its heartbeat goes stale. A connect that runs out of
+            // its second arrives as a cancellation rather than as a request failure.
+            logger.LogWarning(ex, "Could not reach {Url} to relay a viewer", url);
         }
+
+        // Straight round the loop: the registry is re-read every pass, so the moment the encoder
+        // reconnects somewhere this viewer follows it.
+        await Task.Delay(TimeSpan.FromMilliseconds(250), stopping);
     }
+
+    private static string Figure(double seconds)
+        => seconds.ToString("0.###", CultureInfo.InvariantCulture);
 }

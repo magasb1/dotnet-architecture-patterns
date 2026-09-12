@@ -44,10 +44,9 @@ public sealed record RecordingStatus(
 /// allowed only once the name is free - the feed interrupted, or the owner no longer heartbeating.
 /// The replica losing it reads this on its next heartbeat and stands down.
 /// </param>
-/// <param name="OwnerAddress">Where that replica's API can be reached, recorded when it claimed the name.</param>
-/// <param name="ConsumptionAddress">
-/// Where that replica's consumption port can be reached. Kept apart from the API address because
-/// media never travels over the API port, on either hop of a forwarded viewer.
+/// <param name="OwnerAddress">
+/// Where that replica can be reached, recorded when it claimed the name. Both a forwarded control
+/// call and a relayed viewer's media go over it, because inside the cluster the hop is HTTP.
 /// </param>
 /// <param name="Heartbeat">
 /// Last time the owner said it was still alive. A pod that dies holding a socket cannot report its
@@ -69,7 +68,6 @@ public sealed record LiveStream(
     DateTimeOffset Heartbeat,
     string Owner,
     string? OwnerAddress,
-    string? ConsumptionAddress,
     long Packets,
     long Bytes,
     bool HasPreview,

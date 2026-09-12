@@ -85,12 +85,16 @@ lets you push a stream and nothing else.
 **Consumption port.** Where viewers pull live streams, over SRT, symmetric with ingest: a player
 calls it and names the stream it wants in the streamid, exactly as an encoder names the stream it
 is sending. Live only, since finished recordings and snapshots are documents and stay on the API.
-Reaching it lets you watch and nothing else.
+Reaching it lets you watch and nothing else. SRT reaches the player and goes no further: the hop
+behind it, when this replica is not the owner, is HTTP.
 
 **Owner.** The replica holding a stream's connection. Only the owner has the bytes, so requests
-reaching another replica are forwarded to it, and a viewer that landed elsewhere is relayed from
-it. A viewer's own connection is held open across a change of owner, so what a moving stream costs
-somebody watching is the gap in the feed rather than a reconnect.
+reaching another replica are forwarded to it, and a viewer that landed elsewhere is served by
+fetching the stream from it over HTTP and writing it into the viewer's SRT socket. Media never
+reaches a player over the API port; between two pods it does, and that is one handshake and one
+latency window cheaper than a second SRT hop was. A viewer's own connection is held open across a
+change of owner, so what a moving stream costs somebody watching is the gap in the feed rather than
+a reconnect.
 
 **Claim.** How a replica becomes the owner of a name, taken on a distributed lock and renewed by the
 heartbeat. Names are one namespace shared by automatic and manual streams. A live name is locked:

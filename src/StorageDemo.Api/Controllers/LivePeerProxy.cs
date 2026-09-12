@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Mvc;
 using StorageDemo.Core.Streaming;
+using StorageDemo.Infrastructure.Streaming;
 
 namespace StorageDemo.Api.Controllers;
 
@@ -14,6 +15,10 @@ namespace StorageDemo.Api.Controllers;
 /// The address is the one the owner recorded when it claimed the name, not one derived from a
 /// predictable pod name. That is what allows a Deployment instead of a StatefulSet, and it deletes
 /// the headless Service and the per-pod ingest Services with it.
+///
+/// Media never travels over the API port to a viewer. It travels over it between two pods, which is
+/// what this was built for: a viewer that lands on the wrong replica is served from the owner
+/// through here, and only the last hop to the player is SRT.
 /// </summary>
 public sealed class LivePeerProxy(
     IHttpClientFactory clients,
@@ -32,7 +37,7 @@ public sealed class LivePeerProxy(
 
         try
         {
-            var response = await clients.CreateClient(nameof(LivePeerProxy)).GetAsync(
+            var response = await clients.CreateClient(LiveOptions.PeerClient).GetAsync(
                 address,
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken);
@@ -80,7 +85,7 @@ public sealed class LivePeerProxy(
 
         try
         {
-            using var response = await clients.CreateClient(nameof(LivePeerProxy))
+            using var response = await clients.CreateClient(LiveOptions.PeerClient)
                 .SendAsync(request, cancellationToken);
 
             var content = await response.Content.ReadAsStringAsync(cancellationToken);

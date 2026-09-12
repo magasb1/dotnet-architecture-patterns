@@ -5,7 +5,7 @@ namespace StorageDemo.Infrastructure.Streaming;
 /// <summary>
 /// An ordinary .NET stream, as a libav transport.
 ///
-/// The mirror of <c>AvioStream</c>, and the same trick <see cref="PacketMuxer"/> plays for writing:
+/// The same trick <see cref="PacketMuxer"/> plays for writing, mirrored:
 /// an <c>avio_alloc_context</c> whose callback crosses the boundary, so the demultiplexer keeps
 /// taking an <c>AVIOContext*</c> and never learns that the accept was done by libsrt rather than by
 /// libav.

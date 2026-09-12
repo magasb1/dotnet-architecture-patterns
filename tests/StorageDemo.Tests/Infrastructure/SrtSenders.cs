@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 using StorageDemo.Infrastructure.Media;
 
 namespace StorageDemo.Tests.Infrastructure;
@@ -56,6 +58,27 @@ internal static class SrtSenders
             "-i", Target(port, streamId, callerOptions),
             "-f", "null", "-",
         ]);
+
+    /// <summary>
+    /// A player that decodes what it is given and reports how far it has got.
+    ///
+    /// The progress goes through <c>-progress</c> rather than ffmpeg's own statistics line, which is
+    /// tied to the log level and would have to be turned back on. This is the difference between
+    /// proving a connection was made and proving media came down it.
+    /// </summary>
+    public static Process StartViewer(int port, string streamId)
+        => Start([
+            "-hide_banner", "-loglevel", "error", "-progress", "pipe:2",
+            "-i", Target(port, streamId, null),
+            "-f", "null", "-",
+        ]);
+
+    /// <summary>Frames a <see cref="StartViewer"/> player has decoded so far.</summary>
+    public static int Decoded(Process player)
+        => Regex.Matches(Said(player), "^frame=([0-9]+)", RegexOptions.Multiline)
+            .Select(match => int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture))
+            .DefaultIfEmpty(0)
+            .Max();
 
     /// <summary>
     /// Whether this caller was turned away rather than served: it gave up quickly and said so.

@@ -57,7 +57,6 @@ public sealed class LiveStreamStalenessTests
             heartbeat,
             "pod-a",
             null,
-            null,
             0,
             0,
             false,

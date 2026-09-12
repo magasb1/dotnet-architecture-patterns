@@ -82,9 +82,15 @@ public interface ILiveStreamService
     /// knows the stream is interrupted from its state, and closing would push every viewer into
     /// reconnecting at the exact moment a reconnect storm is under way on the ingest side.
     /// </summary>
-    Task WriteToViewerAsync(
+    /// <param name="continueFromSeconds">
+    /// Where this viewer's timeline has already reached, when it is being handed on from another
+    /// replica mid-connection. Zero for a viewer that has just arrived.
+    /// </param>
+    /// <returns>How far the timeline reached, so whatever serves this viewer next can carry on.</returns>
+    Task<double> WriteToViewerAsync(
         ViewerRequest request,
         Stream destination,
+        double continueFromSeconds = 0,
         CancellationToken cancellationToken = default);
 
     /// <summary>

@@ -7,6 +7,13 @@ public sealed class LiveOptions
     public const string SectionName = "Live";
 
     /// <summary>
+    /// The named <see cref="HttpClient"/> one replica reaches another on, for a control call and
+    /// for a relayed viewer's media alike. Named here rather than in the API project because both
+    /// ends of that hop resolve it and only one of them is an API.
+    /// </summary>
+    public const string PeerClient = "LivePeer";
+
+    /// <summary>
     /// Off by default. Switching this on opens a port that anybody who can reach it may push a
     /// stream into, so it should be a decision rather than an inheritance.
     /// </summary>
@@ -93,17 +100,11 @@ public sealed class LiveOptions
     public string? NodeName { get; init; }
 
     /// <summary>
-    /// The address other replicas reach this one on, recorded with the name claim. A replica
-    /// holding no stream of its own forwards a viewer here, because only the owner has the bytes.
+    /// The address other replicas reach this one on, recorded with the name claim, for example
+    /// "http://10.42.0.9:8080". A replica holding no stream of its own forwards a control call here
+    /// and pulls a relayed viewer's media through here, because only the owner has the bytes.
     /// </summary>
     public string? PeerBaseUrl { get; init; }
-
-    /// <summary>
-    /// The SRT address other replicas reach this one's consumption port on, for example
-    /// "srt://storage-demo-abc123:9010". A viewer that lands on a replica which does not own the
-    /// stream is relayed through this, because SRT has no redirect.
-    /// </summary>
-    public string? PeerConsumptionBaseUrl { get; init; }
 
     /// <summary>
     /// The SRT address to hand to a player, when this instance knows its own, for example

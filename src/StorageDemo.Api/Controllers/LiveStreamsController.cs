@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using StorageDemo.Core.Streaming;
@@ -22,12 +24,14 @@ public sealed record LiveStatusResponse(
 
 /// <summary>
 /// Control plane for live streaming. REST rather than gRPC on purpose: these are a handful of
-/// administrative calls, and no media travels over either of them.
+/// administrative calls.
 ///
 /// Every call names a stream. Any replica answers the ones the registry can satisfy; the ones that
 /// need the stream's actual bytes are forwarded to the replica that holds them, so a caller never
-/// has to know which pod took the connection. Playback is not here at all - it is on the
-/// consumption port, which is what keeps the firewall statement one sentence per port.
+/// has to know which pod took the connection. Playback is not here - it is on the consumption port,
+/// which is what keeps the firewall statement one sentence per port. The one route that does carry
+/// media, <see cref="PeerView"/>, is how one pod fetches a stream from another and never answers a
+/// player.
 ///
 /// The verb comes before the name in every route, which reads oddly and is deliberate. A stream
 /// name is a resource path and may contain slashes, so it has to be the trailing catch-all; put it
@@ -243,6 +247,66 @@ public sealed class LiveStreamsController(
             async () => await live.StopAsync(name, cancellationToken) ? Accepted() : NotFound(),
             cancellationToken,
             method: HttpMethod.Delete);
+    }
+
+    /// <summary>
+    /// The stream's bytes, for another replica rather than for a player.
+    ///
+    /// A viewer's SRT connection lands on whichever pod the load balancer picked; when that is not
+    /// the owner, that pod calls this and pumps the answer into the viewer's socket. HTTP rather
+    /// than a second SRT hop, which cost a handshake, a second latency window and a second libav
+    /// probe for something the player cannot see: it speaks SRT to one address either way.
+    ///
+    /// Guarded like every other call here, and not a playback route. A player is on the consumption
+    /// port, which is the whole reason the ports are split.
+    /// </summary>
+    /// <param name="from">How far back to start, in seconds. Zero is the live edge.</param>
+    /// <param name="continue">
+    /// Where the viewer's timeline has already reached, so a stream that moves between replicas
+    /// mid-connection does not ask the player to accept timestamps jumping back to zero.
+    /// </param>
+    [HttpGet("peer/view/{*name}")]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> PeerView(
+        string name,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken,
+        double from = 0,
+        double @continue = 0)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        if (!live.Owns(name))
+        {
+            return NotFound();
+        }
+
+        Response.ContentType = "video/mp2t";
+
+        // Asking for twenty seconds and receiving twenty-six is normal, since a stream can only be
+        // joined where a decoder can start. The SRT path has to log this because that transport has
+        // no way to say it back; here there is one, and the relaying replica logs what it was told.
+        Response.Headers["X-Live-Preroll"] = live
+            .ResolvePreroll(name, from)
+            .ToString("0.###", CultureInfo.InvariantCulture);
+
+        // A live stream that only flushes at the end is not a live stream.
+        HttpContext.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+
+        // libav writes through a synchronous callback and has no asynchronous form of it, so this
+        // one response opts back in to what the server forbids by default.
+        HttpContext.Features.Get<IHttpBodyControlFeature>()!.AllowSynchronousIO = true;
+
+        await live.WriteToViewerAsync(
+            new ViewerRequest(name, from),
+            Response.Body,
+            @continue,
+            cancellationToken);
+
+        return new EmptyResult();
     }
 
     /// <summary>

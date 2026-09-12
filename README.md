@@ -496,7 +496,11 @@ for telling one attempt from the next, but nothing looks a stream up by it.
 | Which streams exist, their state and stats | Shared registry, in-memory or Redis | Any replica may be asked |
 | Who owns a name | The owner field of the registry entry | It is the claim |
 | Preview, snapshot, record | Forwarded to the owner over HTTP | The bytes exist in one place |
-| A viewer on the wrong replica | Relayed from the owner over SRT | SRT has no redirect |
+| A viewer on the wrong replica | Fetched from the owner over HTTP and written into the viewer's SRT socket | SRT has no redirect, and a second SRT hop cost a handshake and a latency window for something the player cannot see |
+
+Media still never reaches a player over the API port. It travels over it between two pods, which is
+what the peer address exists for: `GET /api/live/peer/view/{name}?from=&continue=`, token-guarded,
+`video/mp2t`, chunked, and never answered to anything but another replica.
 
 **A live name is locked.** While `demo` is live and its owner is heartbeating, a second publisher of
 `demo` is refused during the SRT handshake with `SRT_REJX_CONFLICT`, before a connection exists and

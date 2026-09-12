@@ -503,21 +503,10 @@ public sealed class LiveStreamCoordinator(
     public double ResolvePreroll(string name, double seconds)
         => _local.TryGetValue(name, out var entry) ? entry.Hub.ResolvePreroll(seconds) : 0;
 
-    public Task WriteToViewerAsync(
-        ViewerRequest request,
-        Stream destination,
-        CancellationToken cancellationToken = default)
-        => WriteToViewerAsync(request, destination, continueFromSeconds: 0, cancellationToken);
-
-    /// <param name="continueFromSeconds">
-    /// Where this viewer's timeline has already reached, when it is being handed on from another
-    /// replica mid-connection. Zero for a viewer that has just arrived.
-    /// </param>
-    /// <returns>How far the timeline reached, so whatever serves this viewer next can carry on.</returns>
     public Task<double> WriteToViewerAsync(
         ViewerRequest request,
         Stream destination,
-        double continueFromSeconds,
+        double continueFromSeconds = 0,
         CancellationToken cancellationToken = default)
         => _local.TryGetValue(request.Name, out var entry)
             ? Serve(entry, request, destination, continueFromSeconds, cancellationToken)
@@ -710,7 +699,6 @@ public sealed class LiveStreamCoordinator(
             DateTimeOffset.UtcNow,
             Owner,
             _options.PeerBaseUrl,
-            _options.PeerConsumptionBaseUrl,
             entry.Hub.Packets,
             entry.Hub.Bytes,
             entry.Harvester.Preview is not null,

@@ -200,8 +200,6 @@ spec:
               value: $(POD_NAME)
             - name: Live__PeerBaseUrl
               value: http://$(POD_IP):8080
-            - name: Live__PeerConsumptionBaseUrl
-              value: srt://$(POD_IP):9010
           lifecycle:
             preStop:
               sleep:

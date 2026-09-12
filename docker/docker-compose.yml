@@ -113,11 +113,10 @@ services:
       # it before the first frame. The published REST port, reachable from the host.
       Documents__PublicBaseUrl: http://127.0.0.1:8081
 
-      # How a sibling replica reaches this one. The container's own hostname, which Compose sets to
-      # the container name and also resolves on the shared network, so no identity has to be
-      # injected. Media never travels over the API port, hence the second address.
+      # How a sibling replica reaches this one, for a forwarded control call and for a relayed
+      # viewer's media alike. The container's own hostname, which Compose sets to the container name
+      # and also resolves on the shared network, so no identity has to be injected.
       Live__PeerBaseUrl: http://api:8080
-      Live__PeerConsumptionBaseUrl: srt://api:9010
 
       Database__Provider: Postgres
       Database__Postgres__ConnectionString: Host=postgres;Database=storagedemo;Username=storagedemo;Password=storagedemo
