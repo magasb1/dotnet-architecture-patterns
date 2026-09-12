@@ -126,6 +126,20 @@ route, demultiplexes, decodes, detects at the configured rate, and emits ST 0903
   worker muxes its own transport stream or hands packets back for the owner to carry, and write the
   decision down before building either.
 
+**Carriage, decided.** The worker posts each VMTI frame back to the stream's owner over the peer
+route it already subscribes through, and the owner keeps a short ring of them beside the KLV ring
+and serves them on both surfaces. That is the smallest thing that gets a detection to a client
+with its timestamp intact, and it reuses the one hop that already exists. Muxing the VMTI packets
+into the SRT output as a KLV stream, so a conforming external consumer sees them beside the video
+with no API call, is the upgrade and is recorded as such: it is the same bytes, on the same clock,
+one muxer away.
+
+**Decode only at the detection rate.** The tracker predicts between detections without a frame, so
+the worker never decodes a frame it will not detect on. At five detections a second on a
+twenty-five frame stream that is one decode in five, and it is the largest single saving in the
+phase. Detect on keyframes when the rate allows it, since a keyframe decodes standalone and a
+predicted frame needs everything since the last one.
+
 **Done when** a stream with detection switched on produces VMTI packets whose timestamps align with
 the video, and a capture triggered by one carries its reference.
 
