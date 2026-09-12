@@ -23,8 +23,10 @@
 # Two things are easily conflated here and only one is needed. Per-flow stickiness is required,
 # because an SRT connection is a UDP flow whose packets must all reach the same pod; that is
 # ordinary connection tracking and every load balancer in play does it without being configured to.
-# Stickiness across reconnects is not required, because the newest connection wins the name and the
-# previous owner stands down. No affinity configuration, no session tables, nothing to get wrong.
+# Stickiness across reconnects is not required either, though the reason changed: a live name is
+# now locked to its owner rather than going to the newest connection, and a returning encoder may
+# still land anywhere because the name it is returning to is interrupted, and an interrupted name
+# is free for any replica to claim. No affinity configuration, no session tables.
 apiVersion: v1
 kind: Service
 metadata:
@@ -159,10 +161,14 @@ spec:
               sleep:
                 seconds: 5
           startupProbe:
-            # The boot-time self-test opens a loopback listener and calls it, so a pod is a few
-            # seconds old before it can serve anything. Kept apart from readiness so a slow start
-            # is not mistaken for a failure, and so liveness does not begin counting until the
-            # process is actually up.
+            # A pod is a few seconds old before it can serve anything: the native libraries load
+            # and the media ports bind first. Kept apart from readiness so a slow start is not
+            # mistaken for a failure, and so liveness does not begin counting until the process is
+            # actually up.
+            #
+            # This used to describe a boot-time self-test that opened a loopback listener to prove
+            # a stream identifier could be read out of a log line. Owning the listener deleted both
+            # the log scrape and the self-test; the identifier is a socket option now.
             #
             # Liveness, not readiness: readiness asks storage and the database whether they are
             # reachable, and a pod that never finishes starting because S3 is slow is killed and
