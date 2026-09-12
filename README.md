@@ -97,8 +97,26 @@ hides nothing it would have to fetch again and keeps every thumbnail it already 
 
 The **Server** box in the toolbar switches between endpoints without restarting, so one client
 drives the Windows, Linux, Compose and Kubernetes instances in turn. It ships with the three
-addresses above and remembers any address you type. The list lives in
-`%APPDATA%\StorageDemoClient\servers.json`.
+addresses above and remembers any address you type. The **Token** box beside it holds that
+server's `Live__Token`, remembered per address; leave it empty for a server that configures none.
+Both live in `%APPDATA%\StorageDemoClient\servers.json`.
+
+A live tile carries two things the document tiles do not. Across the foot of the preview is the
+stream's **classification**, from the security metadata in its KLV; a stream carrying none reads
+`UNMARKED` rather than nothing, because in this domain an unmarked picture is a state and not a
+gap. The marking follows the video into fullscreen, since it is drawn in the player's own overlay
+rather than in the window around it. Under that is a **health bar**, green while the feed is quiet
+and amber or red when the last heartbeat lost or dropped packets, with the figures in its tooltip
+and the word in the tile's details, so colour is never the only signal.
+
+Selecting a stream that carries KLV fills a **Sensor** panel under the player with the MISB minimum
+metadata set: platform position and attitude, sensor pointing, slant range and frame centre. It is
+polled once a second while that stream is playing and not at all otherwise.
+
+The client is deliberately a demonstration of the service rather than a monitoring product. It
+plays one stream at a time and lists what it is given; a wall of simultaneous players and a grid
+that stays fluid at a thousand streams are described in `.scratch/scale-to-1000/client-plan.md` and
+are not built.
 
 ## Layout
 

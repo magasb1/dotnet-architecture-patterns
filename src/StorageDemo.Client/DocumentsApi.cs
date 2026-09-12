@@ -2,6 +2,7 @@ using System.IO;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
+using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
 using StorageDemo.Core.Documents;
 using StorageDemo.Grpc;
@@ -16,14 +17,31 @@ public sealed class DocumentsApi : IDisposable
 {
     private const int ChunkSize = 64 * 1024;
 
+    /// <summary>
+    /// What the server's live interceptor reads, spelled the same as the REST header. Named here
+    /// rather than shared, because the client compiles the contract and not the service.
+    /// </summary>
+    private const string TokenHeader = "x-storage-token";
+
     private readonly GrpcChannel _channel;
     private readonly StorageDemo.Grpc.Documents.DocumentsClient _client;
 
-    public DocumentsApi(string address)
+    public DocumentsApi(string address, string token = "")
     {
         Address = address;
         _channel = GrpcChannel.ForAddress(address);
-        _client = new StorageDemo.Grpc.Documents.DocumentsClient(_channel);
+
+        // On every call rather than on the guarded ones: the server ignores it elsewhere, and one
+        // invoker cannot forget a call site the way a per-call header argument can. With no token
+        // the channel is used raw, so a server that guards nothing sees exactly what it saw before.
+        _client = new StorageDemo.Grpc.Documents.DocumentsClient(
+            token.Length == 0
+                ? _channel.CreateCallInvoker()
+                : _channel.Intercept(metadata =>
+                {
+                    metadata.Add(TokenHeader, token);
+                    return metadata;
+                }));
     }
 
     public string Address { get; }
@@ -229,6 +247,24 @@ public sealed class DocumentsApi : IDisposable
         }
         catch (RpcException ex) when (ex.StatusCode is StatusCode.NotFound or StatusCode.Unimplemented)
         {
+        }
+    }
+
+    /// <summary>
+    /// The newest KLV packet on a stream. Null when the stream carries none yet, and on a server
+    /// that predates the call, so the panel simply says nothing rather than the window failing.
+    /// </summary>
+    public async Task<LiveKlvMessage?> GetLiveKlvAsync(string name, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _client.GetLiveKlvAsync(
+                new LiveStreamName { Name = name },
+                cancellationToken: cancellationToken);
+        }
+        catch (RpcException ex) when (ex.StatusCode is StatusCode.NotFound or StatusCode.Unimplemented)
+        {
+            return null;
         }
     }
 

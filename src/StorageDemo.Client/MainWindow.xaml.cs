@@ -14,6 +14,11 @@ using Microsoft.Win32;
 using StorageDemo.Core.Documents;
 using StorageDemo.Grpc;
 
+// Aliased because the generated namespace is StorageDemo.Grpc, which hides the transport's own
+// Grpc.Core from anything written below, and because FlyleafLib already owns the name Status here.
+using RpcException = Grpc.Core.RpcException;
+using RpcStatusCode = Grpc.Core.StatusCode;
+
 namespace StorageDemo.Client;
 
 public partial class MainWindow : Window
@@ -37,6 +42,12 @@ public partial class MainWindow : Window
     /// running, and a stream that ends has nothing to announce on the document change feed.
     /// </summary>
     private readonly DispatcherTimer _liveTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+
+    /// <summary>
+    /// The sensor set for the one stream being watched. It runs only while a stream with KLV is
+    /// playing: it is a per-watched-stream fetch and nothing about it belongs on a grid of tiles.
+    /// </summary>
+    private readonly DispatcherTimer _klvTimer = new() { Interval = TimeSpan.FromSeconds(1) };
 
     private readonly ICollectionView _view;
 
@@ -80,9 +91,11 @@ public partial class MainWindow : Window
         _view.Filter = MatchesFilters;
         ServerBox.ItemsSource = _servers.Entries;
         ServerBox.Text = initialAddress;
+        TokenBox.Text = _servers.TokenFor(initialAddress);
 
         _positionTimer.Tick += OnPositionTick;
         _liveTimer.Tick += async (_, _) => await RefreshLiveAsync();
+        _klvTimer.Tick += async (_, _) => await RefreshKlvAsync();
 
         PreviewKeyDown += OnShortcut;
 
@@ -97,6 +110,7 @@ public partial class MainWindow : Window
             _connection.Cancel();
             _positionTimer.Stop();
             _liveTimer.Stop();
+            _klvTimer.Stop();
             _player?.Dispose();
             _api?.Dispose();
         };
@@ -117,6 +131,9 @@ public partial class MainWindow : Window
             address = selected.Address;
         }
 
+        // What is in the box wins over what was saved, so a token can be corrected by typing it.
+        var token = TokenBox.Text.Trim();
+
         if (string.IsNullOrWhiteSpace(address))
         {
             return;
@@ -127,6 +144,7 @@ public partial class MainWindow : Window
         _connection = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
 
         _liveTimer.Stop();
+        StopKlv();
         _api?.Dispose();
         _documents.Clear();
         _streams.Clear();
@@ -136,7 +154,7 @@ public partial class MainWindow : Window
 
         try
         {
-            _api = new DocumentsApi(address);
+            _api = new DocumentsApi(address, token);
         }
         catch (Exception ex)
         {
@@ -151,7 +169,7 @@ public partial class MainWindow : Window
             var providers = await _api.GetProvidersAsync(_connection.Token);
             _contentBaseUrl = providers.ContentBaseUrl;
             ProviderText.Text = $"{address}   storage: {providers.Storage}   database: {providers.Database}";
-            _servers.Remember(address);
+            _servers.Remember(address, token);
         }
         catch (Exception ex)
         {
@@ -268,6 +286,15 @@ public partial class MainWindow : Window
     }
 
     private async void OnConnect(object sender, RoutedEventArgs e) => await ConnectAsync(ServerBox.Text);
+
+    /// <summary>Picking a saved server brings its token with it, so it is typed once.</summary>
+    private void OnServerSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (_ready && ServerBox.SelectedItem is ServerEntry entry)
+        {
+            TokenBox.Text = entry.Token;
+        }
+    }
 
     private async void OnServerKeyDown(object sender, KeyEventArgs e)
     {
@@ -387,6 +414,13 @@ public partial class MainWindow : Window
         {
             live = await _api.ListLiveAsync(_connection.Token);
         }
+        catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unauthenticated)
+        {
+            // The one failure worth naming: everything live is guarded by the same token, so an
+            // empty Streams tab would otherwise look like a server with nothing on air.
+            SetStatus($"{_api.Address} refused the token. Put the server's Live__Token in the Token box and connect again.");
+            return;
+        }
         catch (Exception)
         {
             // A poll that fails changes nothing on screen; the next one will tell the truth.
@@ -451,6 +485,12 @@ public partial class MainWindow : Window
             {
                 ShowMetadata(existing);
                 UpdateLiveButtons();
+
+                // KLV can start arriving after the stream has, so the panel appears when it does.
+                if (PlayerHost.Visibility == Visibility.Visible)
+                {
+                    SyncKlv(existing);
+                }
             }
         }
 
@@ -658,6 +698,10 @@ public partial class MainWindow : Window
             // Played straight from the SRT address: no download, and the player joins at the live
             // edge because that is where the server starts it.
             StartPlayback(url, live: true, Identifier(item));
+
+            // The banner rides the item, so a marking that changes mid-stream follows it.
+            MarkingBanner.DataContext = item;
+            SyncKlv(item);
             return;
         }
 
@@ -699,6 +743,69 @@ public partial class MainWindow : Window
             && _contentBaseUrl is { Length: > 0 }
                 ? $"{_contentBaseUrl.TrimEnd('/')}/api/documents/{item.Id}/content"
                 : null;
+
+    /// <summary>
+    /// Turns the sensor panel on for a stream that carries KLV and off for one that does not,
+    /// which is also what a server too old to answer <c>GetLiveKlv</c> reports.
+    /// </summary>
+    private void SyncKlv(DocumentItem item)
+    {
+        if (item.Live?.HasKlv != true)
+        {
+            StopKlv();
+            return;
+        }
+
+        if (_klvTimer.IsEnabled)
+        {
+            return;
+        }
+
+        KlvPanel.Visibility = Visibility.Visible;
+        _klvTimer.Start();
+        _ = RefreshKlvAsync();
+    }
+
+    private void StopKlv()
+    {
+        _klvTimer.Stop();
+        KlvPanel.Visibility = Visibility.Collapsed;
+        KlvList.ItemsSource = null;
+        KlvHint.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>The newest packet's fields, once a second, for the stream on screen and no other.</summary>
+    private async Task RefreshKlvAsync()
+    {
+        if (_api is null || Selected is not { IsLive: true } item || item.Live?.HasKlv != true)
+        {
+            StopKlv();
+            return;
+        }
+
+        LiveKlvMessage? klv;
+
+        try
+        {
+            klv = await _api.GetLiveKlvAsync(item.Id, _connection.Token);
+        }
+        catch (Exception)
+        {
+            // One poll that failed says nothing about the stream; the next second tells the truth.
+            return;
+        }
+
+        // The selection can move while a call is in flight, and the rows belong to the stream
+        // they were asked for.
+        if (!ReferenceEquals(Selected, item))
+        {
+            return;
+        }
+
+        KlvList.ItemsSource = klv is null ? null : DocumentItem.KlvRows(klv);
+        KlvHint.Text = "No KLV packet has arrived yet.";
+        KlvHint.Visibility = klv is null ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     private void ShowMetadata(DocumentItem item)
     {
@@ -804,6 +911,8 @@ public partial class MainWindow : Window
 
             PlayerHost.Visibility = Visibility.Collapsed;
             PlayerControls.Visibility = Visibility.Collapsed;
+            MarkingBanner.DataContext = null;
+            StopKlv();
 
             ShowFallback($"Could not play {e.Url}: {reason}");
             SetStatus($"Playback failed: {reason}");
@@ -813,12 +922,16 @@ public partial class MainWindow : Window
     private void StopPlayback()
     {
         _positionTimer.Stop();
+        StopKlv();
 
         // Releases the cached file, which a delete would otherwise fail to remove.
         _player?.Stop();
 
         PlayerHost.Visibility = Visibility.Collapsed;
         PlayerControls.Visibility = Visibility.Collapsed;
+
+        // Nothing is on screen to be marked, and a marking left over one is worse than none.
+        MarkingBanner.DataContext = null;
     }
 
     private void OnPositionTick(object? sender, EventArgs e)

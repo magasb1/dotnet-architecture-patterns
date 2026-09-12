@@ -5,6 +5,16 @@ namespace StorageDemo.Client;
 
 public sealed record ServerEntry(string Name, string Address)
 {
+    /// <summary>
+    /// The live token this server wants, carried as x-storage-token on the guarded live calls.
+    /// Empty for a server with none configured, which is most of them: it guards nothing then.
+    ///
+    /// A property rather than a constructor parameter so a servers.json written before tokens
+    /// existed still loads, with an empty token rather than a null one.
+    /// </summary>
+    public string Token { get; init; } = string.Empty;
+
+    // The token is deliberately not shown: this label is what the server box lists.
     public override string ToString() => $"{Name}  —  {Address}";
 }
 
@@ -59,17 +69,33 @@ public sealed class ServerList
         return list;
     }
 
-    /// <summary>Remembers an address the user typed, so it is one click away next time.</summary>
-    public void Remember(string address)
+    /// <summary>
+    /// Remembers an address the user typed, so it is one click away next time, and the token that
+    /// worked with it, so it does not have to be typed again either.
+    /// </summary>
+    public void Remember(string address, string token)
     {
-        if (Entries.Any(e => string.Equals(e.Address, address, StringComparison.OrdinalIgnoreCase)))
+        var index = Entries.FindIndex(e => string.Equals(e.Address, address, StringComparison.OrdinalIgnoreCase));
+
+        if (index < 0)
+        {
+            Entries.Add(new ServerEntry(address, address) { Token = token });
+        }
+        else if (Entries[index].Token != token)
+        {
+            Entries[index] = Entries[index] with { Token = token };
+        }
+        else
         {
             return;
         }
 
-        Entries.Add(new ServerEntry(address, address));
         Save();
     }
+
+    public string TokenFor(string address)
+        => Entries.FirstOrDefault(e => string.Equals(e.Address, address, StringComparison.OrdinalIgnoreCase))
+            ?.Token ?? string.Empty;
 
     public void Save()
     {

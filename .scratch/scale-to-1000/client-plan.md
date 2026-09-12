@@ -1,3 +1,20 @@
+> **Scope cut by the owner, 2026-09-12.** "It must support live video, and file browsing/viewing.
+> Do not make it too advanced, this is just a demo client for the backend, and it is the backend
+> that is important here."
+>
+> So C2 (the wall of simultaneous players), C3 (virtualisation for a thousand tiles) and the map in
+> C4 are **out**. The client demonstrates the backend; it is not the monitoring product. What stays
+> is the smallest set that keeps it working and shows what the backend now does:
+>
+> 1. **The token on every gRPC call.** Not a feature: the new interceptor guards `ListLive`, so
+>    without this the client's stream list fails against any configured server. It is broken today.
+> 2. **The classification marking**, wherever imagery is shown. A domain requirement, not polish.
+> 3. **Health at a glance** on the existing tiles, from the figures already on the listing.
+> 4. **KLV as text** for the stream being watched.
+>
+> Detection waits for the worker tier to exist. Everything below is kept as the record of what a
+> real monitoring client would need, and is explicitly not the plan for this one.
+
 # Plan: the desktop client at a thousand streams
 
 ## Destination

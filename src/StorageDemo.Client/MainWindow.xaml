@@ -11,6 +11,18 @@
             <WrapPanel Orientation="Horizontal" />
         </ItemsPanelTemplate>
 
+        <!-- One key and its value. Shared by the metadata panel and the KLV panel below it. -->
+        <DataTemplate x:Key="MetadataRowTemplate">
+            <StackPanel Width="290" Margin="0,0,16,5">
+                <TextBlock Text="{Binding Key}"
+                           FontSize="10"
+                           Foreground="#888" />
+                <TextBlock Text="{Binding Value}"
+                           TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding Value}" />
+            </StackPanel>
+        </DataTemplate>
+
         <DataTemplate x:Key="TileTemplate">
             <StackPanel Width="112" Margin="6" Opacity="{Binding Dimming}">
                 <Border Height="86"
@@ -56,6 +68,28 @@
                                        VerticalAlignment="Center"
                                        Margin="3,0,0,0" />
                         </Border>
+
+                        <!--
+                            The marking and the transport's health, at the foot of the picture.
+                            A stream with no security set reads UNMARKED rather than nothing, and
+                            the bar is colour and position only: its figures are in its tooltip.
+                        -->
+                        <StackPanel VerticalAlignment="Bottom" ToolTip="{Binding HealthTooltip}">
+                            <Border Visibility="{Binding MarkingVisibility}"
+                                    Background="{Binding MarkingBrush}"
+                                    Padding="3,1">
+                                <TextBlock Text="{Binding Marking}"
+                                           ToolTip="{Binding Marking}"
+                                           Foreground="White"
+                                           FontSize="9"
+                                           FontWeight="Bold"
+                                           TextAlignment="Center"
+                                           TextTrimming="CharacterEllipsis" />
+                            </Border>
+                            <Border Visibility="{Binding HealthVisibility}"
+                                    Background="{Binding HealthBrush}"
+                                    Height="3" />
+                        </StackPanel>
                     </Grid>
                 </Border>
                 <TextBlock Text="{Binding FileName}"
@@ -78,7 +112,15 @@
                       Width="300"
                       IsEditable="True"
                       KeyDown="OnServerKeyDown"
+                      SelectionChanged="OnServerSelected"
                       ToolTip="Pick a saved endpoint or type any address, then Connect." />
+            <TextBlock Text="Token" VerticalAlignment="Center" Margin="8,0,6,0" />
+            <!-- Only the live calls are guarded, and only when the server was given a token. -->
+            <TextBox x:Name="TokenBox"
+                     Width="130"
+                     KeyDown="OnServerKeyDown"
+                     Padding="4,3"
+                     ToolTip="The server's Live__Token, sent with the live calls. Leave empty when the server has none." />
             <Button x:Name="ConnectButton" Click="OnConnect" Padding="10,3">Connect</Button>
             <Separator />
             <Button x:Name="UploadButton" Click="OnUpload" Padding="10,3">Upload</Button>
@@ -211,6 +253,7 @@
                     <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <TextBlock x:Name="PreviewTitle"
@@ -229,7 +272,28 @@
                                     Background="Black"
                                     VideoBackground="Black"
                                     ToggleFullScreenOnDoubleClick="Both"
-                                    KeyBindings="Both" />
+                                    KeyBindings="Both">
+                        <!--
+                            The host's content is its Overlay window, which is the only place a
+                            banner is actually over the video: the picture is drawn in a separate
+                            Surface window, and both of them go fullscreen together. Anything drawn
+                            beside the host in this window would be left behind the moment it did.
+                        -->
+                        <Border x:Name="MarkingBanner"
+                                Visibility="{Binding MarkingVisibility, FallbackValue=Collapsed}"
+                                Background="{Binding MarkingBrush}"
+                                VerticalAlignment="Top"
+                                HorizontalAlignment="Stretch"
+                                IsHitTestVisible="False"
+                                Padding="6,3">
+                            <TextBlock Text="{Binding Marking}"
+                                       Foreground="White"
+                                       FontSize="13"
+                                       FontWeight="Bold"
+                                       TextAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" />
+                        </Border>
+                    </fl:FlyleafHost>
 
                     <TextBox x:Name="TextPreview"
                              Visibility="Collapsed"
@@ -348,26 +412,38 @@
                                    FontWeight="SemiBold"
                                    Margin="0,0,0,6" />
                         <ScrollViewer MaxHeight="190" VerticalScrollBarVisibility="Auto">
-                            <ItemsControl x:Name="MetadataList">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <WrapPanel Orientation="Horizontal" />
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <StackPanel Width="290" Margin="0,0,16,5">
-                                            <TextBlock Text="{Binding Key}"
-                                                       FontSize="10"
-                                                       Foreground="#888" />
-                                            <TextBlock Text="{Binding Value}"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       ToolTip="{Binding Value}" />
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                            <ItemsControl x:Name="MetadataList"
+                                          ItemsPanel="{StaticResource TileLayout}"
+                                          ItemTemplate="{StaticResource MetadataRowTemplate}" />
                         </ScrollViewer>
+                    </StackPanel>
+                </Border>
+
+                <!--
+                    The MISB ST 0902 set from the newest KLV packet, as text, for the stream being
+                    watched. Polled only while one is playing, and absent altogether for a stream
+                    the listing says carries no KLV.
+                -->
+                <Border x:Name="KlvPanel"
+                        Grid.Row="4"
+                        Visibility="Collapsed"
+                        BorderBrush="#DDD"
+                        BorderThickness="0,1,0,0"
+                        Margin="0,10,0,0"
+                        Padding="0,8,0,0">
+                    <StackPanel>
+                        <TextBlock Text="Sensor (MISB ST 0902)"
+                                   FontWeight="SemiBold"
+                                   Margin="0,0,0,6" />
+                        <ScrollViewer MaxHeight="150" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl x:Name="KlvList"
+                                          ItemsPanel="{StaticResource TileLayout}"
+                                          ItemTemplate="{StaticResource MetadataRowTemplate}" />
+                        </ScrollViewer>
+                        <TextBlock x:Name="KlvHint"
+                                   Visibility="Collapsed"
+                                   Foreground="#999"
+                                   FontSize="11" />
                     </StackPanel>
                 </Border>
             </Grid>
