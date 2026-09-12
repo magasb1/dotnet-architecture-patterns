@@ -140,6 +140,35 @@ twenty-five frame stream that is one decode in five, and it is the largest singl
 phase. Detect on keyframes when the rate allows it, since a keyframe decodes standalone and a
 predicted frame needs everything since the last one.
 
+**The control plane, fixed here so the worker and the client build against one contract.**
+
+```
+// Registry: LiveStream gains
+bool   DetectionEnabled;        // the toggle, set through the owner, read by workers
+int    DetectionRate;           // detections per second while enabled; 0 means the worker's default
+string? DetectionWorker;        // which worker holds it, null when none has claimed it yet
+
+// REST, guarded like record and snapshot, forwarded to the owner
+PUT    /api/live/detect/{name}     {"enabled":true,"rate":5}     -> the stream
+GET    /api/live/detections/{name}                              -> the latest VMTI frame, decoded + raw
+POST   /api/live/peer/detections/{name}   (worker -> owner)      body: one ST 0903 packet + its PTS
+
+// gRPC, same guard, proto fields 19..25 on LiveStreamMessage are held for exactly this
+rpc SetLiveDetection (SetLiveDetectionRequest) returns (LiveStreamMessage);
+rpc GetLiveDetections (LiveStreamName)          returns (LiveDetectionsMessage);
+message LiveDetectionsMessage { google.protobuf.Timestamp timestamp; int32 frame_width, frame_height;
+                                repeated VmtiTargetMessage targets; bytes raw; }
+message VmtiTargetMessage     { int32 id; int32 left, top, right, bottom; optional int32 confidence_percent;
+                                optional string ontology_class; optional string track_id;
+                                optional VmtiTrackStatus track_status; }
+```
+
+The owner keeps a short ring of VMTI frames beside the KLV ring, so `GetLiveDetections` and the
+REST route answer from memory and the client polls them the way it polls KLV. A worker learns what
+to detect by listing streams with `DetectionEnabled` and no worker, claims one by writing its name
+through the owner, and stands down when the toggle clears. That is the pull-lease shape Phase 6
+describes for cameras, applied to workers, and it is why nothing pushes work to a worker.
+
 **Done when** a stream with detection switched on produces VMTI packets whose timestamps align with
 the video, and a capture triggered by one carries its reference.
 
