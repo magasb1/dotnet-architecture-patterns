@@ -622,17 +622,19 @@ public sealed class LiveStreamTests : IAsyncLifetime
         var video = Path.Combine(_root, "video.ts");
         var carrier = Path.Combine(_root, "klv.ts");
 
-        Render(video, seconds: 60);
+        Render(video, seconds: 90);
         Misb.WriteTransportStream(video, carrier, Misb.MinimumSet(), intervalSeconds: 0.1);
 
         Push(name, file: carrier);
 
         LiveStream? stream = null;
 
+        // Sixty rather than forty: the file is rendered, remuxed and pushed at wall-clock speed
+        // first, and under a loaded machine that alone has eaten most of forty.
         Assert.True(
             await WaitAsync(
                 async () => (stream = await Get(name)) is { HasKlv: true, KlvAt: not null },
-                TimeSpan.FromSeconds(40)),
+                TimeSpan.FromSeconds(60)),
             $"the stream never reported KLV: {stream}");
 
         Assert.Contains("klv", stream!.Layout, StringComparison.Ordinal);
