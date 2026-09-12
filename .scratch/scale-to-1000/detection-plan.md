@@ -237,6 +237,33 @@ extension to the encoder.
 **Done when** a target keeps its identity across frames and the track appears in the emitted
 metadata.
 
+## OpenCV 5 was measured against ONNX Runtime, and loses on the thing that matters
+
+Asked by the owner on 2026-09-12: would OpenCV 5 through OpenCvSharp be a better runtime? Tested
+rather than argued, on the same export, the same input and the same processor, warmed, ten runs:
+
+| Runtime, CPU | Median | Best | Outputs |
+| --- | --- | --- | --- |
+| ONNX Runtime 1.30.0 | 1039 ms | 736 ms | reference |
+| OpenCV 5.0.0 DNN | 860 ms | 703 ms | identical to 1e-4 on boxes, 1e-5 on scores |
+
+Two surprises worth keeping. OpenCV 5's ONNX importer loads a DINOv2-backed DETR with the uint8
+input and the preprocessing nodes intact, which older OpenCV could not have done, and on this
+processor it is as fast or slightly faster. The medians are noisy because another agent was
+building at the time; the ratio is the trustworthy part, and it is about one.
+
+Why it is still the wrong choice here: **OpenCvSharp does not support CUDA**, in the project's own
+words, and no runtime package it publishes carries the GPU backend; a CUDA-enabled OpenCV is a
+build the user does themselves, per platform. ONNX Runtime ships CUDA and TensorRT natives from
+NuGet and one package reference already serves both the developer machine and the cluster. Since
+the whole point of the worker tier is a GPU, a runtime that reaches one only by hand-building its
+natives is a step backwards, however it does on a processor. It would also be a fourth native
+stack, and the preprocessing it would bring is already done in one swscale pass with the
+normalisation in the graph.
+
+The processor result is not wasted: it is a second independent confirmation that the export and
+the runner's numbers are right, since two unrelated runtimes agree to five decimal places.
+
 ## What to measure, and when
 
 Nothing here is sized until there is a GPU node.
