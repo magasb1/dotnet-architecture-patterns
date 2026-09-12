@@ -59,6 +59,24 @@ data:
   # The ceiling on one recording, so a camera nobody stops still ends somewhere. It bounds the
   # document rather than the disk, which segments already bound.
   Live__MaxRecordingMinutes: "720"
+
+  # Retention. Off here, because nothing else in this service deletes a document by itself and
+  # switching it on deletes somebody's recordings. A thousand camera-rate streams record about
+  # 43 TB a day, so a real deployment sets an age; this one leaves the decision to whoever has it.
+  #
+  # Only what live streaming produced is expired - recordings and snapshots - never an upload.
+  # MaxAgeDays of 0 keeps documents forever and sweeps only the registry, which is the setting for
+  # a deployment that wants the leak fixed and nothing deleted.
+  Retention__Enabled: "false"
+  Retention__MaxAgeDays: "0"
+  Retention__IntervalSeconds: "3600"
+
+  # How stale an owner's heartbeat may be before its registry entry is treated as abandoned. A
+  # force-killed pod leaks one entry per stream and nothing else ever removes them. Far longer than
+  # the two-second beat and the thirty-second grace period on purpose: removing a living stream's
+  # entry would unlock its name to a second publisher, which is much worse than a dead entry
+  # surviving another pass.
+  Retention__AbandonedEntryMinutes: "10"
 ---
 apiVersion: v1
 kind: Secret

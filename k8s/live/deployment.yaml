@@ -237,9 +237,24 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
-        # A recording is written here and uploaded when it ends, so this needs room for the maximum
-        # recording duration times the concurrent recordings this replica is expected to carry.
-        # A recording is bounded by pod disk and dies with its pod; that is an accepted limit.
+        # A recording is written here one part at a time and the file deleted once the part is
+        # stored, so disk is bounded by the part in progress rather than by how long a recording
+        # runs. What it is not bounded by is how many recordings run at once, and that is the
+        # ceiling nobody had written down:
+        #
+        #   per recording  = Live__RecordingPartMinutes x bitrate
+        #                  = 5 min x 4 Mbit/s  ~= 150 MB
+        #   concurrent     = 8Gi / 150 MB      ~= 54 recordings per pod
+        #
+        # Sixty streams at camera rate fit under that, but only just, and Live__IngestPortCount
+        # raising a pod toward a hundred and twenty-five streams does not raise this. A detector
+        # triggering broadly would exceed it.
+        #
+        # **Nothing enforces it.** There is no bound on concurrent recordings, and what happens when
+        # the volume fills is untested: a part fails to write, the recording it belonged to ends,
+        # and every other recording on the pod is writing to the same full volume. Bounding it is a
+        # separate decision - refuse the trigger, evict the oldest recording, or size the volume for
+        # the worst case - and stating the number is what makes that decision possible.
         - name: tmp
           emptyDir:
             sizeLimit: 8Gi
