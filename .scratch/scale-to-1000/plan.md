@@ -39,6 +39,7 @@ so, and the plan carries that uncertainty rather than hiding it.
 | --- | --- | --- |
 | `libsrt-api.md` | Phases 1, 1b, 5 | The callback signature and thread, the rejection codes and values, the streamid not being inherited, packaging names, and that a local close is only documented to unblock `srt_accept` |
 | `srt-latency-and-ffmpeg-caller.md` | Phases 0, 2, 3 | Latency negotiation is per direction so `SRTO_LATENCY` is needed, the 60 ms floor, `SRTO_MAXBW` defaults to unlimited, FFmpeg never reports a rejection reason and never retries, and Kestrel has no HTTP/1.1 trailers |
+| STANAG 4609 Ed 5 / MISP-2019.1 (NSO 2907), via MISB ST 0902, 1402, 0102, 0601 | KLV extraction, Phase 8, the client | Named by the owner after the first KLV brief; replaced seven hand-picked tags with the mandated minimum set and added carriage-mode alignment and the security marking |
 | `k8s-autoscaling-and-metrics.md` | Phase 4 | The Prometheus exporter is still prerelease, the gauge should be an up-down counter, pod-deletion-cost steers scale-down, and a retry from a new source port is re-balanced under every default |
 
 ## Where this stands
@@ -1026,6 +1027,22 @@ packets from that index and never touching a decoder, which is what the fan-out 
 KLV extractor would be a subscriber on a different stream index". At a thousand streams this is
 close to free and it must not be allowed to argue for decoding anything.
 
+**The standard is named: STANAG 4609 Edition 5**, the NATO Digital Motion Imagery Standard (NSO
+publication 2907, AEDP-4609), which adopts the NGA Motion Imagery Standards Profile MISP-2019.1. It
+defines no metadata of its own; it mandates MISB standards, and three of them decide what "extract
+KLV" means here:
+
+- **ST 0902, the Minimum Metadata Set.** Every conforming stream carries a fixed subset of the ST
+  0601 UAS Datalink Local Set. That subset, not a hand-picked one, is what the extractor decodes.
+- **ST 1402, KLV carriage in MPEG-2 TS.** Two modes. Synchronous KLV carries a PES timestamp and
+  aligns to a frame by it; asynchronous carries none and aligns by the 0601 timestamp against the
+  video's own (ST 0604 in the codec, ST 0603 for the time system). The extractor detects which and
+  records which alignment it used, because a worker geo-locating a detection needs to know how
+  much to trust it.
+- **ST 0102, the Security Metadata Local Set**, nested in 0601 and part of the minimum set. The
+  classification marking is decoded far enough to display; a client showing imagery without its
+  marking is a real problem in this domain, not a cosmetic one.
+
 **But the worker needs the KLV alongside the video.** Geo-locating a detection from a moving
 platform needs position and sensor pointing from MISB 0601, aligned to the frame by presentation
 timestamp. So a worker subscribes to the whole transport and takes both indexes, and the alignment
@@ -1044,6 +1061,18 @@ So **detection rate is a per-stream setting, not a constant**, and the tracker r
 A stream that genuinely needs every frame says so, rather than every stream paying for the one that
 does. `FrameDecoder`'s existing `DecodeRate` of keyframes-or-everything is too coarse for this and
 becomes a frames-per-second figure.
+
+### Decided: detection is switched on per stream, and the model is RF-DETR through ONNX
+
+The repository owner settled both. Detection is **on demand per stream**, a toggle rather than a
+constant, so a thousand streams ingest and a chosen subset decode. That is the same shape as the
+recording trigger: a person or a detector turning it on are one caller on one path. The rate
+setting above applies to a stream once it is on.
+
+The model runs through ONNX Runtime, with making that path as fast as it can go as the explicit
+goal: the GPU execution provider in the cluster, batching across the streams that are on, and
+frames staying in device memory from decode to inference. On a developer machine the CPU provider
+runs the same graph slowly, which is what keeps the seam honest without a GPU.
 
 ### Two things that decide whether the GPU is used well
 
