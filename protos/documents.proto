@@ -32,10 +32,15 @@ service Documents {
   // Live streams on air anywhere in the cluster, not only on the replica answering this call.
   rpc ListLive(google.protobuf.Empty) returns (LiveListResponse);
 
-  // The current preview of a stream: the picture now, not a poster frame. NOT_FOUND before the
-  // first one has been decoded.
+  // The current preview of a stream: the picture now, not a poster frame. Served from whichever
+  // replica owns the stream, so any replica answers. NOT_FOUND before the first one has been
+  // decoded. Open, like a thumbnail: it is a picture.
   rpc DownloadLivePreview(LiveStreamName) returns (stream Chunk);
 
+  // The live calls below, and ListLive above, carry the configured token as x-storage-token
+  // metadata, exactly as REST carries it in the header of the same name. UNAUTHENTICATED when it
+  // is missing or wrong; nothing is required when the server has no token configured.
+  //
   // Takes a picture now and stores it as a document. A person pressing the button and a detector
   // firing are the same caller.
   rpc SnapshotLive(LiveStreamName) returns (DocumentId);
@@ -104,6 +109,16 @@ message LiveStreamMessage {
 
   // Created by request rather than by an encoder naming itself. Indistinguishable afterwards.
   bool manual = 13;
+
+  // Transport health over the last heartbeat, as libsrt counts it. Lost never arrived; dropped
+  // arrived too late for the latency window. Zero on a healthy stream, and the first thing to
+  // look at on one that is listed as live while most of what was sent is missing.
+  //
+  // Fields are only ever added here, never renumbered or removed: an older client reads zero
+  // for what it does not know and a newer one reads zero from an older server. 16 to 25 are
+  // held for the KLV presence and ST 0102 marking fields.
+  int32 packets_lost = 14;
+  int32 packets_dropped = 15;
 }
 
 message LiveListResponse {
@@ -195,4 +210,9 @@ message ProviderResponse {
   // play a long recording by streaming and seeking rather than downloading hours of it first.
   // Empty means the client downloads, which is right for ordinary files.
   string content_base_url = 3;
+
+  // Whether recordings and snapshots expire, and after how many days, so a client can say when
+  // a document will go. Days is zero when nothing expires. Additive, like every field here.
+  bool retention_enabled = 4;
+  int32 retention_max_age_days = 5;
 }

@@ -44,10 +44,15 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
       service did, so the ratio is "about two" rather than a number
 - [ ] Measure whether pooling StreamDemuxer.Pump's per-packet byte[] moves the per-stream thread
       cost. Two threads per stream at ~1.7% of a core is what actually dominates, not the preview
-- [ ] gRPC live RPCs are unguarded: SnapshotLive, RecordLive and StopLiveRecording need no token
-      while the same REST routes do. The README claims otherwise. Interceptor server-side, header
-      client-side, before the client becomes a permanent presence on the port
-- [ ] Phase 11: the gRPC surface catches up with REST, in one proto change. The client stays gRPC
+- [x] gRPC live RPCs guarded by the same token as REST, via an interceptor. The client must send it
+      on ListLive too, not only on the three actions
+- [x] KLV extraction: an always-attached packet subscriber on the SMPTE KLV index, decoding the ST
+      0902 minimum set from ST 0601 with ST 1402 carriage detected, the ST 0102 classification on
+      LiveStream and on snapshot and recording metadata, and GET /api/live/klv/{name}
+- [ ] Phase 11, second half: has_klv, last_klv_at and the marking on ListLive (fields 16-25 held),
+      and a GetLiveKlv RPC. Waits on nothing now
+- [x] Phase 11, first half: health on ListLive, the preview proxying to the owner, retention on
+      GetProviders, and the token guard. Fields 14-15, 4-5 The client stays gRPC
       by decision; health, marking, a proxied preview and KLV must reach ListLive and friends
 - [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and
       returns detections and the preview. Detection runs on every stream, so decoding on demand

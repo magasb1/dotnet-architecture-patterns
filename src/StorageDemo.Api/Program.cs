@@ -24,7 +24,13 @@ builder.Services.AddSingleton<ContentTypeSniffer>();
 // streaming, because the relay on the consumption port resolves the same one.
 builder.Services.AddSingleton<LivePeerProxy>();
 
-builder.Services.AddGrpc(options => options.MaxReceiveMessageSize = (int)Math.Min(maxUploadBytes, int.MaxValue));
+builder.Services.AddGrpc(options =>
+{
+    options.MaxReceiveMessageSize = (int)Math.Min(maxUploadBytes, int.MaxValue);
+
+    // The live RPCs carry the same token REST requires, or the gRPC port is a way round it.
+    options.Interceptors.Add<LiveTokenInterceptor>();
+});
 
 // REST is the secondary surface, for curl, Swagger and anything that cannot speak gRPC.
 builder.Services.AddControllers();

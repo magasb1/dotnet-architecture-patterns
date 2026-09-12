@@ -1,10 +1,12 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
+using StorageDemo.Api.Controllers;
 using StorageDemo.Api.Uploads;
 using Microsoft.Extensions.Options;
 using StorageDemo.Core.Documents;
 using StorageDemo.Core.Streaming;
+using StorageDemo.Infrastructure.Monitoring;
 using StorageDemo.Infrastructure.Streaming;
 using StorageDemo.Grpc;
 using StorageDemo.Infrastructure;
@@ -18,7 +20,9 @@ namespace StorageDemo.Api.Grpc;
 public sealed class DocumentsGrpcService(
     IDocumentService documents,
     ILiveStreamService live,
+    LivePeerProxy peers,
     IOptions<LiveOptions> liveOptions,
+    IOptions<RetentionOptions> retention,
     ContentTypeSniffer sniffer,
     IChangeFeed changeFeed,
     ProviderInfo providers,
@@ -51,7 +55,7 @@ public sealed class DocumentsGrpcService(
     {
         var content = await documents.DownloadAsync(ParseId(request.Id), context.CancellationToken);
 
-        await StreamAsync(content, responseStream, context, "Document or object not found.");
+        await StreamAsync(content?.Stream, responseStream, context, "Document or object not found.");
     }
 
     public override async Task DownloadThumbnail(
@@ -63,21 +67,21 @@ public sealed class DocumentsGrpcService(
             ParseId(request.Id),
             context.CancellationToken);
 
-        await StreamAsync(content, responseStream, context, "No thumbnail for this document.");
+        await StreamAsync(content?.Stream, responseStream, context, "No thumbnail for this document.");
     }
 
     private static async Task StreamAsync(
-        DocumentContent? content,
+        Stream? source,
         IServerStreamWriter<Chunk> responseStream,
         ServerCallContext context,
         string missingMessage)
     {
-        if (content is null)
+        if (source is null)
         {
             throw new RpcException(new Status(StatusCode.NotFound, missingMessage));
         }
 
-        await using var stream = content.Stream;
+        await using var stream = source;
         var buffer = new byte[ChunkSize];
 
         while (true)
@@ -212,6 +216,8 @@ public sealed class DocumentsGrpcService(
                 CeilingBinding = stream.CeilingBinding,
                 BufferedSeconds = stream.BufferedSeconds,
                 Manual = stream.Manual,
+                PacketsLost = stream.PacketsLost,
+                PacketsDropped = stream.PacketsDropped,
             };
 
             if (stream.Recording is { } recording)
@@ -235,18 +241,30 @@ public sealed class DocumentsGrpcService(
             throw new RpcException(new Status(StatusCode.NotFound, "No such live stream."));
         }
 
-        var preview = live.Preview(request.Name);
-
-        if (preview is null)
+        if (live.Preview(request.Name) is { } local)
         {
-            // Owned by another replica, or nothing decoded yet. The REST endpoint proxies across
-            // replicas; this one deliberately does not, so a client falls back to its icon.
+            await responseStream.WriteAsync(
+                new Chunk { Data = UnsafeByteOperations.UnsafeWrap(local) },
+                context.CancellationToken);
+
+            return;
+        }
+
+        // Owned by another replica, so fetched from it, as the REST route does. Answering
+        // NOT_FOUND here instead was a documented trade-off with one replica; in a cluster it
+        // turns most of a client's grid into icons.
+        var stream = await live.GetAsync(request.Name, context.CancellationToken);
+
+        if (stream is null || !stream.HasPreview || live.Owns(request.Name))
+        {
             throw new RpcException(new Status(StatusCode.NotFound, "No preview for this stream."));
         }
 
-        await responseStream.WriteAsync(
-            new Chunk { Data = UnsafeByteOperations.UnsafeWrap(preview) },
-            context.CancellationToken);
+        await StreamAsync(
+            await peers.OpenAsync(stream, $"api/live/preview/{request.Name}", context.CancellationToken),
+            responseStream,
+            context,
+            "No preview for this stream.");
     }
 
     public override async Task<DocumentId> SnapshotLive(LiveStreamName request, ServerCallContext context)
@@ -318,6 +336,8 @@ public sealed class DocumentsGrpcService(
             Storage = providers.Storage,
             Database = providers.Database,
             ContentBaseUrl = providers.ContentBaseUrl ?? string.Empty,
+            RetentionEnabled = retention.Value.Enabled,
+            RetentionMaxAgeDays = retention.Value.Enabled ? retention.Value.MaxAgeDays : 0,
         });
 
     private static Guid ParseId(string id)

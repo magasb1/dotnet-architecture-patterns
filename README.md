@@ -317,6 +317,7 @@ client does not stop a recording that is running.
 GET    /api/live                                       transports and streams on air
 GET    /api/live/stream/{name}                         one stream
 GET    /api/live/preview/{name}                        the picture now
+GET    /api/live/klv/{name}                            the newest MISB KLV packet, decoded and raw
 POST   /api/live/snapshot/{name}                       store a full-resolution picture as a document
 POST   /api/live/record/{name}    {"seconds":30}       start, or extend what is running
 DELETE /api/live/record/{name}                         end it now
@@ -470,7 +471,7 @@ reach it may push a stream into:
 
 ```
 Live__Enabled=true
-Live__Token=<secret>        # required in X-Storage-Token on every API call
+Live__Token=<secret>        # required on every live call: the X-Storage-Token header over REST, the same key as gRPC metadata
 Live__IngestPort=9000
 Live__IngestPortCount=1     # how many consecutive ports ingest binds; see below before raising it
 Live__ConsumptionPort=9010
@@ -786,7 +787,8 @@ gRPC is the primary surface (`protos/documents.proto`): `List`, `Get`, `Download
 `DownloadThumbnail` (server streaming), `Upload` (client streaming), `Delete`, `Watch` (server
 streaming) and `GetProviders`. It also carries what the desktop client needs of live streaming:
 `ListLive`, `DownloadLivePreview`, `SnapshotLive`, `RecordLive` and `StopLiveRecording`, so the
-client needs only its one connection.
+client needs only its one connection. The live calls are guarded exactly as their REST routes are:
+`Live__Token` travels as `x-storage-token` metadata, and only the preview is open on both surfaces.
 
 REST covers the same ground for curl and Swagger:
 

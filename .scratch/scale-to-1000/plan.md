@@ -1207,7 +1207,15 @@ route does; a KLV call returning the ST 0902 minimum set and the raw packet; the
 when Phase 8 exists; and whatever retention exposes. The client plan lists which are a field on an
 existing message and which are a new RPC, in the order its phases need them.
 
-**They are not guarded, and the README says they are.** The client plan checked: the gRPC service
+**Guarded now, first half of this phase built.** The interceptor covers `ListLive`, `SnapshotLive`,
+`RecordLive` and `StopLiveRecording`, which is exactly REST's guarded set; the preview stays open
+on both surfaces like a thumbnail. One consequence the client plan's table missed: **the client must
+send the token on `ListLive` too**, not only on the three actions, or its grid refresh fails with
+`Unauthenticated`. Field numbers 14 and 15 carry the health figures and 16 to 25 are held for the
+marking and KLV fields the second half adds. A small pre-existing asymmetry surfaced on the way:
+`StopLiveRecording` on an absent name answers an empty OK over gRPC and 404 over REST.
+
+**They were not guarded, and the README said they were.** The client plan checked: the gRPC service
 reads no token and nothing registers an interceptor or an authorization policy, so `SnapshotLive`,
 `RecordLive` and `StopLiveRecording` are open to anyone who can reach the gRPC port, while the same
 actions over REST require `X-Storage-Token`. The README's "required on every API call" is true of
