@@ -22,6 +22,12 @@ public sealed record CreateManualStreamRequest(string Name, string Url);
 /// </param>
 public sealed record RecordRequest(double? Seconds, DetectionReference? Detection = null);
 
+/// <param name="Rate">Detections per second. Zero means the worker's default.</param>
+public sealed record DetectRequest(bool Enabled, int Rate = 0);
+
+/// <param name="Worker">The worker's own name, as it is written into the stream's registry entry.</param>
+public sealed record DetectorClaim(string Worker);
+
 public sealed record LiveStatusResponse(
     IReadOnlyList<string> Transports,
     IReadOnlyList<LiveStream> Streams);
@@ -169,6 +175,142 @@ public sealed class LiveStreamsController(
             () => Task.FromResult<IActionResult>(live.Klv(name) is { } sample ? Ok(sample) : NotFound()),
             cancellationToken,
             method: HttpMethod.Get);
+    }
+
+    /// <summary>
+    /// Switches detection on or off for a stream, at a rate. Set through the owner like record,
+    /// because the owner is what publishes the stream's entry and a worker reads it from there;
+    /// nothing here touches a worker.
+    /// </summary>
+    [HttpPut("detect/{*name}")]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Detect(
+        string name,
+        DetectRequest request,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        return await ForwardOrRun(
+            name,
+            $"api/live/detect/{name}",
+            token,
+            async () => await live.SetDetectionAsync(name, request.Enabled, request.Rate, cancellationToken) is { } stream
+                ? Ok(stream)
+                : NotFound(),
+            cancellationToken,
+            method: HttpMethod.Put,
+            body: request);
+    }
+
+    /// <summary>
+    /// The newest VMTI frame a worker posted, decoded with the raw ST 0903 packet beside it.
+    /// Forwarded to the owner like KLV, because the ring lives with the stream's bytes.
+    /// </summary>
+    [HttpGet("detections/{*name}")]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Detections(
+        string name,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        return await ForwardOrRun(
+            name,
+            $"api/live/detections/{name}",
+            token,
+            () => Task.FromResult<IActionResult>(live.Detections(name) is { } sample ? Ok(sample) : NotFound()),
+            cancellationToken,
+            method: HttpMethod.Get);
+    }
+
+    /// <summary>
+    /// A worker handing the owner one VMTI frame, typed and raw. Owner-only like the peer view:
+    /// a worker addresses the owner directly, having read its address from the listing. The raw
+    /// packet has to be what the frame encodes to, or the two answers this route feeds would
+    /// disagree with each other.
+    /// </summary>
+    [HttpPost("peer/detections/{*name}")]
+    [ProducesResponseType(StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult PeerDetections(
+        string name,
+        VmtiSample sample,
+        [FromHeader(Name = "X-Storage-Token")] string? token)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        try
+        {
+            if (!Misb0903.Encode(sample.Frame).AsSpan().SequenceEqual(sample.Raw))
+            {
+                return BadRequest("The raw packet is not the encoding of the frame beside it.");
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+
+        return live.PostDetections(name, sample) ? Accepted() : NotFound();
+    }
+
+    /// <summary>
+    /// A worker taking or renewing its hold on a stream. Conflict when another worker's lease is
+    /// live, which is the answer that makes claiming a listing's free streams safe to race.
+    /// </summary>
+    [HttpPut("peer/detector/{*name}")]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> ClaimDetector(
+        string name,
+        DetectorClaim claim,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        try
+        {
+            return await live.ClaimDetectorAsync(name, claim.Worker, cancellationToken) is { } stream
+                ? Ok(stream)
+                : NotFound();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(ex.Message);
+        }
+    }
+
+    [HttpDelete("peer/detector/{*name}")]
+    [ProducesResponseType(StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ReleaseDetector(
+        string name,
+        [FromQuery] string worker,
+        [FromHeader(Name = "X-Storage-Token")] string? token,
+        CancellationToken cancellationToken)
+    {
+        if (Guard(token) is { } refused)
+        {
+            return refused;
+        }
+
+        return await live.ReleaseDetectorAsync(name, worker, cancellationToken) ? Accepted() : NotFound();
     }
 
     /// <summary>

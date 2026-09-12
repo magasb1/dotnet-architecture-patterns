@@ -39,6 +39,31 @@ public interface ILiveStreamService
     KlvSample? Klv(string name);
 
     /// <summary>
+    /// Switches detection on or off for a stream this replica owns, at a rate in detections per
+    /// second, zero meaning the worker's default. Null when this replica does not own it. Turning
+    /// it off also drops whichever worker held the stream, so the listing tells the truth at once
+    /// rather than when the worker next notices.
+    /// </summary>
+    Task<LiveStream?> SetDetectionAsync(string name, bool enabled, int rate, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// A worker taking, or renewing, its hold on a stream this replica owns. The claim is a lease:
+    /// a worker that stops renewing it loses it, which is how a stream whose worker died becomes
+    /// free for another. Null when this replica does not own the stream.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Another worker holds a live claim.</exception>
+    Task<LiveStream?> ClaimDetectorAsync(string name, string worker, CancellationToken cancellationToken = default);
+
+    /// <summary>Gives a claim back. False when the stream is not here or another worker holds it.</summary>
+    Task<bool> ReleaseDetectorAsync(string name, string worker, CancellationToken cancellationToken = default);
+
+    /// <summary>A worker's VMTI frame for a stream this replica owns. False when it does not.</summary>
+    bool PostDetections(string name, VmtiSample sample);
+
+    /// <summary>The newest VMTI frame, when this replica owns the stream and a worker has posted one.</summary>
+    VmtiSample? Detections(string name);
+
+    /// <summary>
     /// Creates a stream by request, for a protocol that cannot name itself, and opens its input.
     /// It sits in the registry waiting for bytes and is indistinguishable from an automatic stream
     /// once a demultiplexer exists.

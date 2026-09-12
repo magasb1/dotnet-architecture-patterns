@@ -214,45 +214,130 @@ public sealed class DocumentsGrpcService(
 
         foreach (var stream in await live.StreamsAsync(context.CancellationToken))
         {
-            var message = new LiveStreamMessage
-            {
-                Name = stream.Name,
-                State = stream.State.ToString(),
-                HasPreview = stream.HasPreview,
-                Packets = stream.Packets,
-                Bytes = stream.Bytes,
-                StartedAt = Timestamp.FromDateTimeOffset(stream.StartedAt),
-                Owner = stream.Owner,
-                Layout = stream.Layout ?? string.Empty,
-                Startable = stream.Startable,
-                CeilingBinding = stream.CeilingBinding,
-                BufferedSeconds = stream.BufferedSeconds,
-                Manual = stream.Manual,
-                PacketsLost = stream.PacketsLost,
-                PacketsDropped = stream.PacketsDropped,
-                HasKlv = stream.HasKlv,
-            };
-
-            if (stream.Recording is { } recording)
-            {
-                message.Recording = ToMessage(recording);
-            }
-
-            if (stream.KlvAt is { } klvAt)
-            {
-                message.LastKlvAt = Timestamp.FromDateTimeOffset(klvAt);
-            }
-
-            // Null stays absent: unmarked is not the same answer as an empty marking.
-            if (stream.Classification is { } classification)
-            {
-                message.Classification = classification;
-            }
-
-            response.Streams.Add(message);
+            response.Streams.Add(ToMessage(stream));
         }
 
         return response;
+    }
+
+    private static LiveStreamMessage ToMessage(LiveStream stream)
+    {
+        var message = new LiveStreamMessage
+        {
+            Name = stream.Name,
+            State = stream.State.ToString(),
+            HasPreview = stream.HasPreview,
+            Packets = stream.Packets,
+            Bytes = stream.Bytes,
+            StartedAt = Timestamp.FromDateTimeOffset(stream.StartedAt),
+            Owner = stream.Owner,
+            Layout = stream.Layout ?? string.Empty,
+            Startable = stream.Startable,
+            CeilingBinding = stream.CeilingBinding,
+            BufferedSeconds = stream.BufferedSeconds,
+            Manual = stream.Manual,
+            PacketsLost = stream.PacketsLost,
+            PacketsDropped = stream.PacketsDropped,
+            HasKlv = stream.HasKlv,
+            DetectionEnabled = stream.DetectionEnabled,
+            DetectionRate = stream.DetectionRate,
+        };
+
+        if (stream.Recording is { } recording)
+        {
+            message.Recording = ToMessage(recording);
+        }
+
+        if (stream.KlvAt is { } klvAt)
+        {
+            message.LastKlvAt = Timestamp.FromDateTimeOffset(klvAt);
+        }
+
+        // Null stays absent: unmarked is not the same answer as an empty marking.
+        if (stream.Classification is { } classification)
+        {
+            message.Classification = classification;
+        }
+
+        if (stream.DetectionWorker is { } worker)
+        {
+            message.DetectionWorker = worker;
+        }
+
+        return message;
+    }
+
+    /// <summary>
+    /// Set through the owner, which is what publishes the entry a worker reads. Landing elsewhere
+    /// it is forwarded over the REST route with the caller's token, as KLV is fetched.
+    /// </summary>
+    public override async Task<LiveStreamMessage> SetLiveDetection(
+        SetLiveDetectionRequest request,
+        ServerCallContext context)
+    {
+        RequireLive();
+
+        var stream = live.Owns(request.Name)
+            ? await live.SetDetectionAsync(request.Name, request.Enabled, request.Rate, context.CancellationToken)
+            : await FetchFromOwnerAsync<LiveStream>(
+                request.Name,
+                $"api/live/detect/{request.Name}",
+                context,
+                HttpMethod.Put,
+                new DetectRequest(request.Enabled, request.Rate));
+
+        return stream is null
+            ? throw new RpcException(new Status(StatusCode.NotFound, "No such live stream."))
+            : ToMessage(stream);
+    }
+
+    public override async Task<LiveDetectionsMessage> GetLiveDetections(LiveStreamName request, ServerCallContext context)
+    {
+        RequireLive();
+
+        var sample = live.Owns(request.Name)
+            ? live.Detections(request.Name)
+            : await FetchFromOwnerAsync<VmtiSample>(request.Name, $"api/live/detections/{request.Name}", context);
+
+        return sample is null
+            ? throw new RpcException(new Status(StatusCode.NotFound, "No detections on that stream."))
+            : ToMessage(sample);
+    }
+
+    private static LiveDetectionsMessage ToMessage(VmtiSample sample)
+    {
+        var message = new LiveDetectionsMessage
+        {
+            Timestamp = Timestamp.FromDateTimeOffset(sample.Frame.Timestamp),
+            FrameWidth = sample.Frame.FrameWidth,
+            FrameHeight = sample.Frame.FrameHeight,
+            Raw = ByteString.CopyFrom(sample.Raw),
+        };
+
+        foreach (var detection in sample.Frame.Detections)
+        {
+            var target = new VmtiTargetMessage
+            {
+                Id = detection.Id,
+                Left = detection.Left,
+                Top = detection.Top,
+                Right = detection.Right,
+                Bottom = detection.Bottom,
+            };
+
+            if (detection.ConfidencePercent is { } confidence) target.ConfidencePercent = confidence;
+            if (detection.OntologyClass is { } ontologyClass) target.OntologyClass = ontologyClass;
+
+            if (detection.Track is { } track)
+            {
+                target.TrackId = track.Id.ToString();
+                target.TrackStatus = (StorageDemo.Grpc.VmtiTrackStatus)track.Status;
+            }
+
+            message.Targets.Add(target);
+        }
+
+        return message;
     }
 
     public override async Task DownloadLivePreview(
@@ -353,7 +438,7 @@ public sealed class DocumentsGrpcService(
 
         var sample = live.Owns(request.Name)
             ? live.Klv(request.Name)
-            : await FetchFromOwnerAsync(request.Name, context);
+            : await FetchFromOwnerAsync<KlvSample>(request.Name, $"api/live/klv/{request.Name}", context);
 
         return sample is null
             ? throw new RpcException(new Status(StatusCode.NotFound, "No KLV on that stream."))
@@ -365,17 +450,25 @@ public sealed class DocumentsGrpcService(
     /// route, as the controller's own forwarding does. The token the caller presented travels
     /// with it, because the owner guards that route too.
     /// </summary>
-    private async Task<KlvSample?> FetchFromOwnerAsync(string name, ServerCallContext context)
+    private async Task<T?> FetchFromOwnerAsync<T>(
+        string name,
+        string path,
+        ServerCallContext context,
+        HttpMethod? method = null,
+        object? body = null)
+        where T : class
     {
         var stream = await live.GetAsync(name, context.CancellationToken);
 
         return stream is null
             ? null
-            : await peers.FetchAsync<KlvSample>(
+            : await peers.FetchAsync<T>(
                 stream,
-                $"api/live/klv/{name}",
+                path,
                 context.RequestHeaders.GetValue(LiveTokenInterceptor.Header),
-                context.CancellationToken);
+                context.CancellationToken,
+                method,
+                body);
     }
 
     private static LiveKlvMessage ToMessage(KlvSample sample)

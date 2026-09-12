@@ -117,6 +117,14 @@ public sealed record VmtiFrame(
     string? Ontology = null);
 
 /// <summary>
+/// One VMTI frame as a worker posted it to the stream's owner and as the owner serves it: the
+/// typed frame beside the packet it encodes to. Both travel because nothing in this service reads
+/// ST 0903 back; the worker already has the typed frame, so carrying it costs a few hundred bytes
+/// and spares the owner a decoder that would exist only to undo the worker's encoder.
+/// </summary>
+public sealed record VmtiSample(VmtiFrame Frame, byte[] Raw);
+
+/// <summary>
 /// Which detection caused a capture: the three things that identify one uniquely on the wire, and
 /// there is no fourth. The stream it was seen on, the VMTI precision timestamp of the frame
 /// (<see cref="VmtiFrame.Timestamp"/>), and the target id within that frame

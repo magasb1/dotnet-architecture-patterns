@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using StorageDemo.Core.Streaming;
 
 namespace StorageDemo.Infrastructure.Streaming;
 
@@ -51,6 +52,9 @@ public sealed class LiveStreamEntry : IAsyncDisposable
 
     public Task Extracting { get; }
 
+    /// <summary>The detection toggle, the worker's lease and the VMTI ring, the carriage half of detection.</summary>
+    public StreamDetection Detection { get; } = new();
+
     private IDisposable PreviewSubscription { get; }
 
     /// <summary>
@@ -61,8 +65,12 @@ public sealed class LiveStreamEntry : IAsyncDisposable
     /// </summary>
     public DateTimeOffset StartedAt { get; private set; } = DateTimeOffset.UtcNow;
 
-    /// <summary>Adopts the start time of the stream this entry is taking over.</summary>
-    public void Resumes(DateTimeOffset startedAt) => StartedAt = startedAt;
+    /// <summary>Adopts the start time and the detection state of the stream this entry is taking over.</summary>
+    public void Resumes(LiveStream shared)
+    {
+        StartedAt = shared.StartedAt;
+        Detection.Adopt(shared);
+    }
 
     public bool Manual { get; }
 

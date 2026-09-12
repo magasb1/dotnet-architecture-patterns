@@ -13,6 +13,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\StorageDemo.Api\StorageDemo.Api.csproj" />
+    <!-- The worker runs in-process against the test host for the detection end-to-end. -->
+    <ProjectReference Include="..\..\src\StorageDemo.Worker\StorageDemo.Worker.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Grpc.Net.Client" Version="2.71.0" />

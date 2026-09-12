@@ -34,7 +34,15 @@ extractor is for live access.
 **Detection.** What a detector found in one frame: an identifier, a box in pixels, and what it
 thinks the thing is. Detections leave as a MISB ST 0903.4 VMTI local set, one VTarget pack each, on
 the same timestamp as the ST 0601 metadata for that frame, so a STANAG 4609 consumer reads them
-without being told anything. The encoder exists; nothing produces detections yet.
+without being told anything. Detection is per stream and on demand: a toggle set through the
+owner, with a rate in detections per second.
+
+**Detection worker.** A separate deployment that produces detections. It lists the streams, claims
+one whose toggle is set and which no worker holds by writing its name through the owner, subscribes
+to it over the peer view route, decodes only at the detection rate, detects, tracks, and posts each
+VMTI frame back to the owner. The claim is a lease, renewed every beat and lost when the worker
+stops renewing it; nothing pushes work to a worker. The owner keeps a short ring of the posted
+frames beside the KLV ring and serves the newest on both surfaces. It never decodes.
 
 **Frame subscriber.** Something receiving decoded pictures. Exactly one decoder is itself a packet
 subscriber and republishes frames, so a stream is decoded once however many things want pictures, and

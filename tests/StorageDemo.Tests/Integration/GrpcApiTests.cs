@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
@@ -113,11 +114,16 @@ public sealed class GrpcApiTests : IAsyncLifetime
             () => _client.RecordLiveAsync(new RecordLiveRequest { Name = "guarded" }, WithToken("nope")).ResponseAsync);
         var listing = await Assert.ThrowsAsync<RpcException>(() => _client.ListLiveAsync(new Empty()).ResponseAsync);
         var klv = await Assert.ThrowsAsync<RpcException>(() => _client.GetLiveKlvAsync(name).ResponseAsync);
+        var detect = await Assert.ThrowsAsync<RpcException>(
+            () => _client.SetLiveDetectionAsync(new SetLiveDetectionRequest { Name = "guarded", Enabled = true }).ResponseAsync);
+        var detections = await Assert.ThrowsAsync<RpcException>(() => _client.GetLiveDetectionsAsync(name).ResponseAsync);
 
         Assert.Equal(StatusCode.Unauthenticated, missing.StatusCode);
         Assert.Equal(StatusCode.Unauthenticated, wrong.StatusCode);
         Assert.Equal(StatusCode.Unauthenticated, listing.StatusCode);
         Assert.Equal(StatusCode.Unauthenticated, klv.StatusCode);
+        Assert.Equal(StatusCode.Unauthenticated, detect.StatusCode);
+        Assert.Equal(StatusCode.Unauthenticated, detections.StatusCode);
 
         // The token is a live concern only; documents never asked for one.
         await _client.ListAsync(new Empty());
@@ -196,6 +202,98 @@ public sealed class GrpcApiTests : IAsyncLifetime
             () => _client.GetLiveKlvAsync(new LiveStreamName { Name = "absent" }, WithToken(Token)).ResponseAsync);
 
         Assert.Equal(StatusCode.NotFound, failure.StatusCode);
+    }
+
+    /// <summary>
+    /// Not found, never unimplemented: the client probes GetLiveDetections with an empty name to
+    /// learn whether the server has detection at all, and disables the button on Unimplemented.
+    /// </summary>
+    [Fact]
+    public async Task The_detection_calls_answer_not_found_for_an_unknown_stream_rather_than_unimplemented()
+    {
+        var detections = await Assert.ThrowsAsync<RpcException>(
+            () => _client.GetLiveDetectionsAsync(new LiveStreamName { Name = string.Empty }, WithToken(Token)).ResponseAsync);
+        var toggle = await Assert.ThrowsAsync<RpcException>(
+            () => _client.SetLiveDetectionAsync(new SetLiveDetectionRequest { Name = "absent", Enabled = true }, WithToken(Token)).ResponseAsync);
+
+        Assert.Equal(StatusCode.NotFound, detections.StatusCode);
+        Assert.Equal(StatusCode.NotFound, toggle.StatusCode);
+    }
+
+    /// <summary>
+    /// The detection control plane across two replicas: the toggle set on the one that does not
+    /// own the stream reaches the owner and comes back in the listing, and a VMTI frame a worker
+    /// posted to the owner is served from both, typed and raw.
+    /// </summary>
+    [Fact]
+    public async Task Detection_is_toggled_and_served_from_the_owner_and_from_a_replica_that_does_not_own_the_stream()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, LiveReplicas.NoLibsrt);
+        Assert.SkipUnless(LiveReplicas.HasSrt(), LiveReplicas.NoFfmpegSrt);
+
+        const string name = "live/grpc-detect";
+
+        await using var replicas = new LiveReplicas();
+        var aIngest = SrtSenders.FreePort();
+        var a = replicas.Start("pod-a", aIngest);
+        var b = replicas.Start("pod-b", SrtSenders.FreePort(), peer: a);
+
+        replicas.Send(aIngest, name);
+
+        await LiveReplicas.Until(
+            async () => await replicas.Registry.GetAsync(name) is { Packets: > 0 },
+            TimeSpan.FromSeconds(40),
+            "A never reported the stream");
+
+        var token = new Metadata { { LiveTokenInterceptor.Header, LiveReplicas.Token } };
+
+        using var viaB = GrpcChannel.ForAddress(b.Server.BaseAddress, new GrpcChannelOptions { HttpHandler = b.Server.CreateHandler() });
+        var clientB = new StorageDemo.Grpc.Documents.DocumentsClient(viaB);
+
+        // Set through B, which forwards to A and answers with the stream as A now describes it.
+        var toggled = await clientB.SetLiveDetectionAsync(
+            new SetLiveDetectionRequest { Name = name, Enabled = true, Rate = 5 },
+            token);
+
+        Assert.True(toggled.DetectionEnabled);
+        Assert.Equal(5, toggled.DetectionRate);
+        Assert.False(toggled.HasDetectionWorker);
+        Assert.Equal("pod-a", toggled.Owner);
+
+        // A worker posts to the owner directly, having read its address from the listing.
+        var sample = Vmti.Sample(320, 240);
+        using var owner = replicas.Client(a);
+        Assert.Equal(
+            System.Net.HttpStatusCode.Accepted,
+            (await owner.PostAsJsonAsync($"/api/live/peer/detections/{name}", sample)).StatusCode);
+
+        foreach (var host in new[] { a, b })
+        {
+            using var channel = GrpcChannel.ForAddress(host.Server.BaseAddress, new GrpcChannelOptions { HttpHandler = host.Server.CreateHandler() });
+            var client = new StorageDemo.Grpc.Documents.DocumentsClient(channel);
+
+            var listed = Assert.Single((await client.ListLiveAsync(new Empty(), token)).Streams, s => s.Name == name);
+            Assert.True(listed.DetectionEnabled);
+            Assert.Equal(5, listed.DetectionRate);
+
+            var served = await client.GetLiveDetectionsAsync(new LiveStreamName { Name = name }, token);
+            var expected = sample.Frame.Detections[0];
+            var target = Assert.Single(served.Targets);
+
+            Assert.Equal(sample.Frame.Timestamp, served.Timestamp.ToDateTimeOffset());
+            Assert.Equal(320, served.FrameWidth);
+            Assert.Equal(240, served.FrameHeight);
+            Assert.Equal(Convert.ToHexString(sample.Raw), Convert.ToHexString(served.Raw.Span));
+            Assert.Equal(expected.Id, target.Id);
+            Assert.Equal((expected.Left, expected.Top, expected.Right, expected.Bottom), (target.Left, target.Top, target.Right, target.Bottom));
+            Assert.Equal(expected.ConfidencePercent, target.ConfidencePercent);
+            Assert.Equal("dog", target.OntologyClass);
+            Assert.Equal(expected.Track!.Id.ToString(), target.TrackId);
+            Assert.Equal(StorageDemo.Grpc.VmtiTrackStatus.Active, target.TrackStatus);
+        }
+
+        var cleared = await clientB.SetLiveDetectionAsync(new SetLiveDetectionRequest { Name = name, Enabled = false }, token);
+        Assert.False(cleared.DetectionEnabled);
     }
 
     /// <summary>

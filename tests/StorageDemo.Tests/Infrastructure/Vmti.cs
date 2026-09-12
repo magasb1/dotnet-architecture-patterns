@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text;
+using StorageDemo.Core.Streaming;
 
 namespace StorageDemo.Tests.Infrastructure;
 
@@ -22,6 +23,21 @@ internal sealed record VmtiPacket(IReadOnlyDictionary<int, byte[]> Items, IReadO
 /// </summary>
 internal static class Vmti
 {
+    /// <summary>What a worker would post for one frame: a tracked dog, typed and encoded.</summary>
+    public static VmtiSample Sample(int width, int height)
+    {
+        var at = new DateTimeOffset(2026, 9, 12, 10, 0, 0, TimeSpan.Zero);
+        var track = new VmtiTrack(Guid.NewGuid(), VmtiTrackStatus.Active, at, at, ByteTracker.Algorithm);
+        var frame = new VmtiFrame(
+            at,
+            width,
+            height,
+            "test",
+            [new VmtiDetection(1, 10, 20, 100, 200, 68, "dog", track)]);
+
+        return new VmtiSample(frame, Misb0903.Encode(frame));
+    }
+
     public static VmtiPacket Decode(byte[] packet)
     {
         Assert.True(packet.Length > 17, "a VMTI LS is at least a key, a length and a checksum");

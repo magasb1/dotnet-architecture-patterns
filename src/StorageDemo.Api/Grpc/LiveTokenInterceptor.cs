@@ -20,7 +20,7 @@ public sealed class LiveTokenInterceptor(IOptions<LiveOptions> options) : Interc
     public const string Header = "x-storage-token";
 
     private static readonly HashSet<string> Guarded =
-        ["ListLive", "GetLiveKlv", "SnapshotLive", "RecordLive", "StopLiveRecording"];
+        ["ListLive", "GetLiveKlv", "SnapshotLive", "RecordLive", "StopLiveRecording", "SetLiveDetection", "GetLiveDetections"];
 
     public override Task<TResponse> UnaryServerHandler<TRequest, TResponse>(
         TRequest request,

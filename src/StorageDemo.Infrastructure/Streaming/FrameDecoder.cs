@@ -1,18 +1,28 @@
+using FFmpeg.AutoGen.Abstractions;
 using Microsoft.Extensions.Logging;
 
 namespace StorageDemo.Infrastructure.Streaming;
 
-/// <summary>How often a frame subscriber needs a picture.</summary>
-public enum DecodeRate
+/// <summary>
+/// How often a frame subscriber needs a picture, as frames per second. Two values are special:
+/// <see cref="Keyframes"/> (zero) wants one picture per position a decoder can start from, which is
+/// what a preview needs, and <see cref="Everything"/> wants every frame, which nothing asks for yet.
+/// Anything in between is what a detector asks for, and the decoder honours it at the lowest cost
+/// it can: keyframes alone when they arrive at least that often, since a keyframe decodes
+/// standalone, and everything otherwise, since a predicted frame needs everything since the last
+/// keyframe and there is no cheaper way to reach it.
+/// </summary>
+public readonly record struct DecodeRate(double FramesPerSecond)
 {
-    /// <summary>
-    /// One picture per position a decoder can start from, which is what a preview needs and what
-    /// a detector would raise. Keyframes decode standalone, so this costs one decode per segment.
-    /// </summary>
-    Keyframes,
+    public static readonly DecodeRate Keyframes = new(0);
 
-    /// <summary>Everything. Nothing asks for this yet; detection or tracking would.</summary>
-    Everything,
+    public static readonly DecodeRate Everything = new(double.PositiveInfinity);
+
+    public static DecodeRate PerSecond(double framesPerSecond) => new(Math.Max(0, framesPerSecond));
+
+    public bool IsKeyframes => FramesPerSecond <= 0;
+
+    public bool IsEverything => double.IsPositiveInfinity(FramesPerSecond);
 }
 
 /// <summary>Receives one decoded picture, as a pointer to libav's own frame.</summary>
@@ -26,32 +36,35 @@ public delegate void FrameHandler(IntPtr frame);
 /// things want pictures, and consumers that only move bytes never pay for it at all. A detector
 /// raises the decode rate by asking for it rather than getting it by default.
 ///
-/// Today the only subscriber is the harvester and the only rate is keyframes, which is one decode
-/// per keyframe interval for a preview that needs one picture every couple of seconds.
+/// The decoder decodes at the highest rate anybody asked for and hands each subscriber only the
+/// pictures its own rate is due, so a detector at one a second beside a preview at keyframes costs
+/// one decode per keyframe and one detection per second, never more of either.
 /// </summary>
 public sealed class FrameDecoder(StreamHub hub, ILogger logger) : IDisposable
 {
     private readonly Lock _gate = new();
 
-    private (DecodeRate Rate, FrameHandler Handler)[] _subscribers = [];
+    private Subscriber[] _subscribers = [];
 
     /// <summary>The rate actually decoded at, which is the highest anybody asked for.</summary>
-    public DecodeRate Rate => _subscribers.Any(subscriber => subscriber.Rate == DecodeRate.Everything)
-        ? DecodeRate.Everything
-        : DecodeRate.Keyframes;
+    public DecodeRate Rate => _subscribers.Length == 0
+        ? DecodeRate.Keyframes
+        : new DecodeRate(_subscribers.Max(subscriber => subscriber.Rate.FramesPerSecond));
 
     public IDisposable Subscribe(DecodeRate rate, FrameHandler handler)
     {
+        var subscriber = new Subscriber(rate, handler);
+
         lock (_gate)
         {
-            _subscribers = [.. _subscribers, (rate, handler)];
+            _subscribers = [.. _subscribers, subscriber];
         }
 
         return new Subscription(() =>
         {
             lock (_gate)
             {
-                _subscribers = [.. _subscribers.Where(existing => existing.Handler != handler)];
+                _subscribers = [.. _subscribers.Where(existing => !ReferenceEquals(existing, subscriber))];
             }
         });
     }
@@ -110,6 +123,18 @@ public sealed class FrameDecoder(StreamHub hub, ILogger logger) : IDisposable
             return;
         }
 
+        var secondsPerTick = ffmpeg.av_q2d(layout.TimeBase(layout.VideoIndex));
+
+        // The keyframe interval is measured off the stream rather than configured: it is the
+        // sender's, and it decides whether keyframes alone satisfy the rate asked for.
+        long? lastKeyframePts = null;
+        var keyframeInterval = 0d;
+
+        // Set once a packet has been skipped, and cleared by the next keyframe. A decoder handed a
+        // predicted frame whose references it never saw produces garbage rather than an error, so
+        // after any skip the only honest place to resume is a keyframe.
+        var awaitingKeyframe = false;
+
         await foreach (var media in subscription.Packets.ReadAllAsync(cancellationToken))
         {
             if (!ReferenceEquals(hub.Layout, layout))
@@ -118,25 +143,47 @@ public sealed class FrameDecoder(StreamHub hub, ILogger logger) : IDisposable
                 return;
             }
 
-            if (Rate == DecodeRate.Keyframes && !media.IsKeyframe)
+            var rate = Rate;
+
+            if (media.IsKeyframe)
             {
+                if (lastKeyframePts is { } previous && media.Pts > previous)
+                {
+                    keyframeInterval = (media.Pts - previous) * secondsPerTick;
+                }
+
+                lastKeyframePts = media.Pts;
+                awaitingKeyframe = false;
+            }
+            else if (rate.IsKeyframes || awaitingKeyframe || (!rate.IsEverything && KeyframesSuffice(rate, keyframeInterval)))
+            {
+                awaitingKeyframe = true;
                 continue;
             }
 
-            decoder.Decode(media, Publish);
+            decoder.Decode(media, frame => Publish(frame, secondsPerTick));
         }
     }
 
-    private void Publish(IntPtr frame)
-    {
-        foreach (var (rate, handler) in _subscribers)
-        {
-            // Everyone gets every picture the decoder produced. A subscriber asking for keyframes
-            // while something else has raised the rate simply sees more of them, which is free;
-            // filtering it back down would be work for nobody's benefit.
-            _ = rate;
+    /// <summary>
+    /// Whether keyframes arrive at least as often as the rate asks for. Until an interval has been
+    /// measured, which takes two keyframes, they are assumed to: one keyframe interval of fewer
+    /// pictures than asked is the cheaper mistake, and it is made once per connection.
+    /// </summary>
+    private static bool KeyframesSuffice(DecodeRate rate, double keyframeInterval)
+        => keyframeInterval <= 0 || rate.FramesPerSecond * keyframeInterval <= 1.0001;
 
-            handler(frame);
+    private unsafe void Publish(IntPtr frame, double secondsPerTick)
+    {
+        var pts = ((AVFrame*)frame)->pts;
+        var seconds = pts == ffmpeg.AV_NOPTS_VALUE ? double.NaN : pts * secondsPerTick;
+
+        foreach (var subscriber in _subscribers)
+        {
+            if (subscriber.Due(seconds))
+            {
+                subscriber.Handler(frame);
+            }
         }
     }
 
@@ -145,6 +192,48 @@ public sealed class FrameDecoder(StreamHub hub, ILogger logger) : IDisposable
         lock (_gate)
         {
             _subscribers = [];
+        }
+    }
+
+    private sealed class Subscriber(DecodeRate rate, FrameHandler handler)
+    {
+        private double _nextDue = double.NegativeInfinity;
+
+        public DecodeRate Rate { get; } = rate;
+
+        public FrameHandler Handler { get; } = handler;
+
+        /// <summary>
+        /// A keyframe subscriber gets every picture the decoder produced: when something else has
+        /// raised the rate it simply sees more of them, which is free, and filtering back down
+        /// would be work for nobody's benefit. A rated subscriber gets the first picture at or
+        /// past its next due time, measured on the stream's own clock so a decoder that falls
+        /// behind does not bunch pictures up when it catches up.
+        /// </summary>
+        public bool Due(double seconds)
+        {
+            if (Rate.IsKeyframes || Rate.IsEverything || double.IsNaN(seconds))
+            {
+                return true;
+            }
+
+            var interval = 1 / Rate.FramesPerSecond;
+
+            // The clock went backwards, which a reconnect does: start again from here rather than
+            // waiting for the stream to reach a time it may never see again.
+            if (seconds < _nextDue - interval)
+            {
+                _nextDue = seconds;
+            }
+
+            if (seconds < _nextDue)
+            {
+                return false;
+            }
+
+            _nextDue = seconds + interval;
+
+            return true;
         }
     }
 

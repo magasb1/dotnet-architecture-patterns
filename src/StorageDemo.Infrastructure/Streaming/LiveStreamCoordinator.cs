@@ -94,6 +94,66 @@ public sealed class LiveStreamCoordinator(
     public KlvSample? Klv(string name)
         => _local.TryGetValue(name, out var entry) ? entry.Klv.Latest : null;
 
+    public VmtiSample? Detections(string name)
+        => _local.TryGetValue(name, out var entry) ? entry.Detection.Latest : null;
+
+    public bool PostDetections(string name, VmtiSample sample)
+    {
+        if (!_local.TryGetValue(name, out var entry))
+        {
+            return false;
+        }
+
+        entry.Detection.Post(sample);
+
+        return true;
+    }
+
+    public Task<LiveStream?> SetDetectionAsync(string name, bool enabled, int rate, CancellationToken cancellationToken = default)
+        => Publish(name, entry => entry.Detection.Set(enabled, rate), cancellationToken);
+
+    public Task<LiveStream?> ClaimDetectorAsync(string name, string worker, CancellationToken cancellationToken = default)
+        => Publish(
+            name,
+            entry =>
+            {
+                if (!entry.Detection.TryClaim(worker))
+                {
+                    throw new InvalidOperationException($"'{name}' is held by worker {entry.Detection.Worker}.");
+                }
+            },
+            cancellationToken);
+
+    public async Task<bool> ReleaseDetectorAsync(string name, string worker, CancellationToken cancellationToken = default)
+    {
+        var released = false;
+
+        await Publish(name, entry => released = entry.Detection.Release(worker), cancellationToken);
+
+        return released;
+    }
+
+    /// <summary>
+    /// Changes something about a local stream and publishes it at once rather than on the next
+    /// beat, because the caller is answered with the stream as it now stands and a worker lists
+    /// the registry rather than asking the owner. Null when the stream is not here.
+    /// </summary>
+    private async Task<LiveStream?> Publish(string name, Action<LiveStreamEntry> change, CancellationToken cancellationToken)
+    {
+        if (!_local.TryGetValue(name, out var entry))
+        {
+            return null;
+        }
+
+        change(entry);
+
+        var stream = Describe(entry, Interrupted(entry, Silence(entry)) ? LiveStreamState.Interrupted : LiveStreamState.Live);
+
+        await registry.UpsertAsync(stream, cancellationToken);
+
+        return stream;
+    }
+
     /// <summary>
     /// Whether a publisher presenting this name may connect, answered on libsrt's receiver thread.
     ///
@@ -289,7 +349,7 @@ public sealed class LiveStreamCoordinator(
                 // owner built its entry. docs/replica-failover.md claims the start time survives a
                 // move; on one host it did, because the entry was reused, and across two pods it
                 // did not. Observed on k3s; see .scratch/scale-to-1000/cross-pod.md.
-                entry.Resumes(existing.StartedAt);
+                entry.Resumes(existing);
 
                 if (existing.Owner != Owner)
                 {
@@ -717,8 +777,8 @@ public sealed class LiveStreamCoordinator(
             return;
         }
 
-        var silent = entry.Hub.LastPacketAt is { } last ? DateTimeOffset.UtcNow - last : (TimeSpan?)null;
-        var interrupted = !entry.FeedRunning || silent > TimeSpan.FromSeconds(_options.FeedTimeoutSeconds);
+        var silent = Silence(entry);
+        var interrupted = Interrupted(entry, silent);
 
         if (interrupted && Expired(entry, silent))
         {
@@ -741,6 +801,13 @@ public sealed class LiveStreamCoordinator(
     /// </summary>
     private bool Expired(LiveStreamEntry entry, TimeSpan? silent)
         => silent is { } quiet ? quiet > Grace : DateTimeOffset.UtcNow - entry.StartedAt > Grace;
+
+    /// <summary>How long since a packet arrived, or null when none ever has.</summary>
+    private static TimeSpan? Silence(LiveStreamEntry entry)
+        => entry.Hub.LastPacketAt is { } last ? DateTimeOffset.UtcNow - last : null;
+
+    private bool Interrupted(LiveStreamEntry entry, TimeSpan? silent)
+        => !entry.FeedRunning || silent > TimeSpan.FromSeconds(_options.FeedTimeoutSeconds);
 
     private async Task EndAsync(LiveStreamEntry entry, string why)
     {
@@ -784,7 +851,10 @@ public sealed class LiveStreamCoordinator(
             health?.Dropped ?? 0,
             entry.Klv.Present,
             entry.Klv.LastPacketAt,
-            entry.Klv.Classification);
+            entry.Klv.Classification,
+            entry.Detection.Enabled,
+            entry.Detection.Rate,
+            entry.Detection.Worker);
     }
 
     private void RequireAllowed(string url)

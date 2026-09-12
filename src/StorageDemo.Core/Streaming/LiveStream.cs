@@ -88,6 +88,16 @@ public sealed record RecordingStatus(
 /// when the stream carries no KLV or no security set, which a client shows as unmarked; that is a
 /// different thing from an empty marking.
 /// </param>
+/// <param name="DetectionEnabled">
+/// The toggle, set through the owner and read by workers. Detection is per stream and on demand:
+/// a thousand streams ingest and a chosen subset decode (detection-plan.md).
+/// </param>
+/// <param name="DetectionRate">Detections per second while enabled; zero means the worker's default.</param>
+/// <param name="DetectionWorker">
+/// Which worker holds the stream, null when none has claimed it or the one that had it has gone
+/// quiet. A worker claims by writing its name through the owner and renews by writing it again;
+/// nothing pushes work to a worker.
+/// </param>
 public sealed record LiveStream(
     string Name,
     LiveStreamState State,
@@ -109,7 +119,10 @@ public sealed record LiveStream(
     int PacketsDropped = 0,
     bool HasKlv = false,
     DateTimeOffset? KlvAt = null,
-    string? Classification = null);
+    string? Classification = null,
+    bool DetectionEnabled = false,
+    int DetectionRate = 0,
+    string? DetectionWorker = null);
 
 /// <summary>
 /// Where live streams are recorded so every replica can see them, not just the one holding the

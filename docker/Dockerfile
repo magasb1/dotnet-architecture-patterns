@@ -31,7 +31,10 @@ RUN apt-get update \
     && chmod +x /app/ffmpeg/linux-x64/ffmpeg /app/ffmpeg/linux-x64/ffprobe \
     && rm -rf /tmp/ffmpeg.tar.xz /tmp/${FFMPEG_BUILD} /var/lib/apt/lists/*
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+# Shared by the API and the worker: the same FFmpeg, the same user, the same loader path. The
+# worker is a plain host and needs none of ASP.NET, but one base is one set of natives to keep
+# honest, and the difference in size is a few megabytes.
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
 WORKDIR /app
 
 # The bundled FFmpeg links against these at load time, for hardware acceleration it will never use
@@ -55,12 +58,31 @@ RUN useradd --system --uid 64198 --create-home storagedemo \
     && chown -R storagedemo:storagedemo /data
 USER storagedemo
 
-COPY --from=build --chown=storagedemo:storagedemo /app .
-
 # libav is loaded into this process by explicit path, but the libraries then resolve each other
 # through the normal loader, which does not look next to the library it just loaded. Windows does;
 # Linux needs telling. Without this, avformat cannot find avcodec and nothing decodes.
 ENV LD_LIBRARY_PATH=/app/ffmpeg/linux-x64
+
+# The detection worker (detection-plan.md D2), a separate deployment from the ingest pod:
+#   docker build -f docker/Dockerfile --target worker -t storage-demo-worker .
+# It carries the same libav and the ONNX Runtime natives the Infrastructure project references,
+# and no ports: it subscribes to the API and posts back to it. The model is not baked in - it is
+# 108 MB, produced by scripts/fetch-rfdetr.sh, and mounted where Worker__ModelPath points. On a
+# GPU node this base becomes an NVIDIA CUDA runtime image and nothing else changes: the same
+# natives carry the CUDA provider and the runner picks it when it loads (D3).
+FROM build AS build-worker
+COPY src/StorageDemo.Worker/ src/StorageDemo.Worker/
+RUN dotnet publish src/StorageDemo.Worker/StorageDemo.Worker.csproj -c Release -o /worker \
+    && rm -rf /worker/ffmpeg \
+    && cp -r /app/ffmpeg /worker/ffmpeg
+
+FROM base AS worker
+COPY --from=build-worker --chown=storagedemo:storagedemo /worker .
+ENTRYPOINT ["dotnet", "StorageDemo.Worker.dll"]
+
+# Last, so a build that names no target is still the API.
+FROM base AS runtime
+COPY --from=build --chown=storagedemo:storagedemo /app .
 
 # Two cleartext ports, because HTTP/1.1 and HTTP/2 cannot share one without TLS to negotiate
 # with: 8080 serves REST and the health probes, 5080 serves gRPC. TLS terminates at the ingress.

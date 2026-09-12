@@ -53,7 +53,12 @@ internal static class SrtSenders
         ]);
 
     /// <summary>A video-only transport stream of the synthetic picture, at the settings <see cref="StartSender"/> sends.</summary>
-    public static void Render(string path, int seconds)
+    /// <param name="image">
+    /// A still to show for the whole duration instead of the synthetic picture, at its own size
+    /// and near-lossless, so a detector sees the picture the file holds rather than the codec's
+    /// idea of it. This is how a known image becomes a stream.
+    /// </param>
+    public static void Render(string path, int seconds, string? image = null)
     {
         var startInfo = new ProcessStartInfo(Ffmpeg.ExecutablePath)
         {
@@ -62,14 +67,16 @@ internal static class SrtSenders
             CreateNoWindow = true,
         };
 
-        foreach (var argument in new[]
-                 {
+        foreach (var argument in (string[])
+                 [
                      "-hide_banner", "-loglevel", "error", "-y",
-                     "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15",
-                     "-c:v", "mpeg2video", "-b:v", "800k", "-g", "15",
+                     .. image is null
+                         ? (string[])["-f", "lavfi", "-i", "testsrc=size=320x240:rate=15", "-c:v", "mpeg2video", "-b:v", "800k"]
+                         : ["-loop", "1", "-framerate", "15", "-i", image, "-c:v", "mpeg2video", "-q:v", "2", "-pix_fmt", "yuv420p"],
+                     "-g", "15",
                      "-t", seconds.ToString(CultureInfo.InvariantCulture),
                      "-f", "mpegts", path,
-                 })
+                 ])
         {
             startInfo.ArgumentList.Add(argument);
         }

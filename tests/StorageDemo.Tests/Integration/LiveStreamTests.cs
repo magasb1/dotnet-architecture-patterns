@@ -186,6 +186,76 @@ public sealed class LiveStreamTests : IAsyncLifetime
         using var anonymous = _factory.CreateClient();
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync("/api/live")).StatusCode);
+
+        // The detection control plane, both the client's surface and the worker's, is guarded
+        // the same way: the peer routes are how a worker writes into a stream.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PutAsJsonAsync("/api/live/detect/x", new DetectRequest(true, 1))).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync("/api/live/detections/x")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PutAsJsonAsync("/api/live/peer/detector/x", new DetectorClaim("w"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PostAsJsonAsync("/api/live/peer/detections/x", Vmti.Sample(320, 240))).StatusCode);
+    }
+
+    /// <summary>
+    /// The detection control plane on one replica: the toggle round-trips, a worker's claim is a
+    /// lease that a second worker cannot take, a posted VMTI frame is served back typed and raw,
+    /// and clearing the toggle drops the worker so the listing tells the truth at once.
+    /// </summary>
+    [Fact]
+    public async Task Detection_is_toggled_through_the_owner_and_a_worker_claims_it_and_posts_frames()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
+
+        const string name = "live/detected";
+
+        Push(name);
+        Assert.NotNull(await WaitForStreamAsync(name, TimeSpan.FromSeconds(40)));
+
+        var toggled = await _client.PutAsJsonAsync($"/api/live/detect/{name}", new DetectRequest(true, 5));
+        Assert.Equal(HttpStatusCode.OK, toggled.StatusCode);
+
+        var stream = await toggled.Content.ReadFromJsonAsync<LiveStream>();
+        Assert.NotNull(stream);
+        Assert.True(stream.DetectionEnabled);
+        Assert.Equal(5, stream.DetectionRate);
+        Assert.Null(stream.DetectionWorker);
+
+        // Published at once, not on the next beat: a worker lists the registry, not the owner.
+        Assert.True((await Get(name))!.DetectionEnabled);
+
+        // Nothing posted yet is not found, which is the answer the client's probe relies on.
+        Assert.Equal(HttpStatusCode.NotFound, (await _client.GetAsync($"/api/live/detections/{name}")).StatusCode);
+
+        var claimed = await _client.PutAsJsonAsync($"/api/live/peer/detector/{name}", new DetectorClaim("worker-1"));
+        Assert.Equal(HttpStatusCode.OK, claimed.StatusCode);
+        Assert.Equal("worker-1", (await claimed.Content.ReadFromJsonAsync<LiveStream>())!.DetectionWorker);
+
+        // The same worker renews; another is refused while the lease is live.
+        Assert.Equal(HttpStatusCode.OK, (await _client.PutAsJsonAsync($"/api/live/peer/detector/{name}", new DetectorClaim("worker-1"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PutAsJsonAsync($"/api/live/peer/detector/{name}", new DetectorClaim("worker-2"))).StatusCode);
+
+        var sample = Vmti.Sample(320, 240);
+        Assert.Equal(HttpStatusCode.Accepted, (await _client.PostAsJsonAsync($"/api/live/peer/detections/{name}", sample)).StatusCode);
+
+        // A packet that is not the frame beside it is refused: the two answers must agree.
+        var lying = sample with { Raw = [.. sample.Raw[..^1], (byte)(sample.Raw[^1] ^ 1)] };
+        Assert.Equal(HttpStatusCode.BadRequest, (await _client.PostAsJsonAsync($"/api/live/peer/detections/{name}", lying)).StatusCode);
+
+        var served = await _client.GetFromJsonAsync<VmtiSample>($"/api/live/detections/{name}");
+        Assert.NotNull(served);
+        Assert.Equal(sample.Frame, served.Frame with { Detections = sample.Frame.Detections });
+        Assert.Equal(sample.Frame.Detections, served.Frame.Detections);
+        Assert.Equal(Convert.ToHexString(sample.Raw), Convert.ToHexString(served.Raw));
+
+        var cleared = await _client.PutAsJsonAsync($"/api/live/detect/{name}", new DetectRequest(false));
+        Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
+
+        stream = await Get(name);
+        Assert.False(stream!.DetectionEnabled);
+        Assert.Null(stream.DetectionWorker);
+
+        // A release from a worker that no longer holds the stream changes nothing.
+        Assert.Equal(HttpStatusCode.NotFound, (await _client.DeleteAsync($"/api/live/peer/detector/{name}?worker=worker-1")).StatusCode);
     }
 
     [Fact]

@@ -57,12 +57,16 @@ public sealed class LivePeerProxy(
     /// <summary>
     /// Asks the owner a question and reads its JSON answer as a value, for a caller that is not
     /// itself an HTTP response. Null when the owner cannot be reached or answered anything but OK.
+    /// A GET with no body unless told otherwise; the detection toggle is the one control call the
+    /// gRPC surface forwards with a body.
     /// </summary>
     public async Task<T?> FetchAsync<T>(
         LiveStream stream,
         string path,
         string? token,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HttpMethod? method = null,
+        object? body = null)
         where T : class
     {
         if (Address(stream, path) is not { } address)
@@ -70,11 +74,16 @@ public sealed class LivePeerProxy(
             return null;
         }
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, address);
+        using var request = new HttpRequestMessage(method ?? HttpMethod.Get, address);
 
         if (token is { Length: > 0 })
         {
             request.Headers.Add("X-Storage-Token", token);
+        }
+
+        if (body is not null)
+        {
+            request.Content = JsonContent.Create(body);
         }
 
         try
