@@ -111,10 +111,12 @@ public sealed class GrpcApiTests : IAsyncLifetime
         var wrong = await Assert.ThrowsAsync<RpcException>(
             () => _client.RecordLiveAsync(new RecordLiveRequest { Name = "guarded" }, WithToken("nope")).ResponseAsync);
         var listing = await Assert.ThrowsAsync<RpcException>(() => _client.ListLiveAsync(new Empty()).ResponseAsync);
+        var klv = await Assert.ThrowsAsync<RpcException>(() => _client.GetLiveKlvAsync(name).ResponseAsync);
 
         Assert.Equal(StatusCode.Unauthenticated, missing.StatusCode);
         Assert.Equal(StatusCode.Unauthenticated, wrong.StatusCode);
         Assert.Equal(StatusCode.Unauthenticated, listing.StatusCode);
+        Assert.Equal(StatusCode.Unauthenticated, klv.StatusCode);
 
         // The token is a live concern only; documents never asked for one.
         await _client.ListAsync(new Empty());
@@ -150,6 +152,113 @@ public sealed class GrpcApiTests : IAsyncLifetime
 
         Assert.Equal(3, stream.PacketsLost);
         Assert.Equal(7, stream.PacketsDropped);
+    }
+
+    [Fact]
+    public async Task ListLive_carries_klv_presence_and_leaves_an_unmarked_stream_unmarked()
+    {
+        var registry = _factory.Services.GetRequiredService<ILiveStreamRegistry>();
+        var at = new DateTimeOffset(2026, 9, 12, 10, 0, 0, TimeSpan.Zero);
+
+        await registry.UpsertAsync(LiveReplicas.Entry("marked", "elsewhere", DateTimeOffset.UtcNow) with
+        {
+            HasKlv = true,
+            KlvAt = at,
+            Classification = "SECRET",
+        });
+        await registry.UpsertAsync(LiveReplicas.Entry("unmarked", "elsewhere", DateTimeOffset.UtcNow) with
+        {
+            HasKlv = true,
+            KlvAt = at,
+        });
+
+        var listed = await _client.ListLiveAsync(new Empty(), WithToken(Token));
+        var marked = Assert.Single(listed.Streams, s => s.Name == "marked");
+        var unmarked = Assert.Single(listed.Streams, s => s.Name == "unmarked");
+
+        Assert.True(marked.HasKlv);
+        Assert.Equal(at, marked.LastKlvAt.ToDateTimeOffset());
+        Assert.Equal("SECRET", marked.Classification);
+
+        // Null on the record is absent on the wire, not an empty string: a client tells UNMARKED
+        // from a blank marking by asking whether the field is there.
+        Assert.True(unmarked.HasKlv);
+        Assert.False(unmarked.HasClassification);
+    }
+
+    [Fact]
+    public async Task GetLiveKlv_of_an_unknown_stream_reports_not_found()
+    {
+        var failure = await Assert.ThrowsAsync<RpcException>(
+            () => _client.GetLiveKlvAsync(new LiveStreamName { Name = "absent" }, WithToken(Token)).ResponseAsync);
+
+        Assert.Equal(StatusCode.NotFound, failure.StatusCode);
+    }
+
+    /// <summary>
+    /// A transport carrying MISB KLV through the real ingest, read back over gRPC from the owner
+    /// and from a replica that does not own it, which has to fetch the packet from the owner.
+    /// </summary>
+    [Fact]
+    public async Task GetLiveKlv_serves_the_decoded_set_from_the_owner_and_from_a_replica_that_does_not_own_the_stream()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, LiveReplicas.NoLibsrt);
+        Assert.SkipUnless(LiveReplicas.HasSrt(), LiveReplicas.NoFfmpegSrt);
+
+        const string name = "uas/grpc-klv";
+
+        await using var replicas = new LiveReplicas();
+        var aIngest = SrtSenders.FreePort();
+        var a = replicas.Start("pod-a", aIngest);
+        var b = replicas.Start("pod-b", SrtSenders.FreePort(), peer: a);
+
+        var video = Path.Combine(replicas.Root, "video.ts");
+        var carrier = Path.Combine(replicas.Root, "klv.ts");
+        SrtSenders.Render(video, seconds: 90);
+        Misb.WriteTransportStream(video, carrier, Misb.MinimumSet(), intervalSeconds: 0.1);
+
+        replicas.Send(aIngest, name, file: carrier);
+
+        await LiveReplicas.Until(
+            async () => await replicas.Registry.GetAsync(name) is { HasKlv: true, KlvAt: not null },
+            TimeSpan.FromSeconds(40),
+            "A never reported KLV");
+
+        var token = new Metadata { { LiveTokenInterceptor.Header, LiveReplicas.Token } };
+
+        foreach (var host in new[] { a, b })
+        {
+            using var channel = GrpcChannel.ForAddress(
+                host.Server.BaseAddress,
+                new GrpcChannelOptions { HttpHandler = host.Server.CreateHandler() });
+            var client = new StorageDemo.Grpc.Documents.DocumentsClient(channel);
+
+            var listed = await client.ListLiveAsync(new Empty(), token);
+            var stream = Assert.Single(listed.Streams, s => s.Name == name);
+            Assert.True(stream.HasKlv);
+            Assert.Equal(Misb.Known.Classification, stream.Classification);
+
+            var sample = await client.GetLiveKlvAsync(new LiveStreamName { Name = name }, token);
+
+            Assert.Equal(Convert.ToHexString(Misb.MinimumSet()), Convert.ToHexString(sample.Raw.Span));
+            Assert.Equal(StorageDemo.Grpc.KlvAlignment.PresentationTimestamp, sample.Alignment);
+            Assert.True(sample.HasReferencePts);
+            Assert.NotNull(sample.Fields);
+            Assert.Equal(Misb.Known.Timestamp, sample.Fields.Timestamp.ToDateTimeOffset());
+            Assert.Equal(Misb.Known.Classification, sample.Fields.Classification);
+            Assert.Equal(Misb.Known.MissionId, sample.Fields.MissionId);
+            Assert.Equal(Misb.Known.PlatformDesignation, sample.Fields.PlatformDesignation);
+            Assert.Equal(Misb.Known.Version, sample.Fields.Version);
+            Assert.Equal(Misb.Known.SensorLatitude, sample.Fields.SensorLatitude, 1e-6);
+            Assert.Equal(Misb.Known.SensorLongitude, sample.Fields.SensorLongitude, 1e-6);
+            Assert.Equal(Misb.Known.SensorTrueAltitude, sample.Fields.SensorTrueAltitude, 0.5);
+            Assert.Equal(Misb.Known.FrameCenterLatitude, sample.Fields.FrameCenterLatitude, 1e-6);
+            Assert.Equal(Misb.Known.FrameCenterLongitude, sample.Fields.FrameCenterLongitude, 1e-6);
+            Assert.Equal(Misb.Known.SlantRange, sample.Fields.SlantRange, 0.01);
+
+            // The one item outside the minimum set rides along raw, keyed by its tag.
+            Assert.Equal(Misb.Known.TailNumber, sample.Fields.Unparsed[4].ToByteArray());
+        }
     }
 
     /// <summary>

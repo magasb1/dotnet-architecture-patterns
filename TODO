@@ -49,8 +49,8 @@ Scaling to a thousand streams. The plan, the reasoning and the research behind e
 - [x] KLV extraction: an always-attached packet subscriber on the SMPTE KLV index, decoding the ST
       0902 minimum set from ST 0601 with ST 1402 carriage detected, the ST 0102 classification on
       LiveStream and on snapshot and recording metadata, and GET /api/live/klv/{name}
-- [ ] Phase 11, second half: has_klv, last_klv_at and the marking on ListLive (fields 16-25 held),
-      and a GetLiveKlv RPC. Waits on nothing now
+- [x] Phase 11, second half: has_klv, last_klv_at and the marking on ListLive (fields 16-18, 19-25
+      held), and GetLiveKlv forwarding to the owner. The client can now be built entirely on gRPC
 - [x] Phase 11, first half: health on ListLive, the preview proxying to the owner, retention on
       GetProviders, and the token guard. Fields 14-15, 4-5 The client stays gRPC
       by decision; health, marking, a proxied preview and KLV must reach ListLive and friends

@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using StorageDemo.Core.Streaming;
 using StorageDemo.Infrastructure.Streaming;
@@ -47,6 +48,45 @@ public sealed class LivePeerProxy(
                 : null;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            logger.LogWarning(ex, "Could not read from {Address}", address);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Asks the owner a question and reads its JSON answer as a value, for a caller that is not
+    /// itself an HTTP response. Null when the owner cannot be reached or answered anything but OK.
+    /// </summary>
+    public async Task<T?> FetchAsync<T>(
+        LiveStream stream,
+        string path,
+        string? token,
+        CancellationToken cancellationToken)
+        where T : class
+    {
+        if (Address(stream, path) is not { } address)
+        {
+            return null;
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, address);
+
+        if (token is { Length: > 0 })
+        {
+            request.Headers.Add("X-Storage-Token", token);
+        }
+
+        try
+        {
+            using var response = await clients.CreateClient(LiveOptions.PeerClient)
+                .SendAsync(request, cancellationToken);
+
+            return response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<T>(cancellationToken)
+                : null;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
         {
             logger.LogWarning(ex, "Could not read from {Address}", address);
             return null;

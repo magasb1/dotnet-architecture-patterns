@@ -50,6 +50,11 @@ service Documents {
   rpc RecordLive(RecordLiveRequest) returns (LiveRecordingMessage);
 
   rpc StopLiveRecording(LiveStreamName) returns (google.protobuf.Empty);
+
+  // The newest MISB KLV packet on a stream, decoded to the ST 0902 minimum set with the raw bytes
+  // alongside. Answered by the owning replica wherever the call lands, as the REST route is.
+  // NOT_FOUND when the stream is unknown or carries no KLV. Guarded like ListLive.
+  rpc GetLiveKlv(LiveStreamName) returns (LiveKlvMessage);
 }
 
 // Streams are addressed by name. The name is the identity: a feed that drops and reconnects under
@@ -115,10 +120,87 @@ message LiveStreamMessage {
   // look at on one that is listed as live while most of what was sent is missing.
   //
   // Fields are only ever added here, never renumbered or removed: an older client reads zero
-  // for what it does not know and a newer one reads zero from an older server. 16 to 25 are
-  // held for the KLV presence and ST 0102 marking fields.
+  // for what it does not know and a newer one reads zero from an older server. 19 to 25 are
+  // held for further KLV fields.
   int32 packets_lost = 14;
   int32 packets_dropped = 15;
+
+  // Whether the transport carries a MISB KLV metadata stream, and when its last packet arrived.
+  bool has_klv = 16;
+  google.protobuf.Timestamp last_klv_at = 17;
+
+  // The ST 0102 marking from the newest KLV packet, on the list because a wall of a thousand
+  // tiles has to show its markings without a thousand calls. Absent when the stream carries no
+  // KLV or no security set; a client renders absence as UNMARKED, never as blank, because a
+  // picture without a marking is the failure the marking exists to prevent. Absent and empty are
+  // different answers, which is why this is optional rather than a plain string.
+  optional string classification = 18;
+}
+
+// How a KLV packet is tied to the pictures, per MISB ST 1402.2's two carriage modes.
+enum KlvAlignment {
+  KLV_ALIGNMENT_UNSPECIFIED = 0;
+
+  // Synchronous carriage: the PES carried a presentation timestamp, so reference_pts is on the
+  // video's clock and a frame is matched by comparing the two.
+  KLV_ALIGNMENT_PRESENTATION_TIMESTAMP = 1;
+
+  // Asynchronous carriage: no PES timestamp, so the only clock is ST 0601 tag 2 and a frame is
+  // matched against its own ST 0604 or ST 0603 time. Less trustworthy, and said so.
+  KLV_ALIGNMENT_TIMESTAMP = 2;
+}
+
+// The MISB ST 0902 minimum set decoded from one ST 0601 packet. Angles are degrees, distances
+// metres, latitude and longitude WGS84. Every field is optional because null is an answer: the
+// packet did not carry the item, carried it at the wrong length, or sent the standard's error
+// value, and a client must not print zero for any of those.
+message Misb0601Message {
+  // Tag 2, the time every item in this packet describes.
+  google.protobuf.Timestamp timestamp = 1;
+  optional string mission_id = 2;
+  optional double platform_heading = 3;
+  optional double platform_pitch = 4;
+  optional double platform_roll = 5;
+  optional string platform_designation = 6;
+  optional string image_source_sensor = 7;
+  optional string image_coordinate_system = 8;
+  optional double sensor_latitude = 9;
+  optional double sensor_longitude = 10;
+  optional double sensor_true_altitude = 11;
+  optional double sensor_horizontal_fov = 12;
+  optional double sensor_vertical_fov = 13;
+  optional double sensor_relative_azimuth = 14;
+  optional double sensor_relative_elevation = 15;
+  optional double sensor_relative_roll = 16;
+  optional double slant_range = 17;
+  optional double frame_center_latitude = 18;
+  optional double frame_center_longitude = 19;
+  optional double frame_center_elevation = 20;
+
+  // The ST 0102 marking from the nested security set. Absent means UNMARKED, as on the list.
+  optional string classification = 21;
+
+  // Tag 65, which revision of ST 0601 the sender wrote to.
+  optional int32 version = 22;
+
+  // Every item outside the minimum set, raw, keyed by ST 0601 tag.
+  map<int32, bytes> unparsed = 23;
+}
+
+// One KLV packet as received, with what was decoded from it: the shape the REST route serves as
+// JSON, field for field.
+message LiveKlvMessage {
+  // The packet's presentation time on the stream's reference clock; absent under asynchronous
+  // carriage.
+  optional int64 reference_pts = 1;
+  KlvAlignment alignment = 2;
+  google.protobuf.Timestamp received_at = 3;
+
+  // Absent when the packet was not an ST 0601 local set at all.
+  Misb0601Message fields = 4;
+
+  // The packet exactly as it arrived, for whatever the fields leave out.
+  bytes raw = 5;
 }
 
 message LiveListResponse {

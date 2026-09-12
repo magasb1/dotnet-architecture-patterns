@@ -106,8 +106,12 @@ internal sealed class LiveReplicas : IAsyncDisposable
         return client;
     }
 
-    public Process Send(int ingestPort, string name) => Track(
-        SrtSenders.StartSender(ingestPort, $"#!::r={name},m=publish"));
+    /// <summary>Scratch space that goes with the fixture, for a file a sender is to push.</summary>
+    public string Root => _root;
+
+    /// <inheritdoc cref="SrtSenders.StartSender" path="/param[@name='file']"/>
+    public Process Send(int ingestPort, string name, string? file = null) => Track(
+        SrtSenders.StartSender(ingestPort, $"#!::r={name},m=publish", file: file));
 
     /// <summary>A player on a replica's consumption port, which is <c>ingestPort + 1</c>.</summary>
     public Process Watch(int ingestPort, string name, double from = 0) => Track(

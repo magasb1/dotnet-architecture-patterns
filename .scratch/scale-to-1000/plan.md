@@ -55,7 +55,9 @@ only a plan.
 | Phase 1, own the listener | Built, and passing on Linux and Windows |
 | Phase 1b, the name lock | Built, and passing on Windows. Never run on real pods |
 | Phase 2, latency | Built, and passing on Windows |
-| Phase 3 through 8 | Planned only |
+| Phase 3, the HTTP hop | Built, penalty measured gone |
+| Phase 9, 10, 11 | Built: health, retention, and the gRPC surface at parity with REST |
+| Phase 4, 5, 6, 8 | Planned only |
 
 **The baseline changed the plan rather than confirming it.** Four things, all in `baseline.md`
 and folded into the phases below: Phase 4's rule for sizing a pod has no solution and is rewritten;

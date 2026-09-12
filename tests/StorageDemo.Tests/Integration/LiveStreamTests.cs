@@ -622,7 +622,7 @@ public sealed class LiveStreamTests : IAsyncLifetime
         var video = Path.Combine(_root, "video.ts");
         var carrier = Path.Combine(_root, "klv.ts");
 
-        Render(video, seconds: 90);
+        SrtSenders.Render(video, seconds: 90);
         Misb.WriteTransportStream(video, carrier, Misb.MinimumSet(), intervalSeconds: 0.1);
 
         Push(name, file: carrier);
@@ -678,40 +678,6 @@ public sealed class LiveStreamTests : IAsyncLifetime
         var documents = await _client.GetFromJsonAsync<List<DocumentResponse>>("/api/documents");
 
         return documents?.FirstOrDefault(d => d.Id == id);
-    }
-
-    /// <summary>A video-only transport stream of the synthetic picture, at the same settings <see cref="Push"/> sends.</summary>
-    private static void Render(string path, int seconds)
-    {
-        var startInfo = new ProcessStartInfo(Ffmpeg.ExecutablePath)
-        {
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-
-        foreach (var argument in new[]
-                 {
-                     "-hide_banner", "-loglevel", "error", "-y",
-                     "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15",
-                     "-c:v", "mpeg2video", "-b:v", "800k", "-g", "15",
-                     "-t", seconds.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                     "-f", "mpegts", path,
-                 })
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        if (!OperatingSystem.IsWindows())
-        {
-            startInfo.Environment["LD_LIBRARY_PATH"] = Ffmpeg.Directory;
-        }
-
-        using var process = Process.Start(startInfo)!;
-        var complaints = process.StandardError.ReadToEnd();
-        process.WaitForExit();
-
-        Assert.True(process.ExitCode == 0, $"ffmpeg could not render the video: {complaints}");
     }
 
     /// <summary>How many seconds of media the file holds, as the bundled ffprobe reads it.</summary>

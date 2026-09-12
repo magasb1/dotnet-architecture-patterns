@@ -218,11 +218,23 @@ public sealed class DocumentsGrpcService(
                 Manual = stream.Manual,
                 PacketsLost = stream.PacketsLost,
                 PacketsDropped = stream.PacketsDropped,
+                HasKlv = stream.HasKlv,
             };
 
             if (stream.Recording is { } recording)
             {
                 message.Recording = ToMessage(recording);
+            }
+
+            if (stream.KlvAt is { } klvAt)
+            {
+                message.LastKlvAt = Timestamp.FromDateTimeOffset(klvAt);
+            }
+
+            // Null stays absent: unmarked is not the same answer as an empty marking.
+            if (stream.Classification is { } classification)
+            {
+                message.Classification = classification;
             }
 
             response.Streams.Add(message);
@@ -302,6 +314,104 @@ public sealed class DocumentsGrpcService(
         await live.StopRecordingAsync(request.Name, context.CancellationToken);
 
         return new Empty();
+    }
+
+    public override async Task<LiveKlvMessage> GetLiveKlv(LiveStreamName request, ServerCallContext context)
+    {
+        RequireLive();
+
+        var sample = live.Owns(request.Name)
+            ? live.Klv(request.Name)
+            : await FetchFromOwnerAsync(request.Name, context);
+
+        return sample is null
+            ? throw new RpcException(new Status(StatusCode.NotFound, "No KLV on that stream."))
+            : ToMessage(sample);
+    }
+
+    /// <summary>
+    /// Only the owner has the packets, so a call landing elsewhere is routed to it over the REST
+    /// route, as the controller's own forwarding does. The token the caller presented travels
+    /// with it, because the owner guards that route too.
+    /// </summary>
+    private async Task<KlvSample?> FetchFromOwnerAsync(string name, ServerCallContext context)
+    {
+        var stream = await live.GetAsync(name, context.CancellationToken);
+
+        return stream is null
+            ? null
+            : await peers.FetchAsync<KlvSample>(
+                stream,
+                $"api/live/klv/{name}",
+                context.RequestHeaders.GetValue(LiveTokenInterceptor.Header),
+                context.CancellationToken);
+    }
+
+    private static LiveKlvMessage ToMessage(KlvSample sample)
+    {
+        var message = new LiveKlvMessage
+        {
+            Alignment = sample.Alignment switch
+            {
+                Core.Streaming.KlvAlignment.PresentationTimestamp => StorageDemo.Grpc.KlvAlignment.PresentationTimestamp,
+                Core.Streaming.KlvAlignment.Timestamp => StorageDemo.Grpc.KlvAlignment.Timestamp,
+                _ => StorageDemo.Grpc.KlvAlignment.Unspecified,
+            },
+            ReceivedAt = Timestamp.FromDateTimeOffset(sample.ReceivedAt),
+            Raw = ByteString.CopyFrom(sample.Raw),
+        };
+
+        if (sample.ReferencePts is { } pts)
+        {
+            message.ReferencePts = pts;
+        }
+
+        if (sample.Fields is { } set)
+        {
+            message.Fields = ToMessage(set);
+        }
+
+        return message;
+    }
+
+    /// <summary>
+    /// Every null stays absent rather than becoming zero: an error indicator from the sensor and
+    /// a platform on the equator are different answers, and this is the one place they could be
+    /// confused.
+    /// </summary>
+    private static Misb0601Message ToMessage(Misb0601Set set)
+    {
+        var message = new Misb0601Message();
+
+        if (set.Timestamp is { } timestamp) message.Timestamp = Timestamp.FromDateTimeOffset(timestamp);
+        if (set.MissionId is { } missionId) message.MissionId = missionId;
+        if (set.PlatformHeading is { } heading) message.PlatformHeading = heading;
+        if (set.PlatformPitch is { } pitch) message.PlatformPitch = pitch;
+        if (set.PlatformRoll is { } roll) message.PlatformRoll = roll;
+        if (set.PlatformDesignation is { } designation) message.PlatformDesignation = designation;
+        if (set.ImageSourceSensor is { } sensor) message.ImageSourceSensor = sensor;
+        if (set.ImageCoordinateSystem is { } coordinates) message.ImageCoordinateSystem = coordinates;
+        if (set.SensorLatitude is { } latitude) message.SensorLatitude = latitude;
+        if (set.SensorLongitude is { } longitude) message.SensorLongitude = longitude;
+        if (set.SensorTrueAltitude is { } altitude) message.SensorTrueAltitude = altitude;
+        if (set.SensorHorizontalFov is { } horizontalFov) message.SensorHorizontalFov = horizontalFov;
+        if (set.SensorVerticalFov is { } verticalFov) message.SensorVerticalFov = verticalFov;
+        if (set.SensorRelativeAzimuth is { } azimuth) message.SensorRelativeAzimuth = azimuth;
+        if (set.SensorRelativeElevation is { } elevation) message.SensorRelativeElevation = elevation;
+        if (set.SensorRelativeRoll is { } relativeRoll) message.SensorRelativeRoll = relativeRoll;
+        if (set.SlantRange is { } range) message.SlantRange = range;
+        if (set.FrameCenterLatitude is { } centreLatitude) message.FrameCenterLatitude = centreLatitude;
+        if (set.FrameCenterLongitude is { } centreLongitude) message.FrameCenterLongitude = centreLongitude;
+        if (set.FrameCenterElevation is { } centreElevation) message.FrameCenterElevation = centreElevation;
+        if (set.Classification is { } classification) message.Classification = classification;
+        if (set.Version is { } version) message.Version = version;
+
+        foreach (var (tag, value) in set.Unparsed)
+        {
+            message.Unparsed[tag] = ByteString.CopyFrom(value);
+        }
+
+        return message;
     }
 
     private void RequireLive()

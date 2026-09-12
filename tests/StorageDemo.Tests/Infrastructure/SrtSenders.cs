@@ -34,17 +34,57 @@ internal static class SrtSenders
     /// Further SRT options for the caller, written as they would be in the URL, for a test about
     /// what the two ends negotiate. FFmpeg's time options are microseconds.
     /// </param>
-    public static Process StartSender(int port, string? streamId, string? callerOptions = null)
+    /// <param name="file">
+    /// A transport stream to push as it is, every stream in it, instead of a synthetic picture.
+    /// This is how a stream carrying something the command line cannot synthesise, such as KLV,
+    /// reaches the service.
+    /// </param>
+    public static Process StartSender(int port, string? streamId, string? callerOptions = null, string? file = null)
         => Start(
         [
             "-hide_banner", "-loglevel", "error",
             // Paced at wall-clock speed: SRT is a connection, and a burst that ends at once looks
             // to the far end like a peer hanging up mid-handshake.
             "-re",
-            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15",
-            "-c:v", "mpeg2video", "-b:v", "600k", "-g", "15",
+            .. file is null
+                ? (string[])["-f", "lavfi", "-i", "testsrc=size=320x240:rate=15", "-c:v", "mpeg2video", "-b:v", "600k", "-g", "15"]
+                : ["-i", file, "-map", "0", "-c", "copy"],
             "-f", "mpegts", Target(port, streamId, callerOptions),
         ]);
+
+    /// <summary>A video-only transport stream of the synthetic picture, at the settings <see cref="StartSender"/> sends.</summary>
+    public static void Render(string path, int seconds)
+    {
+        var startInfo = new ProcessStartInfo(Ffmpeg.ExecutablePath)
+        {
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        foreach (var argument in new[]
+                 {
+                     "-hide_banner", "-loglevel", "error", "-y",
+                     "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15",
+                     "-c:v", "mpeg2video", "-b:v", "800k", "-g", "15",
+                     "-t", seconds.ToString(CultureInfo.InvariantCulture),
+                     "-f", "mpegts", path,
+                 })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            startInfo.Environment["LD_LIBRARY_PATH"] = Ffmpeg.Directory;
+        }
+
+        using var process = Process.Start(startInfo)!;
+        var complaints = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        Assert.True(process.ExitCode == 0, $"ffmpeg could not render the video: {complaints}");
+    }
 
     /// <summary>
     /// A caller that connects and then waits to be sent something. It is also the only way to get a
