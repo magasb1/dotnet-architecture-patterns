@@ -15,3 +15,6 @@ ffmpeg/
 scratch/
 # Agent worktrees, created per isolated subagent run.
 .claude/
+
+# Test run artefacts, written by "dotnet test --logger trx".
+TestResults/
