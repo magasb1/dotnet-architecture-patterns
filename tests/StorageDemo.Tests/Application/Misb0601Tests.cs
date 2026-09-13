@@ -126,6 +126,15 @@ public sealed class Misb0601Tests
         Assert.Equal(348, SensorGeometry.NorthInImage(10, 2, null)!.Value, 6);
     }
 
+    [Theory]
+    [InlineData(0, 0, 0)]
+    [InlineData(90, 0, 270)]
+    [InlineData(288.58, 0, 71.42)]
+    [InlineData(270, 20, 70)]
+    public void North_in_the_image_can_use_an_absolute_look_bearing(
+        double bearing, double roll, double expected)
+        => Assert.Equal(expected, SensorGeometry.NorthInImage(bearing, roll)!.Value, 2);
+
     /// <summary>Due east along the equator, where the great circle and the rhumb line agree.</summary>
     [Fact]
     public void The_bearing_between_two_positions_is_the_one_a_compass_would_read()

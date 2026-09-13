@@ -49,8 +49,16 @@ public static class SensorGeometry
     /// </summary>
     public static double? NorthInImage(double? platformHeading, double? sensorRelativeAzimuth, double? sensorRelativeRoll)
         => SensorBearing(platformHeading, sensorRelativeAzimuth) is { } bearing
-            ? Wrap(-(bearing + (sensorRelativeRoll ?? 0)))
+            ? NorthInImage(bearing, sensorRelativeRoll)
             : null;
+
+    /// <summary>
+    /// Where true north lies in the displayed image when the sensor's absolute look bearing is
+    /// already known. A bearing derived from the sensor and frame-centre positions is preferable
+    /// to tag 5 + tag 18: it includes the effect of platform pitch and roll on an oblique camera.
+    /// </summary>
+    public static double? NorthInImage(double? sensorBearing, double? sensorRelativeRoll)
+        => sensorBearing is { } bearing ? Wrap(-(bearing + (sensorRelativeRoll ?? 0))) : null;
 
     /// <summary>
     /// The initial great-circle bearing from one WGS84 position to another, degrees clockwise from
