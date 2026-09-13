@@ -86,7 +86,8 @@ only a plan.
 | Phase 2, latency | Built, and passing on Windows |
 | Phase 3, the HTTP hop | Built, penalty measured gone |
 | Phase 9, 10, 11 | Built: health, retention, and the gRPC surface at parity with REST |
-| Phase 4, 5, 6, 8 | Planned only |
+| Phase 6, pulled streams that survive their pod | Built, with forwarding and an operator page. See `gateway-plan.md` |
+| Phase 4, 5, 8 | Planned only |
 
 **The baseline changed the plan rather than confirming it.** Four things, all in `baseline.md`
 and folded into the phases below: Phase 4's rule for sizing a pod has no solution and is rewritten;
@@ -127,6 +128,16 @@ come back as real bytes. The two defects it found are fixed and described in the
 shutdown was worse for a viewer than a crash, and a stream that moved replicas got a new start
 time. Phase 1b's real cost on a force-kill is about one second, one refusal and one retry, not the
 several this plan guessed.
+
+**Phase 6 landed with two features it did not ask for, and reversed one of its own decisions.**
+Configured sources, forwarding to other servers, and an operator page at `/streaming` are built and
+committed; `gateway-plan.md` has the design. The reversal: standing instructions are a second store
+rather than fields on the stream registry, because the registry is emptied as streams end and
+configuration has to survive exactly that. Proven end to end on this machine - a source configured
+over REST was picked up by the heartbeat, pulled a real transport stream, forwarded it to a second
+socket, and an independent listener read 400 packets beginning with the sync byte while the page
+showed the row live with one of one forward connected. Never run on more than one replica, so the
+claim race that lets a pull survive its pod is reasoned rather than observed.
 
 **One number moves Phase 3 up the list.** The SRT relay roughly doubles a viewer's join: 1.8
 seconds pulling from the owner against 3.8 relayed. Phase 3's target was under ten milliseconds of

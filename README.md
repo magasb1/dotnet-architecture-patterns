@@ -300,6 +300,11 @@ firewall statement stays short enough to be useful. Finished recordings and snap
 and stay on the API. Ingest is a range rather than a port when `IngestPortCount` is raised, for a
 reason that is about one receive thread per bound port and is below.
 
+One thing can add a fourth: a forward configured in SRT listener mode opens a port of the
+operator's choosing and waits to be pulled from. That is the only way this service ever listens on
+anything the table above does not name, and it happens only because somebody configured it. A
+forward in any other shape dials out and opens nothing.
+
 The API port carries one thing that is not an API call: a viewer that lands on a replica which does
 not own its stream is served from the owner over HTTP, pod to pod. Media still never reaches a
 player that way — the player is on the consumption port either way — so this changes nothing in a
@@ -451,6 +456,81 @@ decode is nothing next to being twelve seconds wrong about the moment somebody m
 
 **A stream never becomes a document by itself.** Documents come only from snapshots and recordings
 someone asked for, which is what makes unattended ingest safe to leave running.
+
+### Configured sources, forwarding, and the operator page
+
+Everything above is about a stream that already exists. This is about telling the service which
+streams should exist, and where else to send them. It is the shape Haivision Media Gateway has:
+a list of sources, each with its local output, each able to push on to somewhere further.
+
+A **source** is configuration. A **stream** is a reading. That distinction runs through the whole
+feature and is worth holding on to: a stream appears when bytes arrive, is removed when they stop,
+and belongs to the replica holding the socket, while a source is what an operator typed and
+survives the stream ending, the pod dying and the service restarting. They live in separate stores
+for exactly that reason.
+
+```
+GET    /api/live/sources              every configured source, joined with what it is doing
+GET    /api/live/sources/{name}       one of them
+PUT    /api/live/sources/{name}       create or replace the whole row, forwards included
+DELETE /api/live/sources/{name}       forget it
+```
+
+The row is the unit. Forwards are part of it rather than a sub-resource, because two ways to
+change one thing drift apart. A forward saved without an identifier is given one and keeps it
+across later edits, so changing a URL edits that forward rather than replacing it.
+
+The same three calls are on the proto as `ListLiveSources`, `SaveLiveSource` and
+`DeleteLiveSource`, and forward state reaches the desktop client on the stream message.
+
+**A pull source is picked up by whichever replica gets there first.** There is no scheduler and no
+assignment: every replica sees the same list on its heartbeat and races for whatever is not live,
+and the distributed lock that already serialises a name claim is what makes that safe. Losing is
+the normal outcome and is not an error. A pulled stream therefore survives its pod, which is what
+`POST /api/live/manual` never did.
+
+**Forwarding pushes a copy somewhere else.** Three shapes, and one field distinguishes them,
+because libav opens all of them from a URL:
+
+```
+srt://host:9000?streamid=name      dial the far end and push to it
+srt://0.0.0.0:9100?mode=listener   wait here for the far end to pull
+udp://239.0.0.1:5000?ttl=2         push, no handshake, no recovery
+rtp://host:5004                    the same, in RTP
+```
+
+Query options are libav's and pass straight through, so latency, passphrase and stream identifier
+need no fields of their own. The scheme also picks the container: RTP carries MPEG-TS in the RTP
+muxer, everything else is plain MPEG-TS.
+
+Forward targets are held to the same `Live__AllowedSchemes` allowlist that pulled inputs are. It
+has always stopped "create a stream" becoming "read this local file"; a forward is the same hazard
+pointed the other way.
+
+**Forwards need no arrangement of their own.** They hang off the local stream entry, so a name
+that moves to another pod is reconciled there on the next beat while the pod that lost it disposes
+its entry and stops its copies. A forward lease would be a second claim to keep in step with the
+first, and the failure it would prevent — two pods pushing one stream to one far end — is already
+prevented by the name claim, because only one pod has the bytes.
+
+**Switching a source off stops what this service started, and only that.** A pull already running
+is dropped and every forward stops. A stream an encoder is pushing is untouched: stopping an
+encoder is the name lock's business, and ending a feed is what `DELETE /api/live/stream/{name}` is
+for. Deleting a source is likewise not a licence to yank a live feed away from its viewers — it
+stops the service re-establishing it, nothing more.
+
+**The page is at `/streaming`.** A table of sources with state, throughput, the local SRT output
+with a copy button, and a forward indicator; expand a row for each forward's URL, state, bytes and
+last error. It is Blazor rendering inside the API process, so it calls the store and the stream
+service directly rather than its own REST API.
+
+It is deliberately only sources and forwards. Recording, snapshots, detection and KLV are the
+desktop client's, and building them twice would double the work to no end.
+
+It is guarded by `Live__Token` like every other live route, because a page that changes what the
+service dials out to is not a convenience to leave open. With no token configured it behaves
+exactly as the REST routes do in that case. With `Live__Enabled` false it says live streaming is
+switched off rather than showing an empty table that looks broken.
 
 ### How it is built
 
