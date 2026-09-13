@@ -532,6 +532,15 @@ service dials out to is not a convenience to leave open. With no token configure
 exactly as the REST routes do in that case. With `Live__Enabled` false it says live streaming is
 switched off rather than showing an empty table that looks broken.
 
+**Expanding a push source shows what libsrt itself says about the link**: bandwidth estimate,
+actual receive rate, round trip time, retransmits, the negotiated latency window, and a running
+count of anything that failed to decrypt. It comes from the same `srt_bstats` read the loss and
+drop counters already used, so it costs nothing new to collect. It is only ever present for a
+push source - an encoder connecting to the ingest port, where this service holds the socket
+directly. A pulled stream and every forward open their connection through libav instead, which
+has no such call to make, so the panel says so rather than showing zeroes that would read as a
+clean bill of health.
+
 ### How it is built
 
 One demultiplexer per stream feeds one hub, and packets flow one way through it.
