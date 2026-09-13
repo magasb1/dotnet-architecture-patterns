@@ -93,6 +93,11 @@ public sealed record RecordingStatus(
 /// a thousand streams ingest and a chosen subset decode (detection-plan.md).
 /// </param>
 /// <param name="DetectionRate">Detections per second while enabled; zero means the worker's default.</param>
+/// <param name="Forwards">
+/// What each configured forward is doing on the owning replica, empty when none is configured.
+/// Here rather than on <see cref="LiveSource"/> because a forward only exists where the bytes are,
+/// and this record is already the answer to "what is this stream doing, on whichever pod has it".
+/// </param>
 /// <param name="DetectionWorker">
 /// Which worker holds the stream, null when none has claimed it or the one that had it has gone
 /// quiet. A worker claims by writing its name through the owner and renews by writing it again;
@@ -122,7 +127,8 @@ public sealed record LiveStream(
     string? Classification = null,
     bool DetectionEnabled = false,
     int DetectionRate = 0,
-    string? DetectionWorker = null);
+    string? DetectionWorker = null,
+    IReadOnlyList<ForwardStatus>? Forwards = null);
 
 /// <summary>
 /// Where live streams are recorded so every replica can see them, not just the one holding the
