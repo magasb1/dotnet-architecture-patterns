@@ -329,30 +329,7 @@ public sealed class ForwardTargetAllowlistTests : IAsyncDisposable
 
         const string name = "allowlisted-camera";
 
-        var sources = new FakeLiveSourceStore();
-        var registry = new InMemoryLiveStreamRegistry();
-
-        var options = Options.Create(new LiveOptions
-        {
-            NodeName = "pod-a",
-            // A second rather than thirty, so the pulled input this stream needs in order to exist
-            // gives up promptly and the test is not held open by a port nothing is sending to.
-            ManualInputOptions = new Dictionary<string, string> { ["timeout"] = "1000000" },
-        });
-
-        var coordinator = new LiveStreamCoordinator(
-            new StreamDemuxer(options, NullLogger<StreamDemuxer>.Instance),
-            registry,
-            sources,
-            new InMemoryLock(),
-            new FakeMediaAnalyzer(),
-            _services.GetRequiredService<IServiceScopeFactory>(),
-            options,
-            Options.Create(new MediaOptions()),
-            new LiveMetrics(),
-            NullLogger<LiveStreamCoordinator>.Instance);
-
-        _coordinator = coordinator;
+        var (coordinator, sources) = Coordinator();
 
         await coordinator.CreateManualAsync(name, $"udp://127.0.0.1:{SrtSenders.FreePort()}");
 
@@ -376,6 +353,95 @@ public sealed class ForwardTargetAllowlistTests : IAsyncDisposable
         Assert.Equal(0, forward.Bytes);
         Assert.NotNull(forward.Error);
         Assert.Contains("file", forward.Error);
+    }
+
+    /// <summary>
+    /// Parking a source stops this service dialling out.
+    ///
+    /// It is the only reading of "disabled" an operator who has just switched a source off will
+    /// accept. Leaving the pull running would make the toggle mean "stop trying again later", and
+    /// the row would sit there disabled while its camera carried on arriving.
+    /// </summary>
+    [Fact]
+    public async Task A_pulled_stream_stops_when_its_source_is_switched_off()
+    {
+        Assert.SkipUnless(Ffmpeg.IsPresent, "No FFmpeg. Run scripts/fetch-ffmpeg.sh.");
+
+        FfmpegLibrary.EnsureLoaded();
+
+        const string name = "parked-camera";
+
+        var (coordinator, sources) = Coordinator();
+
+        await coordinator.CreateManualAsync(name, $"udp://127.0.0.1:{SrtSenders.FreePort()}");
+
+        sources.Save(new LiveSource(name, "udp://127.0.0.1:1", Enabled: true, [], DateTimeOffset.UtcNow));
+        await coordinator.TickAsync(CancellationToken.None);
+
+        Assert.True(coordinator.Owns(name));
+
+        sources.Save(new LiveSource(name, "udp://127.0.0.1:1", Enabled: false, [], DateTimeOffset.UtcNow));
+        await coordinator.TickAsync(CancellationToken.None);
+
+        Assert.False(coordinator.Owns(name));
+        Assert.Null(await coordinator.GetAsync(name));
+    }
+
+    /// <summary>
+    /// Deliberately narrow, in the direction that matters: an absent row sweeps nothing.
+    ///
+    /// A stream created straight through the manual endpoint has no configured row at all, and
+    /// deleting a configuration is not a licence to yank a live feed away from its viewers. If this
+    /// ever fails, every manually created stream disappears two seconds after it starts.
+    /// </summary>
+    [Fact]
+    public async Task A_pulled_stream_with_no_configured_row_is_left_alone()
+    {
+        Assert.SkipUnless(Ffmpeg.IsPresent, "No FFmpeg. Run scripts/fetch-ffmpeg.sh.");
+
+        FfmpegLibrary.EnsureLoaded();
+
+        const string name = "unconfigured-camera";
+
+        var (coordinator, _) = Coordinator();
+
+        await coordinator.CreateManualAsync(name, $"udp://127.0.0.1:{SrtSenders.FreePort()}");
+
+        await coordinator.TickAsync(CancellationToken.None);
+
+        Assert.True(coordinator.Owns(name));
+    }
+
+    /// <summary>
+    /// A real coordinator over fakes, kept for disposal. One per test: the coordinator owns threads
+    /// and a lifetime token, and sharing one between tests would let a stream from the first decide
+    /// what the second sees.
+    /// </summary>
+    private (LiveStreamCoordinator Coordinator, FakeLiveSourceStore Sources) Coordinator()
+    {
+        var sources = new FakeLiveSourceStore();
+
+        var options = Options.Create(new LiveOptions
+        {
+            NodeName = "pod-a",
+            // A second rather than thirty, so the pulled input a stream needs in order to exist
+            // gives up promptly and the test is not held open by a port nothing is sending to.
+            ManualInputOptions = new Dictionary<string, string> { ["timeout"] = "1000000" },
+        });
+
+        _coordinator = new LiveStreamCoordinator(
+            new StreamDemuxer(options, NullLogger<StreamDemuxer>.Instance),
+            new InMemoryLiveStreamRegistry(),
+            sources,
+            new InMemoryLock(),
+            new FakeMediaAnalyzer(),
+            _services.GetRequiredService<IServiceScopeFactory>(),
+            options,
+            Options.Create(new MediaOptions()),
+            new LiveMetrics(),
+            NullLogger<LiveStreamCoordinator>.Instance);
+
+        return (_coordinator, sources);
     }
 
     public async ValueTask DisposeAsync()

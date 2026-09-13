@@ -928,7 +928,34 @@ public sealed class LiveStreamCoordinator(
             return;
         }
 
-        await ReconcileForwardsAsync(entry, cancellationToken);
+        // ponytail: one store read per stream per beat, which at a thousand streams is a thousand
+        // more round trips every two seconds on top of the thousand the registry already costs
+        // here. The store says of itself that it is read-heavy and rarely written, so both
+        // implementations can serve this from memory; if one ever cannot, read the whole list once
+        // per beat beside RefreshKnownAsync and reconcile every entry from that copy.
+        var source = await sources.GetAsync(entry.Name, cancellationToken);
+
+        if (entry.Manual && source is { Enabled: false })
+        {
+            // Parking a source stops this service dialling out, which is the only reading of
+            // "disabled" an operator who has just switched one off will accept. Leaving the pull
+            // running would make the toggle mean "stop trying again later", and the row would sit
+            // there disabled while its camera carried on arriving.
+            //
+            // Deliberately narrow, in two ways. Only a pulled stream: a pushed one is an encoder's
+            // to stop, and refusing it is the name lock's business rather than this toggle's. And
+            // only when the row exists and says false: an absent row must not sweep anything,
+            // because a stream created straight through the manual endpoint has no row at all, and
+            // because deleting a configuration is not a licence to yank a live feed from its
+            // viewers - that is the stop endpoint, asked for explicitly.
+            _local.TryRemove(entry.Name, out _);
+
+            await EndAsync(entry, "its source was switched off");
+
+            return;
+        }
+
+        ReconcileForwards(entry, source);
 
         await registry.UpsertAsync(
             Describe(entry, interrupted ? LiveStreamState.Interrupted : LiveStreamState.Live),
@@ -946,17 +973,13 @@ public sealed class LiveStreamCoordinator(
     /// the failure it would exist to prevent - two pods pushing one stream to one far end - is
     /// already prevented by the name claim, because only one pod has the bytes.
     /// </summary>
-    /// <remarks>
-    /// ponytail: one store read per stream per beat, which at a thousand streams is a thousand more
-    /// round trips every two seconds on top of the thousand the registry already costs here. The
-    /// store says of itself that it is read-heavy and rarely written, so both implementations can
-    /// serve this from memory; if one ever cannot, read the whole list once per beat beside
-    /// <see cref="RefreshKnownAsync"/> and reconcile every entry from that copy.
-    /// </remarks>
-    private async Task ReconcileForwardsAsync(LiveStreamEntry entry, CancellationToken cancellationToken)
+    /// <param name="source">
+    /// The configured row for this name, read once by the caller because the same read also decides
+    /// whether a parked pull should still be running. Null when nothing was configured, which is the
+    /// ordinary case for a stream an encoder simply pushed.
+    /// </param>
+    private void ReconcileForwards(LiveStreamEntry entry, LiveSource? source)
     {
-        var source = await sources.GetAsync(entry.Name, cancellationToken);
-
         // A disabled source silences its forwards without forgetting them, which is what parking a
         // source means; an absent one has nothing to say about a stream an encoder simply pushed.
         var desired = source is { Enabled: true }

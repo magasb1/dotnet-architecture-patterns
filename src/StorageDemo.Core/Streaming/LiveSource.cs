@@ -66,8 +66,14 @@ public sealed record ForwardStatus(
 /// "unconfigured": it is the statement that this name arrives on the ingest port.
 /// </param>
 /// <param name="Enabled">
-/// False leaves the row in place and stops acting on it: no pull is attempted and no forward runs.
-/// Deleting the row is how you forget a source; this is how you park one.
+/// False parks the source: it stays in the list and this service stops acting on it. Deleting the
+/// row is how you forget a source; this is how you park one.
+///
+/// Parking stops what this service itself started, and only that. A pull already running is
+/// dropped, because otherwise the toggle would mean "stop trying again later" while the camera
+/// carried on arriving. Every forward stops, for the same reason. A stream an encoder is pushing
+/// is untouched, because stopping an encoder is not this toggle's business - refusing a name is
+/// the lock's, and ending a feed is the stop call's.
 /// </param>
 public sealed record LiveSource(
     string Name,
