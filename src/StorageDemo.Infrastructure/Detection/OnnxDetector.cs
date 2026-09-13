@@ -29,11 +29,19 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
     /// Spinning between operators is off: it buys latency on a dedicated box and costs every
     /// decoder thread sharing this one.
     /// </summary>
-    private static readonly Lazy<OrtEnv> Environment = new(() =>
+    /// <returns>
+    /// True when this process's ORT environment is ours and carries the global thread pools, so a
+    /// session may hand its threading to it. False when somebody else created the environment
+    /// first: only its creator can give it global pools, and asking a session to use pools that do
+    /// not exist throws. Unreachable while this is the only ORT component here, and reachable the
+    /// moment a second one shares the process, which is why it is a branch rather than an
+    /// assumption.
+    /// </returns>
+    private static readonly Lazy<bool> GlobalThreadPools = new(() =>
     {
         if (OrtEnv.IsCreated)
         {
-            return OrtEnv.Instance();
+            return false;
         }
 
         var options = new EnvironmentCreationOptions
@@ -42,7 +50,9 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
             threadOptions = new OrtThreadingOptions { GlobalIntraOpNumThreads = 0, GlobalInterOpNumThreads = 1, GlobalSpinControl = false },
         };
 
-        return OrtEnv.CreateInstanceWithOptions(ref options);
+        _ = OrtEnv.CreateInstanceWithOptions(ref options);
+
+        return true;
     });
 
     private readonly DetectorDescriptor _descriptor;
@@ -106,10 +116,19 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
         _inputNames = [descriptor.InputName];
         _outputNames = [descriptor.BoxesOutput, descriptor.ScoresOutput];
 
-        _ = Environment.Value;
-
         using var options = new SessionOptions();
-        options.DisablePerSessionThreads();
+
+        if (GlobalThreadPools.Value)
+        {
+            options.DisablePerSessionThreads();
+        }
+        else
+        {
+            logger.LogWarning(
+                "Another component created this process's ONNX Runtime environment, so this "
+                + "detector runs its own thread pool rather than the shared one. It works and "
+                + "costs threads; measured at 22 percent throughput on a processor.");
+        }
         Provider = AppendBestProvider(options, logger);
         _session = new InferenceSession(modelPath, options);
 

@@ -264,6 +264,39 @@ normalisation in the graph.
 The processor result is not wasted: it is a second independent confirmation that the export and
 the runner's numbers are right, since two unrelated runtimes agree to five decimal places.
 
+## Measured on a processor, and the desktop worry did not survive contact
+
+`perf-detection.md` ran five experiments on a twelve-core laptop part with no GPU. **Nothing was
+kept in the source**, because the two settings worth having were already there and the rest were
+bounded at nothing.
+
+- **Threads: one default serves both shapes.** The worry that a detector would starve ingest on a
+  desktop is not what happens. With eight streams ingesting and two detecting, and again with four
+  detecting on a machine that can sustain about two, the per-stream loss and drop counters read
+  **zero on every beat** and delivered bitrate stayed inside a third of a percent, at every thread
+  setting. The detector degrades by serving fewer detections; ingest does not notice. Capping
+  threads is therefore a loss rather than a safeguard, and no per-shape configuration is needed.
+  The one setting that pays is already in the code: spinning off is worth 22 percent.
+- **Batching plateaus at two on a processor**, worth 13 percent, and the earlier "two bought
+  nothing" reading was taken under load. The worker already batches and its limit of eight is right
+  for a processor and righter for a GPU, where the curve keeps going.
+- **A detector pool is measured dead.** Twelve sessions reach less throughput than twelve callers
+  on one session, for four times the memory.
+- **The input path is bounded at nothing**: the resize is a quarter of a percent of a detection.
+- **About 99 percent of a detection is the model call.** There is no second cost in the detection
+  code to chase; the remaining levers are the canvas size, the checkpoint and quantisation, and
+  they belong to the export rather than to the runner.
+
+One hazard was found and fixed rather than documented: the runner reused an ORT environment created
+by anything else in the process but still asked its session to use global thread pools that such an
+environment cannot have, which throws. Unreachable while this is the only such component, and
+reachable the moment a second one shares the process.
+
+**What a GPU is expected to change**, none of it measured here: batching keeps improving past
+eight, intra-op threads should drop to one on the CUDA path, the input lock becomes worth removing,
+the resize becomes a device operation or a host round trip, and the model load becomes a TensorRT
+engine build that needs a per-node cache.
+
 ## What to measure, and when
 
 Nothing here is sized until there is a GPU node.
