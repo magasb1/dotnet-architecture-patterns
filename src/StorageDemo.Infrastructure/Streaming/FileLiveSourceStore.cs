@@ -86,10 +86,12 @@ public sealed class FileLiveSourceStore : ILiveSourceStore
 
         try
         {
-            var sources = Load();
-            sources[source.Name] = source;
+            var sources = new Dictionary<string, LiveSource>(Load(), StringComparer.Ordinal)
+            {
+                [source.Name] = source,
+            };
 
-            await WriteAsync(sources, cancellationToken);
+            await CommitAsync(sources, cancellationToken);
         }
         finally
         {
@@ -103,11 +105,11 @@ public sealed class FileLiveSourceStore : ILiveSourceStore
 
         try
         {
-            var sources = Load();
+            var sources = new Dictionary<string, LiveSource>(Load(), StringComparer.Ordinal);
 
             if (sources.Remove(name))
             {
-                await WriteAsync(sources, cancellationToken);
+                await CommitAsync(sources, cancellationToken);
             }
         }
         finally
@@ -168,12 +170,21 @@ public sealed class FileLiveSourceStore : ILiveSourceStore
     }
 
     /// <summary>
+    /// Writes the new list, and only then adopts it in memory.
+    ///
+    /// That order is the whole point. A caller mutating the cached dictionary and then writing it
+    /// would, on a full disk or a cancelled save, leave this process believing a change that the
+    /// file does not contain - and the file is the authority, so the disagreement would last until
+    /// a restart silently undid the operator's edit. Building a copy, writing it, and swapping on
+    /// success means a failed save changes nothing at all, which is what a caller receiving an
+    /// exception is entitled to assume.
+    ///
     /// Writes through a temporary file in the same directory, so a crash or a full disk halfway
     /// through leaves the previous list intact rather than a half-written one that the next start
     /// would quarantine. Same directory because <see cref="File.Move(string, string, bool)"/> is
     /// only atomic within a volume.
     /// </summary>
-    private async Task WriteAsync(
+    private async Task CommitAsync(
         Dictionary<string, LiveSource> sources,
         CancellationToken cancellationToken)
     {
@@ -189,6 +200,8 @@ public sealed class FileLiveSourceStore : ILiveSourceStore
             cancellationToken);
 
         File.Move(temporary, _path, overwrite: true);
+
+        _sources = sources;
     }
 
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
