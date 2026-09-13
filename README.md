@@ -541,6 +541,12 @@ directly. A pulled stream and every forward open their connection through libav 
 has no such call to make, so the panel says so rather than showing zeroes that would read as a
 clean bill of health.
 
+**Every row also shows how many players are pulling that stream right now**, on the row itself
+and again in the local output panel. It counts a real viewer's connection specifically, whether it
+reached this replica directly or was relayed here from one that does not own the stream, and never
+the recorder, the harvester, the KLV extractor or a forward - none of which is a player, even
+though all of them subscribe to the same packet fan-out a viewer does.
+
 ### How it is built
 
 One demultiplexer per stream feeds one hub, and packets flow one way through it.
