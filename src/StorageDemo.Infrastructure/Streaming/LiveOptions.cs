@@ -239,6 +239,23 @@ public sealed class LiveOptions
     public string? RecordingDirectory { get; init; }
 
     /// <summary>
+    /// Where the file-backed source store keeps its JSON, for the deployments that have no Redis.
+    /// Unset puts it beside the recordings, because that is already the directory an operator gives
+    /// this service when they want its state somewhere they chose. The default cannot be written
+    /// here: it reads <see cref="RecordingDirectory"/>, so it is resolved where the store is built.
+    /// </summary>
+    public string? SourceFile { get; init; }
+
+    /// <summary>
+    /// How long a forward that failed waits before it is tried again. Short, because the usual
+    /// reason is a far end that restarted and an operator watching a disconnected row wants it back
+    /// without touching anything; long enough that an unreachable host is not dialled in a tight
+    /// loop for as many hours as it stays down.
+    /// </summary>
+    [Range(1, 600)]
+    public int ForwardRetrySeconds { get; init; } = 5;
+
+    /// <summary>
     /// Transports a manual stream may name. Anything outside this list is refused, which is what
     /// stops "create a stream" from turning into "read this local file". Automatic ingest needs no
     /// such list: it is one port and one protocol, and nobody chooses a URL.
