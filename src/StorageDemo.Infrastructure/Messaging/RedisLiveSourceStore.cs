@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
+using StorageDemo.Core.Documents;
 using StorageDemo.Core.Streaming;
 
 namespace StorageDemo.Infrastructure.Messaging;
@@ -30,17 +31,36 @@ public sealed class RedisLiveSourceStore(
 
     public async Task SaveAsync(LiveSource source, CancellationToken cancellationToken = default)
     {
-        // No try/catch. See the note on the class: a save that quietly vanishes is a lie to the
+        // Not swallowed. See the note on the class: a save that quietly vanishes is a lie to the
         // operator, and the exception reaching them as a failed request is the honest answer.
-        await connection.GetDatabase().HashSetAsync(
-            Key,
-            source.Name,
-            JsonSerializer.Serialize(source));
+        //
+        // Translated rather than rethrown, though. A raw RedisException is unmapped and becomes a
+        // 500, which says "this service is broken"; PersistenceException is already mapped to 503
+        // alongside every other backing-store outage, which says "try again" and is the truth.
+        // Naming the operation matters here too: an operator who cannot save wants to know whether
+        // it was their row or the whole store.
+        await Write(
+            () => connection.GetDatabase().HashSetAsync(Key, source.Name, JsonSerializer.Serialize(source)),
+            $"save live source '{source.Name}'");
     }
 
     public async Task RemoveAsync(string name, CancellationToken cancellationToken = default)
     {
-        await connection.GetDatabase().HashDeleteAsync(Key, name);
+        await Write(
+            () => connection.GetDatabase().HashDeleteAsync(Key, name),
+            $"remove live source '{name}'");
+    }
+
+    private static async Task Write(Func<Task> write, string what)
+    {
+        try
+        {
+            await write();
+        }
+        catch (RedisException ex)
+        {
+            throw new PersistenceException($"Could not {what}.", ex);
+        }
     }
 
     public async Task<LiveSource?> GetAsync(string name, CancellationToken cancellationToken = default)
