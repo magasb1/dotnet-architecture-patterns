@@ -6,6 +6,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Defaults that make `dotnet run` work with nothing configured, and the model path relative
+         to the repository root rather than to bin/, which is where a developer's models are. -->
+    <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\StorageDemo.Infrastructure\StorageDemo.Infrastructure.csproj" />
   </ItemGroup>
   <ItemGroup>

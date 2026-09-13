@@ -168,9 +168,16 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
         // without padding has no honest value to give.
         _padValue = descriptor.Geometry is DetectorGeometry.Letterbox letterbox ? (byte)letterbox.PadValue : (byte)0;
 
+        // Asked before the options are made, and that order is load-bearing: constructing
+        // SessionOptions initialises the runtime's default environment, so asking afterwards
+        // always answers "somebody else made it" and every session silently runs its own thread
+        // pool. Measured at 22 percent of throughput on a processor, and invisible except for a
+        // warning that made no sense in a worker that is the only component in its process.
+        var ours = GlobalThreadPools.Value;
+
         using var options = new SessionOptions();
 
-        if (GlobalThreadPools.Value)
+        if (ours)
         {
             options.DisablePerSessionThreads();
         }

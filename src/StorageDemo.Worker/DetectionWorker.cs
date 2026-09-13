@@ -91,7 +91,7 @@ public sealed class DetectionWorker : BackgroundService
                 + "cannot say which contract to decode."),
         };
 
-        var modelPath = _options.ModelPath.Length > 0 ? _options.ModelPath : defaultPath;
+        var modelPath = Resolve(_options.ModelPath.Length > 0 ? _options.ModelPath : defaultPath);
 
         _logger.LogInformation("Detecting with {Model} from {Path}", _options.Model, modelPath);
 
@@ -325,4 +325,31 @@ public sealed class DetectionWorker : BackgroundService
 
     private double Rate(LiveStream stream)
         => stream.DetectionRate > 0 ? stream.DetectionRate : _options.DefaultRate;
+
+    /// <summary>
+    /// A model path as given, or the same relative path found by walking up from the binary. A
+    /// developer keeps models/ at the repository root and the binary runs several directories
+    /// below it, so a path that is obviously right from the repository would otherwise miss
+    /// depending on which directory the worker happened to be started from.
+    /// </summary>
+    private static string Resolve(string path)
+    {
+        if (Path.IsPathRooted(path) || File.Exists(path))
+        {
+            return path;
+        }
+
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, path);
+
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return path;
+    }
+
 }

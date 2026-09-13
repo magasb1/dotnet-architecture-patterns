@@ -12,7 +12,15 @@ internal static class WorkerProgram
 {
     private static void Main(string[] args)
     {
-        var builder = Host.CreateApplicationBuilder(args);
+        // The content root is the binary's own directory, not whatever directory the process was
+        // started from. Without this the host looks for appsettings.json beside the caller's shell
+        // and finds nothing, so `dotnet run` from the repository root died on required
+        // configuration that was sitting in bin/ the whole time.
+        var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+        {
+            Args = args,
+            ContentRootPath = AppContext.BaseDirectory,
+        });
 
         builder.Services.AddOptions<WorkerOptions>()
             .Bind(builder.Configuration.GetSection(WorkerOptions.SectionName))
