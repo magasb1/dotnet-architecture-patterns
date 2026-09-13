@@ -547,6 +547,18 @@ reached this replica directly or was relayed here from one that does not own the
 the recorder, the harvester, the KLV extractor or a forward - none of which is a player, even
 though all of them subscribe to the same packet fan-out a viewer does.
 
+**An SRT forward gets the same link stats a push source does, for the same reason it can**: it
+dials or waits through the direct-libsrt stack the ingest port uses rather than through libav,
+which is what a forward has always used for every other protocol and what a forward whose target
+is UDP or RTP still uses today. libav never exposes the socket underneath its own SRT protocol
+handler, so that path can only ever answer in bytes; the direct stack is the same `srt_bstats` read
+a source's own heartbeat already makes, asked from the sending side instead of the receiving one.
+The two sides are genuinely different numbers - a source answers "what is arriving here", a forward
+answers "what is this replica managing to push out" - so a forward's panel shows send rate rather
+than receive rate, and carries no decrypt-failure count at all: decrypting is what a receiver does,
+and a sender has none to report. Both shapes an SRT forward's URL can ask for get this equally, a
+caller dialling out and a listener waiting to be pulled.
+
 ### How it is built
 
 One demultiplexer per stream feeds one hub, and packets flow one way through it.

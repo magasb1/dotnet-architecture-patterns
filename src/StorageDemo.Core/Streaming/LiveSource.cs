@@ -18,10 +18,13 @@ namespace StorageDemo.Core.Streaming;
 /// Where to push, under the same scheme allowlist a pulled source is held to. The scheme picks the
 /// container: RTP carries MPEG-TS in the RTP muxer, everything else is plain MPEG-TS.
 ///
-/// Query options are libav's and are passed through, which is how one field covers all three
-/// shapes the deployment asked for: <c>srt://host:9000?streamid=name</c> dials the far end,
-/// <c>srt://0.0.0.0:9100?mode=listener</c> waits to be pulled from, and <c>udp://</c> or
-/// <c>rtp://</c> push with no handshake at all.
+/// <c>srt://host:9000?streamid=name</c> dials the far end, <c>srt://0.0.0.0:9100?mode=listener</c>
+/// waits to be pulled from, and <c>udp://</c> or <c>rtp://</c> push with no handshake at all. An
+/// SRT target also takes <c>latency</c> (milliseconds) and <c>passphrase</c>, read directly rather
+/// than passed through: SRT dials out through the same direct-libsrt stack the ingest port
+/// accepts on, not through libav, because only that stack can hand a forward the connection
+/// statistics <see cref="ForwardStatus.Link"/> carries. UDP and RTP still open through libav,
+/// which passes every other query option straight through as it always has.
 /// </param>
 /// <param name="Enabled">
 /// False stops the copy without forgetting where it went. Switching a forward off and on again is
@@ -41,13 +44,58 @@ public sealed record ForwardTarget(string Id, string Url, bool Enabled = true);
 /// it is waiting to retry, because a forward that is simply not running looks identical to one
 /// that has never been asked to run, and the operator needs to tell those apart.
 /// </param>
+/// <param name="PacketsLost">
+/// Packets libsrt sent that the far end reported lost, over the last heartbeat - present only for
+/// an SRT target, which is the only one with a handshake to report anything back over. Zero for
+/// UDP and RTP, which carry no such answer, same as it is for a stream with nothing to ask yet.
+/// </param>
+/// <param name="PacketsDropped">
+/// Packets libsrt gave up on before they could be sent, because they would already have arrived
+/// too late to matter. The sending twin of a source's own dropped count.
+/// </param>
+/// <param name="Link">
+/// libsrt's own read on this connection, present only for an SRT target - see
+/// <see cref="SrtForwardLinkStats"/> for why it is not <see cref="LiveStream.Link"/> reused. Null
+/// for UDP and RTP, which open through libav and answer only in bytes, and for an SRT target with
+/// nothing sampled yet.
+/// </param>
 public sealed record ForwardStatus(
     string Id,
     string Url,
     bool Connected,
     long Bytes,
     DateTimeOffset? ConnectedAt = null,
-    string? Error = null);
+    string? Error = null,
+    int PacketsLost = 0,
+    int PacketsDropped = 0,
+    SrtForwardLinkStats? Link = null);
+
+/// <summary>
+/// What libsrt itself says about a forward's own connection, over the last heartbeat - the sending
+/// twin of <see cref="SrtLinkStats"/>, which reads the same struct from a source's receiving side.
+///
+/// Not the same type reused with different numbers inside it, because the two are genuinely
+/// different questions. SRT_TRACEBSTATS keeps a separate counter for almost everything depending
+/// on which direction is asking: a source is answering "what is arriving here", and a forward is
+/// answering "what is this replica managing to push out", and forcing both into one type under
+/// field names written for the receiving case would put a source's honest answer beside a
+/// forward's under a label that only ever told the truth for one of them.
+///
+/// There is no field for a decrypt failure. Decrypting is what a receiver does, and a forward that
+/// carried a field for it would either always read zero for a fact nothing here ever asked, or
+/// need a comment explaining why - the absence is the honest answer instead.
+/// </summary>
+/// <param name="BandwidthMbps">libsrt's own estimate of the link's capacity, direction-agnostic.</param>
+/// <param name="SendRateMbps">What is actually leaving, libsrt's own measurement rather than a byte count divided by wall-clock time.</param>
+/// <param name="RoundTripTimeMs">The measured round trip on this connection.</param>
+/// <param name="PacketsRetransmitted">Packets this sender resent because the far end reported one lost.</param>
+/// <param name="NegotiatedLatencyMs">The latency window this end of the connection actually negotiated.</param>
+public sealed record SrtForwardLinkStats(
+    double BandwidthMbps,
+    double SendRateMbps,
+    double RoundTripTimeMs,
+    int PacketsRetransmitted,
+    int NegotiatedLatencyMs);
 
 /// <summary>
 /// A standing instruction about one stream name: fetch it from here, and copy it to there.

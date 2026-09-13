@@ -248,6 +248,14 @@ public static unsafe partial class Srt
     [LibraryImport(Library)]
     public static partial int srt_accept(int u, void* addr, int* addrlen);
 
+    /// <summary>
+    /// The caller half of a handshake, for the one thing this service dials out to rather than
+    /// accepts: a forward whose target is an SRT caller. Blocking, like every other libsrt call
+    /// here - see <see cref="SrtEgress"/>, its only caller.
+    /// </summary>
+    [LibraryImport(Library)]
+    public static partial int srt_connect(int u, void* name, int namelen);
+
     [LibraryImport(Library)]
     public static partial int srt_close(int u);
 

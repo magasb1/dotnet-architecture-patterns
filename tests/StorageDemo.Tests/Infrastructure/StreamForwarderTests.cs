@@ -29,6 +29,8 @@ public sealed class StreamForwarderTests
 {
     private static readonly TimeSpan Retry = TimeSpan.FromSeconds(5);
 
+    private const string NoLibsrt = "libsrt is not installed. Run scripts/fetch-libsrt.sh.";
+
     private static readonly DateTimeOffset Now = new(2026, 9, 13, 12, 0, 0, TimeSpan.Zero);
 
     /// <summary>The smallest layout a muxer will accept, built without a real transport.</summary>
@@ -127,6 +129,335 @@ public sealed class StreamForwarderTests
         Assert.Equal("forward-1", status.Id);
         Assert.True(status.Connected);
         Assert.True(status.Bytes > 0);
+    }
+
+    /// <summary>
+    /// An SRT forward, dialling out as a caller, through the real direct-libsrt path rather than
+    /// libav's: real bytes reach a real far end, exactly as the UDP test above proves. The far end
+    /// here is a second raw libsrt socket this test accepts on directly, for the same reason the
+    /// UDP test reads a raw datagram instead of asking something to decode it - the packets
+    /// published below are not a real bitstream, only a byte count and a sync byte a decoder would
+    /// never make sense of, and proving connectivity must not depend on it trying to.
+    /// </summary>
+    [Fact]
+    public async Task An_srt_forward_dials_out_and_reports_libsrts_own_link_stats()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(Ffmpeg.IsPresent, "No FFmpeg. Run scripts/fetch-ffmpeg.sh.");
+
+        FfmpegLibrary.EnsureLoaded();
+
+        var options = new LiveOptions();
+
+        using var hub = new StreamHub("forwarded-camera-srt-caller", options, NullLogger.Instance);
+        using var layout = OneVideoStream();
+
+        hub.Adopt(layout);
+
+        var port = SrtSenders.FreePort();
+
+        using var listener = new RawSrtListener(port);
+
+        using var forwarder = new StreamForwarder(
+            "forward-srt-caller",
+            $"srt://127.0.0.1:{port}?streamid=forwarded-camera-srt-caller&latency=120",
+            hub,
+            options,
+            NullLogger.Instance);
+
+        forwarder.Start(CancellationToken.None);
+
+        // Kept running rather than sent once, so there is still a live connection by the time the
+        // assertions below ask libsrt for a sample - a caller dialling a listener that has not
+        // finished accepting is the ordinary race this loop already exists to lose gracefully.
+        var pts = 0L;
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+
+        while (DateTime.UtcNow < deadline && listener.Received == 0)
+        {
+            for (var step = 0; step < 10; step++)
+            {
+                hub.Publish(
+                    new MediaPacket(0, new byte[1400], pts, pts, Duration: 3600, IsKeyframe: step == 0),
+                    pts);
+
+                pts += 3600;
+            }
+
+            await Task.Delay(50);
+        }
+
+        Assert.True(
+            listener.Received > 0,
+            $"nothing reached the far end in twenty seconds; the forward said: {forwarder.Error}, "
+                + $"the listener said: {listener.Error}");
+
+        Assert.Equal(0x47, listener.FirstByte);
+        Assert.True(forwarder.Connected, $"the forward reported itself disconnected: {forwarder.Error}");
+
+        // One more beat so a real srt_bstats sample has something in its window: the very first
+        // read after a handshake is legitimately still mostly zero, and asking before the transport
+        // has been up for one would make this test flaky rather than prove anything.
+        await Task.Delay(TimeSpan.FromSeconds(2));
+
+        for (var step = 0; step < 10; step++)
+        {
+            hub.Publish(new MediaPacket(0, new byte[1400], pts, pts, Duration: 3600, IsKeyframe: step == 0), pts);
+            pts += 3600;
+        }
+
+        await Task.Delay(TimeSpan.FromSeconds(1));
+
+        var status = forwarder.Status;
+
+        Assert.Equal(0, status.PacketsLost);
+        Assert.Equal(0, status.PacketsDropped);
+        Assert.NotNull(status.Link);
+
+        Assert.True(
+            status.Link!.BandwidthMbps > 0,
+            $"bandwidth read as {status.Link.BandwidthMbps}, which is not a real libsrt estimate");
+
+        Assert.True(status.Link.NegotiatedLatencyMs >= 120, "the negotiated latency was below what this forward asked for");
+    }
+
+    /// <summary>
+    /// The other shape a forward's SRT URL can ask for: this replica waits, and the far end pulls.
+    /// A real caller connects and reads real bytes, proving <c>?mode=listener</c> reaches
+    /// <see cref="SrtEgress"/>'s bind-listen-accept path rather than the caller path the test above
+    /// already covers.
+    /// </summary>
+    [Fact]
+    public async Task An_srt_forward_can_wait_for_the_far_end_to_pull_it()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(Ffmpeg.IsPresent, "No FFmpeg. Run scripts/fetch-ffmpeg.sh.");
+
+        FfmpegLibrary.EnsureLoaded();
+
+        var options = new LiveOptions();
+
+        using var hub = new StreamHub("forwarded-camera-srt-listener", options, NullLogger.Instance);
+        using var layout = OneVideoStream();
+
+        hub.Adopt(layout);
+
+        var port = SrtSenders.FreePort();
+
+        using var forwarder = new StreamForwarder(
+            "forward-srt-listener",
+            $"srt://0.0.0.0:{port}?mode=listener",
+            hub,
+            options,
+            NullLogger.Instance);
+
+        forwarder.Start(CancellationToken.None);
+
+        // Given a moment to reach srt_listen before anything tries to connect - the accept below
+        // this comment has no retry of its own, unlike a caller's handshake.
+        await Task.Delay(TimeSpan.FromSeconds(1));
+
+        using var puller = new RawSrtCaller(port);
+
+        var pts = 0L;
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+
+        while (DateTime.UtcNow < deadline && puller.Received == 0)
+        {
+            for (var step = 0; step < 10; step++)
+            {
+                hub.Publish(
+                    new MediaPacket(0, new byte[1400], pts, pts, Duration: 3600, IsKeyframe: step == 0),
+                    pts);
+
+                pts += 3600;
+            }
+
+            await Task.Delay(50);
+        }
+
+        Assert.True(
+            puller.Received > 0,
+            $"nothing reached the far end in twenty seconds; the forward said: {forwarder.Error}, "
+                + $"the caller said: {puller.Error}");
+
+        Assert.Equal(0x47, puller.FirstByte);
+
+        // Stop() has to unblock a listener parked in srt_accept with nobody having pulled it yet
+        // in the ordinary case; here somebody already has, so this instead proves the running
+        // thread actually exits once the accepted connection is asked to close, rather than
+        // hanging on a send to a peer this test is about to walk away from.
+        forwarder.Stop();
+
+        try
+        {
+            await forwarder.Running!.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (TimeoutException)
+        {
+            Assert.Fail("the forward's thread never exited after Stop()");
+        }
+    }
+
+    /// <summary>
+    /// The far end for a listening forward's test: a raw libsrt caller, the mirror of
+    /// <see cref="RawSrtListener"/> for the other direction a forward's URL can ask for.
+    /// </summary>
+    private sealed unsafe class RawSrtCaller : IDisposable
+    {
+        private readonly int _socket;
+        private readonly Task _read;
+
+        public int Received { get; private set; }
+
+        public byte FirstByte { get; private set; }
+
+        public string? Error { get; private set; }
+
+        public RawSrtCaller(int port)
+        {
+            Srt.EnsureStarted();
+
+            _socket = Srt.srt_create_socket();
+
+            var address = new IPEndPoint(IPAddress.Loopback, port).Serialize();
+
+            fixed (byte* raw = address.Buffer.Span)
+            {
+                if (Srt.srt_connect(_socket, raw, address.Size) != 0)
+                {
+                    Error = Srt.LastError();
+                    _read = Task.CompletedTask;
+
+                    return;
+                }
+            }
+
+            _read = Task.Factory.StartNew(Drain, TaskCreationOptions.LongRunning);
+        }
+
+        private void Drain()
+        {
+            using var transport = new SrtSocketStream(_socket, writable: false);
+            var buffer = new byte[transport.PayloadSize];
+
+            while (true)
+            {
+                int read;
+
+                try
+                {
+                    read = transport.Read(buffer);
+                }
+                catch (Exception ex)
+                {
+                    Error ??= ex.Message;
+
+                    return;
+                }
+
+                if (read <= 0)
+                {
+                    return;
+                }
+
+                if (Received == 0)
+                {
+                    FirstByte = buffer[0];
+                }
+
+                Received += read;
+            }
+        }
+
+        public void Dispose() => _read.Wait(TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>
+    /// The far end for an SRT caller test, standing in for a real gateway with the same primitives
+    /// <see cref="SrtEgress"/> uses to open one: bind, listen, accept, all blocking on a background
+    /// thread since that is the one thing every libsrt call in this service assumes about its
+    /// caller. Reads just enough to prove a real transport stream arrived and stops - proving
+    /// content is <see cref="A_forward_pushes_a_transport_stream_to_the_far_end"/>'s job, on a
+    /// protocol where a raw datagram already says so without an accept loop in the way.
+    /// </summary>
+    private sealed unsafe class RawSrtListener : IDisposable
+    {
+        private readonly int _socket;
+        private readonly Task _accept;
+
+        public int Received { get; private set; }
+
+        public byte FirstByte { get; private set; }
+
+        public string? Error { get; private set; }
+
+        public RawSrtListener(int port)
+        {
+            Srt.EnsureStarted();
+
+            _socket = Srt.srt_create_socket();
+            Srt.SetBool(_socket, SRT_SOCKOPT.SRTO_REUSEADDR, true);
+
+            var address = new IPEndPoint(IPAddress.Loopback, port).Serialize();
+
+            fixed (byte* raw = address.Buffer.Span)
+            {
+                if (Srt.srt_bind(_socket, raw, address.Size) != 0)
+                {
+                    throw new InvalidOperationException($"Could not bind the test listener: {Srt.LastError()}");
+                }
+            }
+
+            if (Srt.srt_listen(_socket, 1) != 0)
+            {
+                throw new InvalidOperationException($"Could not listen on the test listener: {Srt.LastError()}");
+            }
+
+            _accept = Task.Factory.StartNew(Accept, TaskCreationOptions.LongRunning);
+        }
+
+        private void Accept()
+        {
+            var accepted = Srt.srt_accept(_socket, null, null);
+
+            if (accepted == Srt.SRT_INVALID_SOCK)
+            {
+                Error = Srt.LastError();
+
+                return;
+            }
+
+            // Drained for as long as the sender keeps the connection, not read once and closed: a
+            // far end that hangs up after one message would fault the forward's own socket well
+            // before the test gets to ask it for a link sample, which is the whole second half of
+            // what this test proves.
+            using var transport = new SrtSocketStream(accepted, writable: false);
+            var buffer = new byte[transport.PayloadSize];
+
+            while (true)
+            {
+                var read = transport.Read(buffer);
+
+                if (read <= 0)
+                {
+                    return;
+                }
+
+                if (Received == 0)
+                {
+                    FirstByte = buffer[0];
+                }
+
+                Received += read;
+            }
+        }
+
+        public void Dispose()
+        {
+            Srt.srt_close(_socket);
+            _accept.Wait(TimeSpan.FromSeconds(5));
+        }
     }
 
     /// <summary>

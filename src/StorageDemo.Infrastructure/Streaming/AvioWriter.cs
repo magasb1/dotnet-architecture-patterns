@@ -22,7 +22,7 @@ namespace StorageDemo.Infrastructure.Streaming;
 /// that may be down. That is acceptable only because this is constructed on a thread dedicated to
 /// one forward and nothing else waits on it - see <see cref="StreamForwarder"/>.
 /// </summary>
-public sealed unsafe class AvioWriter : Stream
+public sealed unsafe class AvioWriter : Stream, IWireWriter
 {
     private readonly string _url;
 

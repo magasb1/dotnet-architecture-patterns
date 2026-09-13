@@ -16,7 +16,7 @@ namespace StorageDemo.Infrastructure.Streaming;
 /// Reads and writes block, so this is only ever used from a thread already dedicated to one
 /// connection.
 /// </summary>
-public sealed unsafe class SrtSocketStream : Stream
+public sealed unsafe class SrtSocketStream : Stream, IWireWriter
 {
     /// <summary>Hands a chunk to libsrt, returning what <c>srt_sendmsg</c> returned.</summary>
     public delegate int Send(ReadOnlySpan<byte> chunk);
@@ -83,6 +83,13 @@ public sealed unsafe class SrtSocketStream : Stream
     public int PayloadSize => _payloadSize;
 
     /// <summary>
+    /// Bytes actually handed to libsrt, which for a forward is what "bytes sent" is meant to
+    /// answer - not bytes muxed, which can differ from what leaves the socket by whatever the
+    /// container's own overhead is.
+    /// </summary>
+    public long Written { get; private set; }
+
+    /// <summary>
     /// What this connection lost and dropped since the last time it was asked, and what libsrt
     /// itself says about the link over the same interval - or null when the socket has gone and
     /// there is nothing to ask.
@@ -127,6 +134,43 @@ public sealed unsafe class SrtSocketStream : Stream
                 stats.pktRcvRetrans,
                 stats.msRcvTsbPdDelay,
                 stats.pktRcvUndecryptTotal));
+    }
+
+    /// <summary>
+    /// The sending twin of <see cref="Health"/>: what a forward's own connection reports about
+    /// itself, over the same kind of interval and for the same reason <c>clear</c> exists there -
+    /// a second read in the same beat would see the remainder of this one's window rather than a
+    /// fresh sample.
+    ///
+    /// Genuinely different fields, not the same ones renamed. SRT_TRACEBSTATS keeps a separate
+    /// counter for almost everything depending on which direction is asking, because a sender and
+    /// a receiver are different questions about the same connection even when it is this replica
+    /// asking both of them a beat apart on two different sockets. There is no sending analogue of
+    /// a decrypt failure - decrypting is what a receiver does - so <see cref="SrtForwardLinkStats"/>
+    /// simply carries no field for it, rather than one that would always read zero for a fact
+    /// nothing here ever asked.
+    /// </summary>
+    public (int Lost, int Dropped, SrtForwardLinkStats Link)? SendHealth()
+    {
+        if (_closed || _socket == Srt.SRT_INVALID_SOCK)
+        {
+            return null;
+        }
+
+        if (!Srt.Stats(_socket, out var stats, clear: true))
+        {
+            return null;
+        }
+
+        return (
+            stats.pktSndLoss,
+            stats.pktSndDrop,
+            new SrtForwardLinkStats(
+                stats.mbpsBandwidth,
+                stats.mbpsSendRate,
+                stats.msRTT,
+                stats.pktRetrans,
+                stats.msSndTsbPdDelay));
     }
 
     public override long Length => throw new NotSupportedException();
@@ -216,6 +260,8 @@ public sealed unsafe class SrtSocketStream : Stream
 
                 throw new IOException($"The socket refused {chunk.Length} bytes: {Srt.LastError()}");
             }
+
+            Written += chunk.Length;
 
             buffer = buffer[chunk.Length..];
         }

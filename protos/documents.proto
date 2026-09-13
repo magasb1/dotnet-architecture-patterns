@@ -261,6 +261,24 @@ message ForwardStatusMessage {
   // Why the last attempt stopped, when one did. Kept while the forward waits to retry, because a
   // forward that is simply not running looks identical to one that has never been asked to run.
   optional string error = 6;
+
+  // Present only for an SRT target, which dials or waits through the same direct-libsrt stack the
+  // ingest port uses rather than through libav, the only stack that can answer these. Zero and
+  // absent for UDP and RTP, which open through libav and answer only in bytes.
+  int32 packets_lost = 7;
+  int32 packets_dropped = 8;
+  optional SrtForwardLinkStatsMessage link = 9;
+}
+
+// The sending twin of SrtLinkStatsMessage - libsrt keeps a separate counter for almost everything
+// depending on which direction is asking, so a forward's own numbers are not a source's numbers
+// with a different label. No decrypt-failure field: decrypting is what a receiver does.
+message SrtForwardLinkStatsMessage {
+  double bandwidth_mbps = 1;
+  double send_rate_mbps = 2;
+  double round_trip_time_ms = 3;
+  int32 packets_retransmitted = 4;
+  int32 negotiated_latency_ms = 5;
 }
 
 // A standing instruction about one stream name: fetch it from here, and copy it to there.

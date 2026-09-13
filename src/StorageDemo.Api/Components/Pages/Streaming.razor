@@ -231,6 +231,26 @@ else
                                         </div>
                                         <div class="row"><span class="k">URL</span><span class="v mono">@target.Url</span></div>
                                         <div class="row"><span class="k">Bytes</span><span class="v mono">@(status is null ? "-" : Size(status.Bytes))</span></div>
+                                        @if (status?.Link is { } forwardLink)
+                                        {
+                                            <div class="row"><span class="k">Bandwidth</span><span class="v mono">@Mbps(forwardLink.BandwidthMbps)</span></div>
+                                            <div class="row"><span class="k">Send rate</span><span class="v mono">@Mbps(forwardLink.SendRateMbps)</span></div>
+                                            <div class="row"><span class="k">RTT</span><span class="v mono">@forwardLink.RoundTripTimeMs.ToString("0", CultureInfo.InvariantCulture) ms</span></div>
+                                            <div class="row"><span class="k">Retransmitted</span><span class="v mono">@forwardLink.PacketsRetransmitted.ToString("N0", CultureInfo.InvariantCulture)</span></div>
+                                            <div class="row"><span class="k">Negotiated latency</span><span class="v mono">@forwardLink.NegotiatedLatencyMs ms</span></div>
+                                            @if (status.PacketsLost > 0 || status.PacketsDropped > 0)
+                                            {
+                                                <div class="row"><span class="k">Lost / dropped</span><span class="v mono warn">@status.PacketsLost.ToString("N0", CultureInfo.InvariantCulture) / @status.PacketsDropped.ToString("N0", CultureInfo.InvariantCulture)</span></div>
+                                            }
+                                        }
+                                        else if (target.Url.StartsWith("udp://", StringComparison.OrdinalIgnoreCase)
+                                            || target.Url.StartsWith("rtp://", StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            @* UDP and RTP open through libav, which answers in bytes and nothing about
+                                               the wire underneath - said once rather than as a row of dashes that
+                                               would read as a fault rather than as the honest limit of the protocol. *@
+                                            <div class="row"><span class="k dim">Link stats</span><span class="v dim">not available for this protocol</span></div>
+                                        }
                                         @if (status?.Error is { } error)
                                         {
                                             <div class="row"><span class="k">Error</span><span class="v bad">@error</span></div>

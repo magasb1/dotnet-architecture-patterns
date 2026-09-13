@@ -388,6 +388,8 @@ public sealed class DocumentsGrpcService(
             Url = forward.Url,
             Connected = forward.Connected,
             Bytes = forward.Bytes,
+            PacketsLost = forward.PacketsLost,
+            PacketsDropped = forward.PacketsDropped,
         };
 
         if (forward.ConnectedAt is { } connectedAt)
@@ -399,6 +401,18 @@ public sealed class DocumentsGrpcService(
         if (forward.Error is { } error)
         {
             message.Error = error;
+        }
+
+        if (forward.Link is { } link)
+        {
+            message.Link = new SrtForwardLinkStatsMessage
+            {
+                BandwidthMbps = link.BandwidthMbps,
+                SendRateMbps = link.SendRateMbps,
+                RoundTripTimeMs = link.RoundTripTimeMs,
+                PacketsRetransmitted = link.PacketsRetransmitted,
+                NegotiatedLatencyMs = link.NegotiatedLatencyMs,
+            };
         }
 
         return message;

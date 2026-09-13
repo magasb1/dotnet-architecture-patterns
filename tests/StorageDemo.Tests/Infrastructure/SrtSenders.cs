@@ -120,6 +120,21 @@ internal static class SrtSenders
             "-f", "null", "-",
         ]);
 
+    /// <summary>
+    /// The far end for a listening SRT forward this test suite dials out to: mode=listener rather
+    /// than <see cref="Target"/>'s caller, which is the shape a forward opened with
+    /// <c>?mode=listener</c> in its own URL expects on the other side of the wire. Decodes and
+    /// reports progress the same way <see cref="StartViewer"/> does, proving media arrived rather
+    /// than only that a connection was accepted.
+    /// </summary>
+    public static Process StartListener(int port, string? streamId = null)
+        => Start([
+            "-hide_banner", "-loglevel", "error", "-progress", "pipe:2",
+            "-i", $"srt://127.0.0.1:{port}?mode=listener"
+                + (streamId is null ? string.Empty : $"&streamid={Escape(streamId)}"),
+            "-f", "null", "-",
+        ]);
+
     /// <summary>Frames a <see cref="StartViewer"/> player has decoded so far.</summary>
     public static int Decoded(Process player)
         => Regex.Matches(Said(player), "^frame=([0-9]+)", RegexOptions.Multiline)

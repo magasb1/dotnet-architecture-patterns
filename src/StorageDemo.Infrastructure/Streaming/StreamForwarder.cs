@@ -117,13 +117,15 @@ public sealed class StreamForwarder : IDisposable
         LastAttemptAt = DateTimeOffset.UtcNow;
     }
 
+    private SrtSocketStream? _srt;
+
     public string Id { get; }
 
     public string Url { get; }
 
     public bool Connected { get; private set; }
 
-    /// <summary>Counted at the <see cref="AvioWriter"/>, so it is bytes that left rather than bytes muxed.</summary>
+    /// <summary>Counted at the writer, so it is bytes that left rather than bytes muxed.</summary>
     public long Bytes { get; private set; }
 
     public DateTimeOffset? ConnectedAt { get; private set; }
@@ -137,7 +139,31 @@ public sealed class StreamForwarder : IDisposable
 
     public Task? Running { get; private set; }
 
-    public ForwardStatus Status => new(Id, Url, Connected, Bytes, ConnectedAt, Error);
+    /// <summary>
+    /// Read once per heartbeat by the reconcile pass, same as a source's own <c>Describe</c> reads
+    /// <c>Transport.Health</c> - which matters here for the same reason it does there: libsrt
+    /// resets the interval counters <see cref="SrtSocketStream.SendHealth"/> reads, so a second
+    /// call in the same beat would see the remainder of this one's window. Null for a UDP or RTP
+    /// target, which opened through <see cref="AvioWriter"/> and has no socket here to ask.
+    /// </summary>
+    public ForwardStatus Status
+    {
+        get
+        {
+            var health = _srt?.SendHealth();
+
+            return new ForwardStatus(
+                Id,
+                Url,
+                Connected,
+                Bytes,
+                ConnectedAt,
+                Error,
+                health?.Lost ?? 0,
+                health?.Dropped ?? 0,
+                health?.Link);
+        }
+    }
 
     /// <summary>
     /// Runs the forward on a thread of its own until it is stopped or it fails.
@@ -188,7 +214,17 @@ public sealed class StreamForwarder : IDisposable
                 streamIndexes: [],
                 preroll: 0);
 
-            using var writer = new AvioWriter(Url);
+            var isSrt = Url.StartsWith("srt://", StringComparison.OrdinalIgnoreCase);
+
+            // SRT dials or waits through the same direct-libsrt stack the ingest port uses, so this
+            // forward's own connection can be asked the same questions a push source's already can
+            // - bandwidth, round trip time, retransmits - rather than the bytes-only view libav's
+            // SRT protocol handler offers, because libav never exposes the socket underneath it.
+            // UDP and RTP have no such statistics to gain either way, so they keep the one
+            // unchanged path that already serves every protocol libav can write.
+            using Stream writer = isSrt
+                ? _srt = SrtEgress.Open(Url, _options.SrtLatencyMs, linked.Token)
+                : new AvioWriter(Url);
 
             ConnectedAt = DateTimeOffset.UtcNow;
             Connected = true;
@@ -199,7 +235,7 @@ public sealed class StreamForwarder : IDisposable
             // reach the far end while the transport is still open.
             using var muxer = new PacketMuxer(writer, layout, Container(Url));
 
-            Pump(subscription, muxer, writer, linked.Token);
+            Pump(subscription, muxer, (IWireWriter)writer, linked.Token);
 
             // The hub closed under it. Recorded like a failure because to an operator watching a
             // row go quiet the difference is invisible, and silence explains nothing.
@@ -226,6 +262,11 @@ public sealed class StreamForwarder : IDisposable
         {
             Connected = false;
             Finished = true;
+
+            // The transport is already disposed by the using declaration above by the time this
+            // runs, so nothing here closes a live socket - it only stops Status asking a dead one
+            // for its last read, which SendHealth would answer null for anyway.
+            _srt = null;
         }
     }
 
@@ -236,7 +277,7 @@ public sealed class StreamForwarder : IDisposable
     private void Pump(
         PacketSubscription subscription,
         PacketMuxer muxer,
-        AvioWriter writer,
+        IWireWriter writer,
         CancellationToken cancellationToken)
     {
         var packets = subscription.Packets;
