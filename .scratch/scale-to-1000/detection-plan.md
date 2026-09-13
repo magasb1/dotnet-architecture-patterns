@@ -223,7 +223,37 @@ primary source was found exempting a service that merely runs an exported file. 
 vendor's stated position rather than legal advice, and somebody should decide it deliberately
 before YOLO ships in anything delivered.
 
-**Done when** both models run behind the same interface, and the geometry tests pass for each.
+**Done: both run behind one interface, and the abstraction did not bend.** `DetectorGeometry` and
+the class tables were not touched at all; the letterbox and its inverse took the second family
+unchanged, including the reference's half-down rounding. Three honest changes were needed and none
+of them were YOLO pretending to be RF-DETR: a pixel-corner box format, which carries the tensor
+arity with it because one is two tensors wanting a sigmoid and an argmax while the other is one row
+packing box, score and class; the letterbox fill the geometry phase had left a note predicting; and
+the class table being whichever the file itself declares, falling back to the descriptor.
+
+**The choice this forces, and it is the owner's.**
+
+| | RF-DETR Nano | YOLO26 Nano |
+| --- | --- | --- |
+| Per frame, this processor | 584 ms | **113 ms** |
+| Streams at one detection a second | about 2 | about 8 |
+| Canvas | 384 | 640, so 2.8x the pixels |
+| File | 108 MB | 9.8 MB |
+| The sample's dog | found at 0.686 | not found at any score |
+| Licence | Apache-2.0, code and weights | AGPL-3.0 or commercial |
+
+Four to five times faster on nearly three times the pixels, so the cost is the architecture rather
+than the canvas. On the desktop shape that is the difference between two streams detecting and
+eight. It buys nothing on accuracy, and it does not touch the licence, which remains the reason
+RF-DETR leads.
+
+**Do not load both in one process.** Two sessions roughly double each other's latency, because they
+share the one global thread pool. A worker offering a choice of model loads the one it was told to.
+
+**One check added that D4 did not ask for**, and it earns its place: a file whose own metadata says
+it uses the other head is refused at load, because such an export has a differently shaped output
+and would decode into plausible nonsense in silence. Sniffing the shape instead was rejected as
+guessing at a contract this project has never produced.
 
 ### D5. Tracking, which is what pattern of life actually needs
 

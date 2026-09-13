@@ -486,6 +486,54 @@ does not exist is the thing this project keeps not building.
 4. **Memory is 190 MB for the detector** (141 MB of weights at load plus 47 MB of activations) and
    it is flat. A second session would be another 112 MB for no throughput.
 
+## YOLO26 Nano beside RF-DETR Nano, same runner, same frame
+
+Measured 2026-09-13 when D4 landed the second detector, on the same laptop part, same CPU
+execution provider, same `models/dog-2.jpeg` decoded to 720x1280 yuvj420p, through the same
+`OnnxDetector`. Warmed, then ten timed runs, median and best. Two conditions, because they say
+different things:
+
+| Condition | YOLO26 Nano (640) | RF-DETR Nano (384) | Ratio |
+| --- | --- | --- | --- |
+| One session alive, mean of five | **113 ms** | **584 ms** | 5.2x |
+| One session alive, batch of two, per frame | 109 ms | 558 ms | 5.1x |
+| Both sessions alive, alternating, median of ten | **~280 ms** | **~1,125 ms** | 4.0x |
+| Both sessions alive, alternating, best of ten | ~160 ms | ~900 ms | 5.6x |
+
+The interleaved rows are four replicate runs (YOLO medians 267/274/290/304, RF-DETR
+1,107/1,115/1,124/1,162), alternated round by round because this file's own list of traps says a
+before-and-after pair on this machine differs by more than any change worth making. The
+single-session rows come from each model's `A_batch_of_two...` test, which is why they are five
+rounds rather than ten.
+
+Three things worth keeping:
+
+- **YOLO26 Nano is about four to five times faster per frame on this processor**, and it does that
+  on a 640x640 canvas — 2.8x the pixels of RF-DETR's 384x384. **So the cost is the architecture,
+  not the canvas**: a DINOv2-backed transformer against a convolutional one-to-one head. That is
+  the one processor lever the previous section said was model-side and not a code change, priced.
+- **Holding two sessions in one process roughly doubles each one's latency.** RF-DETR alone is
+  584 ms and 1,125 ms while YOLO runs between its calls; YOLO alone is 113 ms and ~280 ms the same
+  way. They share one global intra-op pool by design, so alternating calls are not free and a
+  worker that offers a choice of model should load one, not both. The seam test loads both on
+  purpose and its numbers are labelled accordingly.
+- **What it means for the desktop shape.** At one detection a second per stream, RF-DETR's 452 ms
+  control holds about **two streams** on this part (the end-to-end run above: 59 and 56 served of
+  60, and four streams getting 1.78 between them). At 113 ms, YOLO26 Nano holds about **eight**.
+  The desktop shape — five to ten ingesting, one or two detecting — fits comfortably either way,
+  which is the honest conclusion: **this difference does not change the desktop answer, it changes
+  the headroom above it.** Where it would matter is the cluster tier, where a fourfold difference
+  is a fourfold difference in GPU nodes, and there is no measurement here for that.
+
+**Accuracy is not measured and the two are not interchangeable.** yolo26n misses the beagle that
+RF-DETR scores at 0.686, at any threshold (`YoloDetectorTests.There_is_no_dog_at_any_score`), and
+`models/README.md` establishes that this is the nano checkpoint's recall rather than a broken
+export. A four-times-faster detector that does not find the animal is not a free upgrade. **And the
+licence is the harder constraint**: RF-DETR Nano is Apache-2.0 for code and weights, Ultralytics is
+AGPL-3.0 or a paid enterprise licence, and the vendor's own position covers a service that runs an
+exported file. Speed does not settle that; see `models/README.md`, "Licence — state it before using
+it".
+
 ## What of this changes on a GPU
 
 Labelled honestly: none of it was measured, because there is no GPU here.

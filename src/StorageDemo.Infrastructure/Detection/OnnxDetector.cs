@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using FFmpeg.AutoGen.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
@@ -18,7 +19,7 @@ namespace StorageDemo.Infrastructure.Detection;
 /// input through one swscale pass; normalisation is in the graph (models/README.md), so there is
 /// no float conversion here and nothing to allocate per frame.
 /// </summary>
-public sealed unsafe class OnnxDetector : IDetector, IDisposable
+public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
 {
     private const int Channels = 3;
 
@@ -68,6 +69,8 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
     /// </summary>
     private readonly float _cutoff;
 
+    private readonly byte _padValue;
+
     // ponytail: one input buffer and one scaler behind one lock, so calls serialise. Concurrent
     // Run on one session is legal; per-caller buffers are the upgrade if a GPU sits idle.
     private readonly Lock _gate = new();
@@ -105,7 +108,11 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
 
         if (descriptor.NeedsNms)
         {
-            throw new NotSupportedException("Non-maximum suppression is not built; it arrives with the YOLO descriptor (detection-plan.md D4).");
+            // Still unbuilt after D4, and deliberately: RF-DETR's decode is set-based and YOLO26's
+            // export uses the one-to-one head, so neither descriptor here asks for it. An older
+            // YOLO export with nms=False on the one-to-many head would, and would want the raw
+            // (batch, 84, anchors) transposed layout as well — a third BoxFormat, not a flag.
+            throw new NotSupportedException("Non-maximum suppression is not built; no descriptor here needs it (detection-plan.md D4).");
         }
 
         FfmpegLibrary.EnsureLoaded();
@@ -114,7 +121,14 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
         _cutoff = descriptor.ScoresAreLogits ? MathF.Log(threshold / (1 - threshold)) : threshold;
         _frameBytes = descriptor.InputSize * descriptor.InputSize * Channels;
         _inputNames = [descriptor.InputName];
-        _outputNames = [descriptor.BoxesOutput, descriptor.ScoresOutput];
+        _outputNames = descriptor.ScoresOutput is null
+            ? [descriptor.BoxesOutput]
+            : [descriptor.BoxesOutput, descriptor.ScoresOutput];
+
+        // The letterbox fill, 114, from the geometry that has one; Stretch covers the whole canvas
+        // and never shows it. Read here rather than added to the base record, because a strategy
+        // without padding has no honest value to give.
+        _padValue = descriptor.Geometry is DetectorGeometry.Letterbox letterbox ? (byte)letterbox.PadValue : (byte)0;
 
         using var options = new SessionOptions();
 
@@ -133,6 +147,7 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
         _session = new InferenceSession(modelPath, options);
 
         VerifyContract();
+        Classes = ReadEmbeddedMetadata(logger) ?? descriptor.Classes;
 
         logger.LogInformation(
             "Detector {Model} on the {Provider} execution provider (available: {Providers}), input {Input} {Shape}",
@@ -148,6 +163,13 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
 
     /// <summary>"CUDA" or "CPU": which provider the session was built with.</summary>
     public string Provider { get; }
+
+    /// <summary>
+    /// The table actually in use: the file's own <c>names</c> when it carries them, the
+    /// descriptor's otherwise. Exposed because which one won is the difference between a `dog` and
+    /// a `sheep` and should be visible without reading a log line.
+    /// </summary>
+    public IReadOnlyDictionary<int, string> Classes { get; }
 
     public VmtiDetection[] Detect(IntPtr frame) => Detect([frame])[0];
 
@@ -184,26 +206,32 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
 
             using var outputs = _session.Run(_runOptions, _inputNames, _inputValues, _outputNames);
 
+            // (batch, queries, columns): four for RF-DETR's cxcywh, six for a YOLO row that
+            // carries its own score and class. The counts are the tensor's, not the descriptor's.
             var boxes = outputs[0].GetTensorDataAsSpan<float>();
-            var scores = outputs[1].GetTensorDataAsSpan<float>();
+            var boxShape = outputs[0].GetTensorTypeAndShape().Shape;
+            var queries = (int)boxShape[1];
+            var columns = (int)boxShape[2];
 
-            // (batch, queries, classes): the counts are the tensor's, not the descriptor's.
-            var shape = outputs[1].GetTensorTypeAndShape().Shape;
-            var queries = (int)shape[1];
-            var classes = (int)shape[2];
+            var scores = ReadOnlySpan<float>.Empty;
+            var classes = 0;
+
+            if (_descriptor.ScoresOutput is not null)
+            {
+                scores = outputs[1].GetTensorDataAsSpan<float>();
+                classes = (int)outputs[1].GetTensorTypeAndShape().Shape[2];
+            }
 
             var results = new VmtiDetection[frames.Length][];
 
             for (var i = 0; i < frames.Length; i++)
             {
                 var frame = (AVFrame*)frames[i];
+                var rows = boxes.Slice(i * queries * columns, queries * columns);
 
-                results[i] = Decode(
-                    boxes.Slice(i * queries * 4, queries * 4),
-                    scores.Slice(i * queries * classes, queries * classes),
-                    classes,
-                    frame->width,
-                    frame->height);
+                results[i] = _descriptor.BoxFormat == BoxFormat.PixelCorners
+                    ? DecodeRows(rows, columns, frame->width, frame->height)
+                    : Decode(rows, scores.Slice(i * queries * classes, queries * classes), classes, frame->width, frame->height);
             }
 
             return results;
@@ -244,6 +272,74 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
             return "CPU";
         }
     }
+
+    /// <summary>
+    /// A YOLO export self-describes: <c>metadata_props</c> carries <c>names</c> and <c>imgsz</c>,
+    /// so the runner reads them instead of being configured (detection-plan.md D4). RF-DETR's
+    /// export carries neither, and that asymmetry is real: no metadata means the descriptor's
+    /// table stands, not that something is wrong.
+    ///
+    /// <c>names</c> is a <em>Python dict literal</em> — <c>{0: 'person', 1: 'bicycle', ...}</c>,
+    /// bare integer keys and single quotes — so it is a regex and not <c>JsonSerializer</c>
+    /// (models/README.md, "Embedded metadata").
+    /// </summary>
+    /// <returns>The embedded table, or null when the file does not carry one.</returns>
+    private IReadOnlyDictionary<int, string>? ReadEmbeddedMetadata(ILogger logger)
+    {
+        var metadata = _session.ModelMetadata.CustomMetadataMap;
+
+        // imgsz is "[640, 640]". It says the same thing the input tensor's shape does, and the two
+        // disagreeing means the file is not what it claims, which is worth refusing over.
+        if (metadata.TryGetValue("imgsz", out var imgsz))
+        {
+            var sizes = EmbeddedInteger().Matches(imgsz).Select(m => int.Parse(m.Value)).ToArray();
+
+            if (sizes.Length != 2 || sizes[0] != _descriptor.InputSize || sizes[1] != _descriptor.InputSize)
+            {
+                throw new InvalidOperationException(
+                    $"The model's own imgsz is {imgsz}, not [{_descriptor.InputSize}, {_descriptor.InputSize}]; "
+                    + "the descriptor's geometry and the file disagree.");
+            }
+        }
+
+        // The three output contracts D4 warns about are decided by flags frozen at export, and this
+        // is the one that is visible: end2end says the one-to-one head is active, which is why
+        // NeedsNms is false and why the 300 rows are objects rather than 8400 anchors. A file
+        // exported the other way has a differently shaped output0 and would decode to nonsense
+        // quietly, so it is refused here rather than detected from a shape we have never seen.
+        if (metadata.TryGetValue("end2end", out var end2end)
+            && !_descriptor.NeedsNms
+            && !end2end.Equals("True", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"The model says end2end={end2end}, so its head emits anchors needing suppression, "
+                + "and this descriptor says none is needed. Re-export with the one-to-one head.");
+        }
+
+        if (!metadata.TryGetValue("names", out var names))
+        {
+            logger.LogInformation("The model carries no class names of its own; using the descriptor's table of {Count}.", _descriptor.Classes.Count);
+            return null;
+        }
+
+        var embedded = EmbeddedName().Matches(names).ToDictionary(m => int.Parse(m.Groups[1].Value), m => m.Groups[2].Value);
+
+        if (embedded.Count == 0)
+        {
+            throw new InvalidOperationException($"The model's 'names' metadata parsed to nothing: {names}");
+        }
+
+        logger.LogInformation("Class names read from the model's own metadata: {Count}.", embedded.Count);
+
+        return embedded;
+    }
+
+    [GeneratedRegex(@"\d+")]
+    private static partial Regex EmbeddedInteger();
+
+    /// <summary><c>0: 'person'</c>. Single-quoted, so an apostrophe would be backslash-escaped; none of COCO's are.</summary>
+    [GeneratedRegex(@"(\d+)\s*:\s*'((?:[^'\\]|\\.)*)'")]
+    private static partial Regex EmbeddedName();
 
     /// <summary>The file matches the descriptor: names exist, input is uint8 NHWC at the canvas size.</summary>
     private void VerifyContract()
@@ -325,8 +421,15 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
             _sourceStride[plane] = frame->linesize[plane];
         }
 
-        // Any padding around the placement is left as it was; the letterbox fill is D4's, with
-        // the descriptor that needs it.
+        // The padding around the placement, when the geometry leaves any: 114 everywhere, then
+        // swscale writes the picture over the middle of it. The whole canvas rather than the four
+        // margins because a 1.2 MB fill is microseconds against a model call of hundreds of
+        // milliseconds, and the margins are four rectangles to get wrong.
+        if (width != _descriptor.InputSize || height != _descriptor.InputSize)
+        {
+            NativeMemory.Fill(canvas, (nuint)_frameBytes, _padValue);
+        }
+
         _target[0] = canvas + top * _stride + left * Channels;
 
         ffmpeg.sws_scale(_scaler, _source, _sourceStride, 0, frame->height, _target, _targetStride);
@@ -344,7 +447,7 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
         for (var index = 0; index < scores.Length; index++)
         {
             var raw = scores[index];
-            if (raw <= _cutoff || !_descriptor.Classes.TryGetValue(index % classes, out var name))
+            if (raw <= _cutoff || !Classes.TryGetValue(index % classes, out var name))
             {
                 continue;
             }
@@ -352,12 +455,50 @@ public sealed unsafe class OnnxDetector : IDetector, IDisposable
             var query = index / classes;
             var score = _descriptor.ScoresAreLogits ? 1 / (1 + MathF.Exp(-raw)) : raw;
 
-            // BoxFormat.CentreNormalised is the only layout; YOLO's canvas-pixel xywh adds a branch here.
             var box = boxes.Slice(query * 4, 4);
 
             kept.Add(_descriptor.Geometry.ToFrameNormalised(
                 kept.Count + 1,
                 (box[0], box[1], box[2], box[3]),
+                frameWidth,
+                frameHeight) with
+            {
+                ConfidencePercent = (int)Math.Round(score * 100),
+                OntologyClass = name,
+            });
+        }
+
+        return [.. kept];
+    }
+
+    /// <summary>
+    /// <see cref="BoxFormat.PixelCorners"/>: one row per query, <c>x1, y1, x2, y2, score,
+    /// classId</c>, corners already in canvas pixels so the geometry's own inverse takes them
+    /// straight. No sigmoid — the head's scores are probabilities — and no suppression, because
+    /// YOLO26's one-to-one head emits one row per object (models/README.md, "NMS is already in the
+    /// graph"). The rows are score-sorted, so the first one under the threshold ends the frame.
+    /// </summary>
+    private VmtiDetection[] DecodeRows(ReadOnlySpan<float> rows, int columns, int frameWidth, int frameHeight)
+    {
+        var kept = new List<VmtiDetection>();
+
+        for (var row = 0; row + columns <= rows.Length; row += columns)
+        {
+            var score = rows[row + 4];
+
+            if (score <= _cutoff)
+            {
+                break;
+            }
+
+            if (!Classes.TryGetValue((int)rows[row + 5], out var name))
+            {
+                continue;
+            }
+
+            kept.Add(_descriptor.Geometry.ToFrame(
+                kept.Count + 1,
+                (rows[row], rows[row + 1], rows[row + 2], rows[row + 3]),
                 frameWidth,
                 frameHeight) with
             {

@@ -19,22 +19,16 @@ public sealed class OnnxCollection
 }
 
 /// <summary>
-/// RF-DETR Nano through the real runner, against the sample image models/README.md documents.
-/// The model is 108 MB and gitignored, so these skip rather than fail when it is absent.
-///
-/// Thresholds and tolerances rather than equality throughout: the README says the resize
-/// convention alone moves scores by hundredths and boxes by a pixel or two.
+/// What both detectors' tests need and neither owns: the checkout, a picture decoded by libav, a
+/// blank frame, and a log the test can read back. The expectations stay apart, per model, because
+/// the two disagree on the contents of the same scene (models/README.md, "There is no dog").
 /// </summary>
-[Collection(OnnxCollection.Name)]
-public sealed unsafe class OnnxDetectorTests(ITestOutputHelper output) : IDisposable
+public abstract unsafe class DetectorTests : IDisposable
 {
-    private static readonly string Root = FindRoot();
-    private static readonly string Model = Path.Combine(Root, "models", "rf-detr-nano.onnx");
-    private static readonly string Dog = Path.Combine(Root, "models", "dog-2.jpeg");
+    protected static readonly string Root = FindRoot();
 
-    private const string NoModel = "models/rf-detr-nano.onnx is absent; run scripts/fetch-rfdetr.sh";
+    protected readonly List<string> Log = [];
 
-    private readonly List<string> _log = [];
     private readonly List<IntPtr> _frames = [];
 
     public void Dispose()
@@ -44,7 +38,126 @@ public sealed unsafe class OnnxDetectorTests(ITestOutputHelper output) : IDispos
             var pointer = (AVFrame*)frame;
             ffmpeg.av_frame_free(&pointer);
         }
+
+        GC.SuppressFinalize(this);
     }
+
+    /// <summary>The first picture in a file, decoded by libav; a JPEG arrives as yuvj420p, which is the runner's problem.</summary>
+    protected IntPtr Decode(string path)
+    {
+        FfmpegLibrary.EnsureLoaded();
+
+        AVFormatContext* format = null;
+        AVCodecContext* codec = null;
+        AVPacket* packet = null;
+
+        try
+        {
+            Assert.True(ffmpeg.avformat_open_input(&format, path, null, null) >= 0, $"could not open {path}");
+            Assert.True(ffmpeg.avformat_find_stream_info(format, null) >= 0);
+
+            AVCodec* decoder = null;
+            var stream = ffmpeg.av_find_best_stream(format, AVMediaType.AVMEDIA_TYPE_VIDEO, -1, -1, &decoder, 0);
+            Assert.True(stream >= 0 && decoder is not null, "no video stream");
+
+            codec = ffmpeg.avcodec_alloc_context3(decoder);
+            Assert.True(ffmpeg.avcodec_parameters_to_context(codec, format->streams[stream]->codecpar) >= 0);
+            Assert.True(ffmpeg.avcodec_open2(codec, decoder, null) >= 0);
+
+            packet = ffmpeg.av_packet_alloc();
+            var frame = ffmpeg.av_frame_alloc();
+            _frames.Add((IntPtr)frame);
+
+            while (ffmpeg.av_read_frame(format, packet) >= 0)
+            {
+                if (packet->stream_index == stream && ffmpeg.avcodec_send_packet(codec, packet) >= 0
+                    && ffmpeg.avcodec_receive_frame(codec, frame) == 0)
+                {
+                    break;
+                }
+
+                ffmpeg.av_packet_unref(packet);
+            }
+
+            Assert.True(frame->width > 0, $"nothing decoded from {path}");
+
+            return (IntPtr)frame;
+        }
+        finally
+        {
+            if (packet is not null)
+            {
+                ffmpeg.av_packet_free(&packet);
+            }
+
+            if (codec is not null)
+            {
+                ffmpeg.avcodec_free_context(&codec);
+            }
+
+            if (format is not null)
+            {
+                ffmpeg.avformat_close_input(&format);
+            }
+        }
+    }
+
+    protected IntPtr Blank(int width, int height)
+    {
+        FfmpegLibrary.EnsureLoaded();
+
+        var frame = ffmpeg.av_frame_alloc();
+        _frames.Add((IntPtr)frame);
+
+        frame->format = (int)AVPixelFormat.AV_PIX_FMT_RGB24;
+        frame->width = width;
+        frame->height = height;
+        Assert.True(ffmpeg.av_frame_get_buffer(frame, 0) >= 0);
+
+        NativeMemory.Clear(frame->data[0], (nuint)(frame->linesize[0] * height));
+
+        return (IntPtr)frame;
+    }
+
+    /// <summary>Walks up from the test binaries to the checkout, which is where models/ lives.</summary>
+    private static string FindRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+
+        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "models")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? AppContext.BaseDirectory;
+    }
+
+    /// <summary>Captures formatted log lines so a test can read what the runner said about itself.</summary>
+    protected sealed class ListLogger(List<string> lines) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => lines.Add(formatter(state, exception));
+    }
+}
+
+/// <summary>
+/// RF-DETR Nano through the real runner, against the sample image models/README.md documents.
+/// The model is 108 MB and gitignored, so these skip rather than fail when it is absent.
+///
+/// Thresholds and tolerances rather than equality throughout: the README says the resize
+/// convention alone moves scores by hundredths and boxes by a pixel or two.
+/// </summary>
+[Collection(OnnxCollection.Name)]
+public sealed class OnnxDetectorTests(ITestOutputHelper output) : DetectorTests
+{
+    private static readonly string Model = Path.Combine(Root, "models", "rf-detr-nano.onnx");
+    private static readonly string Dog = Path.Combine(Root, "models", "dog-2.jpeg");
+
+    private const string NoModel = "models/rf-detr-nano.onnx is absent; run scripts/fetch-rfdetr.sh";
 
     [Fact]
     public void The_dog_picture_yields_the_dog_the_cup_and_the_umbrella_where_the_readme_says()
@@ -144,111 +257,10 @@ public sealed unsafe class OnnxDetectorTests(ITestOutputHelper output) : IDispos
 
         // No CUDA on this machine, so the append throws and the log says the processor won.
         Assert.Equal("CPU", detector.Provider);
-        Assert.Contains(_log, line => line.Contains("using the processor", StringComparison.Ordinal));
-        Assert.Contains(_log, line => line.Contains("on the CPU execution provider", StringComparison.Ordinal));
+        Assert.Contains(Log, line => line.Contains("using the processor", StringComparison.Ordinal));
+        Assert.Contains(Log, line => line.Contains("on the CPU execution provider", StringComparison.Ordinal));
     }
 
     private OnnxDetector Detector(float threshold)
-        => new(Model, DetectorDescriptor.RfDetrNano, threshold, new ListLogger(_log));
-
-    /// <summary>The first picture in a file, decoded by libav; the JPEG arrives as yuvj420p, which is the runner's problem.</summary>
-    private IntPtr Decode(string path)
-    {
-        FfmpegLibrary.EnsureLoaded();
-
-        AVFormatContext* format = null;
-        AVCodecContext* codec = null;
-        AVPacket* packet = null;
-
-        try
-        {
-            Assert.True(ffmpeg.avformat_open_input(&format, path, null, null) >= 0, $"could not open {path}");
-            Assert.True(ffmpeg.avformat_find_stream_info(format, null) >= 0);
-
-            AVCodec* decoder = null;
-            var stream = ffmpeg.av_find_best_stream(format, AVMediaType.AVMEDIA_TYPE_VIDEO, -1, -1, &decoder, 0);
-            Assert.True(stream >= 0 && decoder is not null, "no video stream");
-
-            codec = ffmpeg.avcodec_alloc_context3(decoder);
-            Assert.True(ffmpeg.avcodec_parameters_to_context(codec, format->streams[stream]->codecpar) >= 0);
-            Assert.True(ffmpeg.avcodec_open2(codec, decoder, null) >= 0);
-
-            packet = ffmpeg.av_packet_alloc();
-            var frame = ffmpeg.av_frame_alloc();
-            _frames.Add((IntPtr)frame);
-
-            while (ffmpeg.av_read_frame(format, packet) >= 0)
-            {
-                if (packet->stream_index == stream && ffmpeg.avcodec_send_packet(codec, packet) >= 0
-                    && ffmpeg.avcodec_receive_frame(codec, frame) == 0)
-                {
-                    break;
-                }
-
-                ffmpeg.av_packet_unref(packet);
-            }
-
-            Assert.True(frame->width > 0, $"nothing decoded from {path}");
-
-            return (IntPtr)frame;
-        }
-        finally
-        {
-            if (packet is not null)
-            {
-                ffmpeg.av_packet_free(&packet);
-            }
-
-            if (codec is not null)
-            {
-                ffmpeg.avcodec_free_context(&codec);
-            }
-
-            if (format is not null)
-            {
-                ffmpeg.avformat_close_input(&format);
-            }
-        }
-    }
-
-    private IntPtr Blank(int width, int height)
-    {
-        FfmpegLibrary.EnsureLoaded();
-
-        var frame = ffmpeg.av_frame_alloc();
-        _frames.Add((IntPtr)frame);
-
-        frame->format = (int)AVPixelFormat.AV_PIX_FMT_RGB24;
-        frame->width = width;
-        frame->height = height;
-        Assert.True(ffmpeg.av_frame_get_buffer(frame, 0) >= 0);
-
-        NativeMemory.Clear(frame->data[0], (nuint)(frame->linesize[0] * height));
-
-        return (IntPtr)frame;
-    }
-
-    /// <summary>Walks up from the test binaries to the checkout, which is where models/ lives.</summary>
-    private static string FindRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-
-        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "models")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? AppContext.BaseDirectory;
-    }
-
-    /// <summary>Captures formatted log lines so a test can read what the runner said about its provider.</summary>
-    private sealed class ListLogger(List<string> lines) : ILogger
-    {
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-            => lines.Add(formatter(state, exception));
-    }
+        => new(Model, DetectorDescriptor.RfDetrNano, threshold, new ListLogger(Log));
 }
