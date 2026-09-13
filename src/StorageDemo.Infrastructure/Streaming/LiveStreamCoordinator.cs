@@ -25,6 +25,7 @@ namespace StorageDemo.Infrastructure.Streaming;
 public sealed class LiveStreamCoordinator(
     StreamDemuxer demuxer,
     ILiveStreamRegistry registry,
+    ILiveSourceStore sources,
     IDistributedLock coordination,
     IMediaAnalyzer analyzer,
     IServiceScopeFactory scopeFactory,
@@ -47,6 +48,13 @@ public sealed class LiveStreamCoordinator(
     /// read. See <see cref="AdmitPublisher"/>.
     /// </summary>
     private readonly ConcurrentDictionary<string, LiveStream> _known = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// When this replica last tried to pick up each configured source. A source whose URL the
+    /// allowlist refuses, or whose camera is switched off, would otherwise be dialled on every beat
+    /// for as long as it stays that way, by every replica at once.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _attempted = new(StringComparer.Ordinal);
 
     private readonly LiveOptions _options = options.Value;
     private readonly CancellationTokenSource _shutdown = new();
@@ -391,6 +399,33 @@ public sealed class LiveStreamCoordinator(
         string url,
         CancellationToken cancellationToken = default)
     {
+        var entry = await PullAsync(name, url, cancellationToken);
+
+        if (entry is null)
+        {
+            // The same lock an encoder meets at the handshake. A pulled stream has no handshake to
+            // be refused at, so the refusal is the answer to the request that asked for it - which
+            // is exactly why the reconcile pass calls the shared path below rather than this one:
+            // losing a claim is a request failing here and an ordinary beat there.
+            throw new InvalidOperationException($"'{name}' is already live on another replica.");
+        }
+
+        return Describe(entry, LiveStreamState.Live);
+    }
+
+    /// <summary>
+    /// Claims a name and opens a pulled input on it, for a protocol that cannot name itself.
+    ///
+    /// Both callers go through here, rather than the reconcile pass calling
+    /// <see cref="CreateManualAsync"/>, because they disagree about one thing only and it is the
+    /// return type: a person asking for a stream needs to be told the name was taken, and a replica
+    /// reconciling a thousand sources against a dozen peers expects to lose most of the time and
+    /// must not raise an exception each time it does. Everything else - the name check, the
+    /// allowlist, the claim, the demultiplexer on its own thread - is shared, which is the point.
+    /// </summary>
+    /// <returns>The running entry, or null when another replica holds the name.</returns>
+    private async Task<LiveStreamEntry?> PullAsync(string name, string url, CancellationToken cancellationToken)
+    {
         if (!StreamName.TryParse(name, out var parsed, out var rejection))
         {
             throw new ArgumentException(rejection, nameof(name));
@@ -406,9 +441,7 @@ public sealed class LiveStreamCoordinator(
         {
             await DiscardAsync(entry);
 
-            // The same lock an encoder meets at the handshake. A pulled stream has no handshake to
-            // be refused at, so the refusal is the answer to the request that asked for it.
-            throw new InvalidOperationException($"'{parsed}' is already live on another replica.");
+            return null;
         }
 
         var feed = await entry.TakeOverAsync(Guid.NewGuid().ToString("N")[..8]);
@@ -418,7 +451,7 @@ public sealed class LiveStreamCoordinator(
             () => demuxer.Run(url, _options.ManualInputOptions, running.Hub, feed),
             TaskCreationOptions.LongRunning));
 
-        return Describe(entry, LiveStreamState.Live);
+        return entry;
     }
 
     public async Task<Guid?> SnapshotAsync(
@@ -715,7 +748,113 @@ public sealed class LiveStreamCoordinator(
         metrics.StreamsOwned = _local.Count;
 
         await RefreshKnownAsync(cancellationToken);
+
+        try
+        {
+            await AdoptAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // The store is a second thing that can be unreachable, and unlike the registry its
+            // implementations let a failure out rather than swallowing it. A Redis that has gone
+            // away must cost the cluster new pull streams, not the heartbeat that keeps the ones
+            // already running listed.
+            logger.LogWarning(ex, "Reconciling configured sources failed");
+        }
     }
+
+    /// <summary>
+    /// Picks up configured pull sources that are not live anywhere, by whichever replica gets there
+    /// first.
+    ///
+    /// There is no scheduler and no assignment: every replica sees the same list every beat and
+    /// races for what is missing, and <see cref="ClaimAsync"/>'s distributed lock is what makes that
+    /// safe. Losing is the normal outcome - with a thousand sources and many replicas most attempts
+    /// lose - so it is not logged as a failure and does not count as an attempt worth backing off
+    /// from any differently than a success.
+    /// </summary>
+    private async Task AdoptAsync(CancellationToken cancellationToken)
+    {
+        if (Full())
+        {
+            return;
+        }
+
+        var configured = await sources.ListAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        var backoff = TimeSpan.FromSeconds(_options.ForwardRetrySeconds);
+
+        var candidates = configured
+            .Where(source => source is { Enabled: true, IsPull: true })
+            .Where(source => !_local.ContainsKey(source.Name))
+            .Where(source => !LiveElsewhere(source.Name))
+            .Where(source => !_attempted.TryGetValue(source.Name, out var last) || now - last >= backoff)
+            // Shuffled, which is the whole of the anti-stampede measure. A thousand replicas reading
+            // one list in one order would all reach for the same source on the same beat and all but
+            // one would waste a lock acquisition on it; in a different order each they spread across
+            // the work and the lock is contended by a handful rather than by everybody.
+            .OrderBy(_ => Random.Shared.Next())
+            .ToList();
+
+        // Names the store no longer carries, in the idiom RefreshKnownAsync uses on the registry.
+        // Without it a source deleted and recreated under a new name leaves its back-off behind for
+        // the life of the process.
+        foreach (var name in _attempted.Keys.Except(
+                     configured.Select(source => source.Name),
+                     StringComparer.Ordinal))
+        {
+            _attempted.TryRemove(name, out _);
+        }
+
+        foreach (var source in candidates)
+        {
+            if (Full())
+            {
+                // The same ceiling the handshake refuses publishers at, and for the same reason: a
+                // replica at its limit taking pulled streams as well would abandon what it already
+                // holds. Re-read each time round, because this loop is what moves the count.
+                return;
+            }
+
+            // Recorded before the attempt and whatever the outcome. A URL the allowlist refuses and
+            // a far end that is down both throw below, and without this every replica would dial an
+            // unreachable camera every two seconds for as long as it stays unreachable.
+            _attempted[source.Name] = DateTimeOffset.UtcNow;
+
+            try
+            {
+                if (await PullAsync(source.Name, source.Url!, cancellationToken) is not null)
+                {
+                    logger.LogInformation("Picked up the configured source '{Name}'", source.Name);
+                }
+                else
+                {
+                    logger.LogDebug("'{Name}' was claimed by another replica first", source.Name);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not pick up the configured source '{Name}'", source.Name);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether this replica is at the ceiling <see cref="AdmitPublisher"/> refuses publishers at. A
+    /// pulled stream costs what a pushed one costs, so the two are counted against one limit.
+    /// </summary>
+    private bool Full() => _options.MaxStreams > 0 && _local.Count >= _options.MaxStreams;
+
+    /// <summary>
+    /// Whether some other replica is already running this name, read from the heartbeat's copy of
+    /// the registry on exactly the rule <see cref="ClaimAsync"/> would apply. Getting it wrong here
+    /// costs a lock acquisition and a refusal, not a second stream.
+    /// </summary>
+    private bool LiveElsewhere(string name)
+        => _known.TryGetValue(name, out var held)
+            && held.Owner != Owner
+            && held.State == LiveStreamState.Live
+            && LiveStreamStaleness.OwnerAlive(held, Beat);
 
     /// <summary>
     /// The one registry read the handshake depends on, taken last so that what this pass just
@@ -789,9 +928,99 @@ public sealed class LiveStreamCoordinator(
             return;
         }
 
+        await ReconcileForwardsAsync(entry, cancellationToken);
+
         await registry.UpsertAsync(
             Describe(entry, interrupted ? LiveStreamState.Interrupted : LiveStreamState.Live),
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Brings the forwards running for this stream into line with what was configured for its name.
+    ///
+    /// It happens here, in the per-stream heartbeat, and that is the design decision behind the
+    /// whole shape: the forwards hang off the local entry, so they follow the stream's owner with no
+    /// arrangement of their own. A name that moves to another pod is claimed there and reconciled
+    /// there on the next beat, while the pod that lost it stands down and disposes the entry, which
+    /// stops its copies. A forward lease would be a second claim to keep in step with the first, and
+    /// the failure it would exist to prevent - two pods pushing one stream to one far end - is
+    /// already prevented by the name claim, because only one pod has the bytes.
+    /// </summary>
+    /// <remarks>
+    /// ponytail: one store read per stream per beat, which at a thousand streams is a thousand more
+    /// round trips every two seconds on top of the thousand the registry already costs here. The
+    /// store says of itself that it is read-heavy and rarely written, so both implementations can
+    /// serve this from memory; if one ever cannot, read the whole list once per beat beside
+    /// <see cref="RefreshKnownAsync"/> and reconcile every entry from that copy.
+    /// </remarks>
+    private async Task ReconcileForwardsAsync(LiveStreamEntry entry, CancellationToken cancellationToken)
+    {
+        var source = await sources.GetAsync(entry.Name, cancellationToken);
+
+        // A disabled source silences its forwards without forgetting them, which is what parking a
+        // source means; an absent one has nothing to say about a stream an encoder simply pushed.
+        var desired = source is { Enabled: true }
+            ? source.Forwards.Where(target => target.Enabled).ToArray()
+            : [];
+
+        var running = entry.Forwards.ToDictionary(
+            pair => pair.Key,
+            pair => new RunningForward(pair.Value.Url, pair.Value.Finished, pair.Value.LastAttemptAt),
+            StringComparer.Ordinal);
+
+        var (start, stop) = ForwardPlan.Decide(
+            desired,
+            running,
+            DateTimeOffset.UtcNow,
+            TimeSpan.FromSeconds(_options.ForwardRetrySeconds));
+
+        foreach (var id in stop)
+        {
+            if (entry.Forwards.TryRemove(id, out var stopping))
+            {
+                stopping.Dispose();
+            }
+        }
+
+        foreach (var target in start)
+        {
+            string? refusal = null;
+
+            try
+            {
+                // The allowlist that stops "create a stream" becoming "read this local file" is the
+                // same one that stops a forward becoming "write this local file".
+                RequireAllowed(target.Url, forOutput: true);
+            }
+            catch (NotSupportedException ex)
+            {
+                refusal = ex.Message;
+            }
+
+            if (refusal is null && entry.Hub.Layout is null)
+            {
+                // Nothing has been demultiplexed yet, so there is no container to write. Starting
+                // now would fail at once and burn the retry window, and leaving it out of the
+                // dictionary means the next beat plans it again rather than waiting for a retry.
+                continue;
+            }
+
+            var forwarder = new StreamForwarder(target.Id, target.Url, entry.Hub, _options, logger);
+
+            entry.Forwards[target.Id] = forwarder;
+
+            // A refusal is answered before the stream has a layout, unlike a real start: the
+            // operator mistyped a URL and should be told now rather than when bytes happen to
+            // arrive, and there is no transport to open for one.
+            if (refusal is not null)
+            {
+                forwarder.Refuse(refusal);
+            }
+            else
+            {
+                forwarder.Start(entry.Lifetime.Token);
+            }
+        }
     }
 
     /// <summary>
@@ -854,10 +1083,19 @@ public sealed class LiveStreamCoordinator(
             entry.Klv.Classification,
             entry.Detection.Enabled,
             entry.Detection.Rate,
-            entry.Detection.Worker);
+            entry.Detection.Worker,
+            // Null rather than an empty list when nothing is forwarded, so a listing of a thousand
+            // ordinary streams does not carry a thousand empty arrays through Redis and out again.
+            entry.Forwards.IsEmpty ? null : [.. entry.Forwards.Values.Select(forwarder => forwarder.Status)]);
     }
 
-    private void RequireAllowed(string url)
+    /// <param name="forOutput">
+    /// True for a forward target, which libav has to be able to write rather than read. The same
+    /// allowlist governs both: a URL is a URL, and "write this local file" is the mirror of the
+    /// attack the list was drawn up against. The support check is not the same, because an FFmpeg
+    /// build can carry one direction of a protocol and not the other.
+    /// </param>
+    private void RequireAllowed(string url, bool forOutput = false)
     {
         var separator = url.IndexOf("://", StringComparison.Ordinal);
         var scheme = separator > 0 ? url[..separator].ToLowerInvariant() : "file";
@@ -870,7 +1108,7 @@ public sealed class LiveStreamCoordinator(
                 $"Transport '{scheme}' is not allowed. Allowed: {string.Join(", ", _options.AllowedSchemes)}.");
         }
 
-        if (!FfmpegLibrary.Supports(url, forOutput: false))
+        if (!FfmpegLibrary.Supports(url, forOutput))
         {
             throw new NotSupportedException(
                 $"The loaded FFmpeg has no '{scheme}' support. Available: {string.Join(", ", Transports)}.");

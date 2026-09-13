@@ -622,13 +622,5 @@ public sealed class LibavMediaAnalyzer(
         => value is null ? null : Marshal.PtrToStringAnsi((IntPtr)value);
 
     /// <summary>Turns a libav negative return code into its message.</summary>
-    private static unsafe string Describe(int error)
-    {
-        const int size = 256;
-        var buffer = stackalloc byte[size];
-
-        return ffmpeg.av_strerror(error, buffer, size) == 0
-            ? Marshal.PtrToStringAnsi((IntPtr)buffer) ?? error.ToString()
-            : error.ToString();
-    }
+    private static string Describe(int error) => FfmpegLibrary.Describe(error);
 }

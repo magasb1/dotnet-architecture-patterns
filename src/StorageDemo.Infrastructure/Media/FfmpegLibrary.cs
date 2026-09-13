@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using FFmpeg.AutoGen.Abstractions;
 using FFmpeg.AutoGen.Bindings.DynamicallyLoaded;
 
@@ -60,6 +61,23 @@ public static unsafe partial class FfmpegLibrary
         var scheme = url[..separator].ToLowerInvariant();
 
         return (forOutput ? OutputProtocols() : InputProtocols()).Contains(scheme);
+    }
+
+    /// <summary>
+    /// Turns a libav negative return code into its message.
+    ///
+    /// Here rather than in the one class that used to hold it, because a libav error number in an
+    /// exception is worth nothing to whoever reads the log: "Connection refused" says what to do
+    /// about a forward that will not open and "-111" does not.
+    /// </summary>
+    public static unsafe string Describe(int error)
+    {
+        const int size = 256;
+        var buffer = stackalloc byte[size];
+
+        return ffmpeg.av_strerror(error, buffer, size) == 0
+            ? Marshal.PtrToStringAnsi((IntPtr)buffer) ?? error.ToString()
+            : error.ToString();
     }
 
     private static unsafe List<string> Enumerate(int output)
