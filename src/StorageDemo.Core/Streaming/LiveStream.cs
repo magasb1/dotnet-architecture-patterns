@@ -105,6 +105,14 @@ public sealed record RecordingStatus(
 /// wire underneath, so this is null for both. Absence here means "nothing to ask", never "asked
 /// and got zero" - the same reasoning <see cref="Classification"/> uses.
 /// </param>
+/// <param name="Viewers">
+/// Players pulling this stream from this replica right now, counted for the life of each one's own
+/// subscription to the packet fan-out - not the demultiplexer's subscriber count, which also
+/// carries the recorder, the harvester, the KLV extractor and every forward. A relayed viewer
+/// counts here too: a relay ends up subscribing on this same replica, because only the owner has
+/// the bytes. Always a real number rather than null, unlike <see cref="Link"/>: whether a stream
+/// has any watchers is meaningful whichever way it arrived.
+/// </param>
 /// <param name="DetectionWorker">
 /// Which worker holds the stream, null when none has claimed it or the one that had it has gone
 /// quiet. A worker claims by writing its name through the owner and renews by writing it again;
@@ -136,7 +144,8 @@ public sealed record LiveStream(
     int DetectionRate = 0,
     string? DetectionWorker = null,
     IReadOnlyList<ForwardStatus>? Forwards = null,
-    SrtLinkStats? Link = null);
+    SrtLinkStats? Link = null,
+    int Viewers = 0);
 
 /// <summary>
 /// What libsrt itself says about one connection, over the last heartbeat.

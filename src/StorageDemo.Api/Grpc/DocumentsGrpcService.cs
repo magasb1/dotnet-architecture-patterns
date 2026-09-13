@@ -242,6 +242,7 @@ public sealed class DocumentsGrpcService(
             HasKlv = stream.HasKlv,
             DetectionEnabled = stream.DetectionEnabled,
             DetectionRate = stream.DetectionRate,
+            Viewers = stream.Viewers,
         };
 
         if (stream.Recording is { } recording)

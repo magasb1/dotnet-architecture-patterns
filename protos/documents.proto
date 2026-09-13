@@ -184,7 +184,7 @@ message LiveStreamMessage {
   // Fields are only ever added here, never renumbered or removed: an older client reads zero
   // for what it does not know and a newer one reads zero from an older server. 19 to 21 are
   // detection, below; 22 to 25 stay held for further KLV fields; 26 is the forward list; 27 is
-  // the link stats.
+  // the link stats; 28 is the viewer count.
   int32 packets_lost = 14;
   int32 packets_dropped = 15;
 
@@ -216,6 +216,11 @@ message LiveStreamMessage {
   // port - a pulled stream and every forward are opened by libav instead, which cannot answer
   // this. Absent means there was nothing to ask, not that every field below is zero.
   optional SrtLinkStatsMessage link = 27;
+
+  // Players pulling this stream from this replica right now, a relayed viewer included - not the
+  // demultiplexer's subscriber count, which also carries the recorder, the harvester, the KLV
+  // extractor and every forward.
+  int32 viewers = 28;
 }
 
 // A curated handful of SRT_TRACEBSTATS, not the roughly ninety fields libsrt actually tracks. See

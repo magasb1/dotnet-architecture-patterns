@@ -694,6 +694,11 @@ public sealed class LiveStreamCoordinator(
 
         using var muxer = new PacketMuxer(destination, layout, "mpegts", continueFromSeconds);
 
+        // Counted for exactly the life of this subscription, which is exactly the life of one
+        // viewer's connection - joined once it has actually subscribed rather than the moment the
+        // call arrived, and left in a finally so a fault below still lets the count go down.
+        entry.ViewerJoined();
+
         try
         {
             await foreach (var packet in subscription.Packets.ReadAllAsync(cancellationToken))
@@ -714,6 +719,10 @@ public sealed class LiveStreamCoordinator(
         catch (Exception ex)
         {
             logger.LogDebug(ex, "A viewer of '{Name}' went away", entry.Name);
+        }
+        finally
+        {
+            entry.ViewerLeft();
         }
 
         // No trailer: this connection may be handed straight on to another replica, and a trailer
@@ -1110,7 +1119,8 @@ public sealed class LiveStreamCoordinator(
             // Null rather than an empty list when nothing is forwarded, so a listing of a thousand
             // ordinary streams does not carry a thousand empty arrays through Redis and out again.
             entry.Forwards.IsEmpty ? null : [.. entry.Forwards.Values.Select(forwarder => forwarder.Status)],
-            health?.Link);
+            health?.Link,
+            entry.Viewers);
     }
 
     /// <param name="forOutput">

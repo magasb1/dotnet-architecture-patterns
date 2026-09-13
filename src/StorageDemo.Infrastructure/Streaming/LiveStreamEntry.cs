@@ -113,6 +113,26 @@ public sealed class LiveStreamEntry : IAsyncDisposable
 
     public bool FeedRunning => Feeding is { IsCompleted: false };
 
+    private int _viewers;
+
+    /// <summary>
+    /// How many players are pulling this stream right now, on whichever port and however they
+    /// reached this replica - directly on the consumption port, or relayed here from a replica
+    /// that does not own the stream, since a relay ends up calling the same <c>Serve</c> that a
+    /// direct connection does.
+    ///
+    /// Counted here rather than read off <see cref="StreamHub"/>'s subscriber list, which also
+    /// holds the recorder, the harvester, the KLV extractor and every forward: a wall of a
+    /// thousand tiles asking "who is actually watching this" wants none of those, and teaching the
+    /// hub to tell them apart would be a second concept for one number. <see cref="ViewerJoined"/>
+    /// and <see cref="ViewerLeft"/> are the only two callers, one per connection's lifetime.
+    /// </summary>
+    public int Viewers => Volatile.Read(ref _viewers);
+
+    public void ViewerJoined() => Interlocked.Increment(ref _viewers);
+
+    public void ViewerLeft() => Interlocked.Decrement(ref _viewers);
+
     /// <summary>
     /// Hands the entry a new connection, cancelling whatever was feeding it.
     ///

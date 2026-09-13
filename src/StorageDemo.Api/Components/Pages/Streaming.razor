@@ -153,6 +153,11 @@ else
                             <span class="dot"></span>@StateWord(row.State)
                         </span>
                         <span class="stat num mono">@Throughput(row)</span>
+                        @* Every player pulling this stream from this replica, relayed ones included - not
+                           the demultiplexer's subscriber count, which also carries the recorder, the
+                           harvester, the KLV extractor and every forward. Zero reads as "nobody is
+                           watching", not as "unknown", so it shows even on a stream nobody has opened. *@
+                        <span class="stat fwd dim">@Viewers(row.Stream?.Viewers ?? 0)</span>
                         <span class="stat fwd @(row.ForwardsConfigured > 0 && row.ForwardsConnected < row.ForwardsConfigured ? "warn" : "dim")">
                             @(row.ForwardsConfigured == 0 ? "no forwards" : $"{row.ForwardsConnected}/{row.ForwardsConfigured} forwards")
                         </span>
@@ -197,6 +202,7 @@ else
                                     </div>
                                     <div class="row"><span class="k">URL</span><span class="v mono">@row.LocalOutput</span></div>
                                     <div class="row"><span class="k">Total</span><span class="v mono">@(row.Stream is null ? "-" : Size(row.Stream.Bytes))</span></div>
+                                    <div class="row"><span class="k">Viewers</span><span class="v mono">@(row.Stream is null ? "-" : row.Stream.Viewers.ToString("N0", CultureInfo.InvariantCulture))</span></div>
                                     @if (row.Stream?.Link is { } link)
                                     {
                                         <div class="row"><span class="k">Bandwidth</span><span class="v mono">@Mbps(link.BandwidthMbps)</span></div>
@@ -652,6 +658,13 @@ else
     private static string Mbps(double mbps) => mbps >= 10
         ? mbps.ToString("0", CultureInfo.InvariantCulture) + " Mb/s"
         : mbps.ToString("0.00", CultureInfo.InvariantCulture) + " Mb/s";
+
+    private static string Viewers(int count) => count switch
+    {
+        0 => "no viewers",
+        1 => "1 viewer",
+        _ => $"{count:N0} viewers",
+    };
 
     public void Dispose()
     {

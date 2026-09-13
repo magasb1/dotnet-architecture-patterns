@@ -771,6 +771,51 @@ public sealed class LiveStreamTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// The viewer count, through two real players on the consumption port rather than one: the
+    /// interesting failure for a counter touched from more than one connection's thread is getting
+    /// the arithmetic wrong under concurrency, which a single viewer cannot expose. Each player
+    /// connects with <c>m=request</c>, the same envelope <see cref="LiveReplicas.Watch"/> uses for a
+    /// real viewer rather than <see cref="Push"/>'s <c>m=publish</c>.
+    /// </summary>
+    [Fact]
+    public async Task Two_viewers_are_counted_and_each_leaving_is_subtracted()
+    {
+        Assert.SkipUnless(Srt.IsAvailable, NoLibsrt);
+        Assert.SkipUnless(HasSrt(), "This FFmpeg has no SRT. Run scripts/fetch-ffmpeg.sh.");
+
+        const string name = "camera-with-an-audience";
+
+        Push(name);
+
+        var stream = await WaitForStreamAsync(name, TimeSpan.FromSeconds(40));
+
+        Assert.NotNull(stream);
+        Assert.Equal(0, stream.Viewers);
+
+        var consumptionPort = _ingestPort + 5;
+        var first = SrtSenders.StartPlayer(consumptionPort, $"#!::r={name},m=request");
+        var second = SrtSenders.StartPlayer(consumptionPort, $"#!::r={name},m=request");
+        _senders.Add(first);
+        _senders.Add(second);
+
+        Assert.True(
+            await WaitAsync(async () => (await Get(name))?.Viewers == 2, TimeSpan.FromSeconds(20)),
+            $"never saw two viewers; last count was {(await Get(name))?.Viewers}");
+
+        Kill(first);
+
+        Assert.True(
+            await WaitAsync(async () => (await Get(name))?.Viewers == 1, TimeSpan.FromSeconds(20)),
+            $"the count never fell back to one after a viewer left; last was {(await Get(name))?.Viewers}");
+
+        Kill(second);
+
+        Assert.True(
+            await WaitAsync(async () => (await Get(name))?.Viewers == 0, TimeSpan.FromSeconds(20)),
+            $"the count never fell back to zero; last was {(await Get(name))?.Viewers}");
+    }
+
+    /// <summary>
     /// A transport carrying MISB KLV alongside the picture, through the real ingest: the list
     /// shows the stream carries it and what it is marked, the route serves the minimum set at
     /// the values that were sent with the raw packet beside them, and a snapshot keeps the marking.
