@@ -183,7 +183,8 @@ message LiveStreamMessage {
   //
   // Fields are only ever added here, never renumbered or removed: an older client reads zero
   // for what it does not know and a newer one reads zero from an older server. 19 to 21 are
-  // detection, below; 22 to 25 stay held for further KLV fields; 26 is the forward list.
+  // detection, below; 22 to 25 stay held for further KLV fields; 26 is the forward list; 27 is
+  // the link stats.
   int32 packets_lost = 14;
   int32 packets_dropped = 15;
 
@@ -210,6 +211,22 @@ message LiveStreamMessage {
   // configured. Here rather than on the source because a forward only exists where the bytes are,
   // and this message is already the answer to "what is this stream doing, wherever it is".
   repeated ForwardStatusMessage forwards = 26;
+
+  // libsrt's own read on this connection, present only for a publisher accepted on the ingest
+  // port - a pulled stream and every forward are opened by libav instead, which cannot answer
+  // this. Absent means there was nothing to ask, not that every field below is zero.
+  optional SrtLinkStatsMessage link = 27;
+}
+
+// A curated handful of SRT_TRACEBSTATS, not the roughly ninety fields libsrt actually tracks. See
+// the Core SrtLinkStats record this mirrors for why each one is here.
+message SrtLinkStatsMessage {
+  double bandwidth_mbps = 1;
+  double receive_rate_mbps = 2;
+  double round_trip_time_ms = 3;
+  int32 packets_retransmitted = 4;
+  int32 negotiated_latency_ms = 5;
+  int32 undecrypted_packets_total = 6;
 }
 
 // Somewhere a stream is copied to, besides the local consumption port. The scheme picks the

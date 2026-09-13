@@ -98,6 +98,13 @@ public sealed record RecordingStatus(
 /// Here rather than on <see cref="LiveSource"/> because a forward only exists where the bytes are,
 /// and this record is already the answer to "what is this stream doing, on whichever pod has it".
 /// </param>
+/// <param name="Link">
+/// The transport's own read on this connection, when there is one to ask. Only a publisher
+/// accepted on the ingest port has a socket this replica holds directly: a pulled stream and every
+/// forward are opened by libav instead, which answers for itself in bytes and nothing about the
+/// wire underneath, so this is null for both. Absence here means "nothing to ask", never "asked
+/// and got zero" - the same reasoning <see cref="Classification"/> uses.
+/// </param>
 /// <param name="DetectionWorker">
 /// Which worker holds the stream, null when none has claimed it or the one that had it has gone
 /// quiet. A worker claims by writing its name through the owner and renews by writing it again;
@@ -128,7 +135,51 @@ public sealed record LiveStream(
     bool DetectionEnabled = false,
     int DetectionRate = 0,
     string? DetectionWorker = null,
-    IReadOnlyList<ForwardStatus>? Forwards = null);
+    IReadOnlyList<ForwardStatus>? Forwards = null,
+    SrtLinkStats? Link = null);
+
+/// <summary>
+/// What libsrt itself says about one connection, over the last heartbeat.
+///
+/// A curated handful, not the roughly ninety fields <c>SRT_TRACEBSTATS</c> actually carries: most
+/// of those are congestion-control internals nobody reads to answer "is this link healthy", and a
+/// wall of numbers serves an operator worse than the few they would actually look at. These are
+/// the ones a stream's own bad day shows up in first, in Haivision's own panels among others -
+/// the estimated capacity of the link against what is actually arriving, how long a round trip
+/// takes, how much of what should have arrived did not, and what the receiver corrected for it.
+///
+/// <see cref="PacketsRetransmitted"/> and the loss and drop counts on <see cref="LiveStream"/>
+/// itself are all over the same beat: the interval since this replica last asked, which is what
+/// makes the answer "broken now" rather than "broken at some point today". <see
+/// cref="UndecryptedPacketsTotal"/> is deliberately the running total instead - a decrypt failure
+/// is rare enough that resetting its count to zero every two seconds would hide the one that
+/// matters between heartbeats.
+/// </summary>
+/// <param name="BandwidthMbps">
+/// libsrt's own estimate of the link's capacity, independent of what this stream happens to be
+/// sending. A rate below this is the link coasting; a receive rate climbing to meet it while loss
+/// also climbs is the link running out of room.
+/// </param>
+/// <param name="ReceiveRateMbps">What is actually arriving, libsrt's own measurement rather than a byte count divided by wall-clock time.</param>
+/// <param name="RoundTripTimeMs">The measured round trip. The floor under useful latency, and a rising RTT is usually the first sign of a link about to lose packets.</param>
+/// <param name="PacketsRetransmitted">Packets this receiver got that were resent because an earlier attempt was lost or reported lost - the traffic loss recovery cost, distinct from loss itself.</param>
+/// <param name="NegotiatedLatencyMs">
+/// The latency window actually active on this connection, which the two ends negotiate to the
+/// larger of what each asked for. Worth showing beside the configured value because an encoder
+/// asking for more than this service does is not a misconfiguration here - it is the encoder's.
+/// </param>
+/// <param name="UndecryptedPacketsTotal">
+/// Packets libsrt could not decrypt, over the life of the connection. Zero on every healthy
+/// stream; a rising count against a passphrase this replica is not configured to check is the
+/// first and often only sign that somebody is sending encrypted media nobody here can use.
+/// </param>
+public sealed record SrtLinkStats(
+    double BandwidthMbps,
+    double ReceiveRateMbps,
+    double RoundTripTimeMs,
+    int PacketsRetransmitted,
+    int NegotiatedLatencyMs,
+    int UndecryptedPacketsTotal);
 
 /// <summary>
 /// Where live streams are recorded so every replica can see them, not just the one holding the

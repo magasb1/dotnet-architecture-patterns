@@ -1,3 +1,5 @@
+using StorageDemo.Core.Streaming;
+
 namespace StorageDemo.Infrastructure.Streaming;
 
 /// <summary>
@@ -81,30 +83,50 @@ public sealed unsafe class SrtSocketStream : Stream
     public int PayloadSize => _payloadSize;
 
     /// <summary>
-    /// What this connection lost and dropped since the last time it was asked, or null when the
-    /// socket has gone and there is nothing to ask.
+    /// What this connection lost and dropped since the last time it was asked, and what libsrt
+    /// itself says about the link over the same interval - or null when the socket has gone and
+    /// there is nothing to ask.
     ///
-    /// The interval, not the running total, and the <c>clear</c> argument is what makes it one. An
-    /// operator looking at a list of a thousand streams is asking which of them is broken now: a
-    /// total answers "this one lost forty packets at some point today", which is true of a healthy
-    /// stream that had one bad minute and says nothing about the last two seconds. Only the
-    /// heartbeat calls this, once per beat per stream, so the window is that beat and the figure
-    /// reads as "per two seconds" without anything having to record when it was last cleared.
+    /// Lost and dropped are the interval, not the running total, and the <c>clear</c> argument is
+    /// what makes it one. An operator looking at a list of a thousand streams is asking which of
+    /// them is broken now: a total answers "this one lost forty packets at some point today", which
+    /// is true of a healthy stream that had one bad minute and says nothing about the last two
+    /// seconds. Only the heartbeat calls this, once per beat per stream, so the window is that beat
+    /// and the figure reads as "per two seconds" without anything having to record when it was last
+    /// cleared.
     ///
-    /// The two are different failures. Lost is what never arrived and could not be retransmitted in
-    /// time, which is the network or a saturated receive path; dropped is what arrived too late for
-    /// the latency window, which is usually the latency window being too small for the link.
+    /// Lost and dropped are different failures. Lost is what never arrived and could not be
+    /// retransmitted in time, which is the network or a saturated receive path; dropped is what
+    /// arrived too late for the latency window, which is usually the latency window being too small
+    /// for the link.
+    ///
+    /// One call to libsrt, not two. <c>clear</c> resets the interval counters it reads, so asking
+    /// twice in the same beat for what should be one sample would make the second call read the
+    /// remainder of the first's window rather than the same one - <see cref="Link"/> is built from
+    /// this same read for exactly that reason.
     /// </summary>
-    public (int Lost, int Dropped)? Health()
+    public (int Lost, int Dropped, SrtLinkStats Link)? Health()
     {
         if (_closed || _socket == Srt.SRT_INVALID_SOCK)
         {
             return null;
         }
 
-        return Srt.Stats(_socket, out var stats, clear: true)
-            ? (stats.pktRcvLoss, stats.pktRcvDrop)
-            : null;
+        if (!Srt.Stats(_socket, out var stats, clear: true))
+        {
+            return null;
+        }
+
+        return (
+            stats.pktRcvLoss,
+            stats.pktRcvDrop,
+            new SrtLinkStats(
+                stats.mbpsBandwidth,
+                stats.mbpsRecvRate,
+                stats.msRTT,
+                stats.pktRcvRetrans,
+                stats.msRcvTsbPdDelay,
+                stats.pktRcvUndecryptTotal));
     }
 
     public override long Length => throw new NotSupportedException();

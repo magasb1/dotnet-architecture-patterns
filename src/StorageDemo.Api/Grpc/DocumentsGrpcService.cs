@@ -270,8 +270,25 @@ public sealed class DocumentsGrpcService(
             message.Forwards.Add(ToMessage(forward));
         }
 
+        // Absent stays absent: a pulled stream or a stream with no transport of its own has
+        // nothing to report, which is not the same answer as every field reading zero.
+        if (stream.Link is { } link)
+        {
+            message.Link = ToMessage(link);
+        }
+
         return message;
     }
+
+    private static SrtLinkStatsMessage ToMessage(SrtLinkStats link) => new()
+    {
+        BandwidthMbps = link.BandwidthMbps,
+        ReceiveRateMbps = link.ReceiveRateMbps,
+        RoundTripTimeMs = link.RoundTripTimeMs,
+        PacketsRetransmitted = link.PacketsRetransmitted,
+        NegotiatedLatencyMs = link.NegotiatedLatencyMs,
+        UndecryptedPacketsTotal = link.UndecryptedPacketsTotal,
+    };
 
     /// <summary>
     /// Configuration rather than state, so nothing is asked of an owning replica: the store is

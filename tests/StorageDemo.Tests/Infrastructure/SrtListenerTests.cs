@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
+using StorageDemo.Core.Streaming;
 using StorageDemo.Infrastructure.Streaming;
 
 namespace StorageDemo.Tests.Infrastructure;
@@ -270,7 +271,7 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
         var connected = new TaskCompletionSource<SrtSocketStream>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-        (int Lost, int Dropped)? health = null;
+        (int Lost, int Dropped, SrtLinkStats Link)? health = null;
 
         await ListeningAsync(
             Listener(socket => connected.TrySetResult(new SrtSocketStream(socket.Release(), writable: false))),
@@ -303,7 +304,14 @@ public sealed class SrtListenerTests(ITestOutputHelper output) : IDisposable
                 await drain;
             });
 
-        Assert.Equal((0, 0), health);
+        Assert.Equal(0, health?.Lost);
+        Assert.Equal(0, health?.Dropped);
+
+        // The link stats are new alongside the loss/drop counts this test has always checked, and
+        // the cheapest thing to pin about them here is that they arrived at all - libsrt's own
+        // numbers (bandwidth, RTT, and the rest) vary with the machine running the test, so nothing
+        // beyond presence belongs in an assertion.
+        Assert.NotNull(health?.Link);
     }
 
     /// <summary>

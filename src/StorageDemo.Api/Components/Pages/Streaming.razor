@@ -197,6 +197,23 @@ else
                                     </div>
                                     <div class="row"><span class="k">URL</span><span class="v mono">@row.LocalOutput</span></div>
                                     <div class="row"><span class="k">Total</span><span class="v mono">@(row.Stream is null ? "-" : Size(row.Stream.Bytes))</span></div>
+                                    @if (row.Stream?.Link is { } link)
+                                    {
+                                        <div class="row"><span class="k">Bandwidth</span><span class="v mono">@Mbps(link.BandwidthMbps)</span></div>
+                                        <div class="row"><span class="k">Receive rate</span><span class="v mono">@Mbps(link.ReceiveRateMbps)</span></div>
+                                        <div class="row"><span class="k">RTT</span><span class="v mono">@link.RoundTripTimeMs.ToString("0", CultureInfo.InvariantCulture) ms</span></div>
+                                        <div class="row"><span class="k">Retransmitted</span><span class="v mono">@link.PacketsRetransmitted.ToString("N0", CultureInfo.InvariantCulture)</span></div>
+                                        <div class="row"><span class="k">Negotiated latency</span><span class="v mono">@link.NegotiatedLatencyMs ms</span></div>
+                                        <div class="row"><span class="k">Undecrypted (total)</span><span class="v mono @(link.UndecryptedPacketsTotal > 0 ? "bad" : null)">@link.UndecryptedPacketsTotal.ToString("N0", CultureInfo.InvariantCulture)</span></div>
+                                    }
+                                    else if (row.Stream is not null)
+                                    {
+                                        @* A pulled stream has no socket this replica holds directly: it is opened by
+                                           libav, which answers in bytes and nothing about the wire underneath. Said
+                                           once rather than shown as six blank rows, which would read as a fault
+                                           rather than as this being the wrong question for how the stream arrived. *@
+                                        <div class="row"><span class="k dim">Link stats</span><span class="v dim">@(row.Source.IsPull ? "not available for a pulled stream" : "not available")</span></div>
+                                    }
                                 </div>
 
                                 @foreach (var (target, status) in row.Detail)
@@ -630,6 +647,11 @@ else
         >= 1L << 10 => (bytes / (double)(1L << 10)).ToString("0", CultureInfo.InvariantCulture) + " kB",
         _ => bytes + " B",
     };
+
+    /// <summary>libsrt hands back megabits per second already; this only decides how many decimals suit the size.</summary>
+    private static string Mbps(double mbps) => mbps >= 10
+        ? mbps.ToString("0", CultureInfo.InvariantCulture) + " Mb/s"
+        : mbps.ToString("0.00", CultureInfo.InvariantCulture) + " Mb/s";
 
     public void Dispose()
     {

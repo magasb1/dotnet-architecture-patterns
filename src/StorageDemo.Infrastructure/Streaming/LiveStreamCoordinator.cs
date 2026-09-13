@@ -1109,7 +1109,8 @@ public sealed class LiveStreamCoordinator(
             entry.Detection.Worker,
             // Null rather than an empty list when nothing is forwarded, so a listing of a thousand
             // ordinary streams does not carry a thousand empty arrays through Redis and out again.
-            entry.Forwards.IsEmpty ? null : [.. entry.Forwards.Values.Select(forwarder => forwarder.Status)]);
+            entry.Forwards.IsEmpty ? null : [.. entry.Forwards.Values.Select(forwarder => forwarder.Status)],
+            health?.Link);
     }
 
     /// <param name="forOutput">
