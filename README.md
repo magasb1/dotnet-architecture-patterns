@@ -559,6 +559,18 @@ than receive rate, and carries no decrypt-failure count at all: decrypting is wh
 and a sender has none to report. Both shapes an SRT forward's URL can ask for get this equally, a
 caller dialling out and a listener waiting to be pulled.
 
+**A pull source can also be an http or https URL**, HLS included: libav auto-detects the demuxer
+from whatever the server actually sends, so a live playlist and a camera answering a plain HTTP
+request with a continuous container both work the same way a `udp://` or `srt://` source always
+has. It is paced to real time in software, because nothing else paces it: a live transport feed
+blocks on its own socket until the next packet actually arrives, but an HTTP pull is an ordinary
+read against whatever is already published, and nothing stops libav fetching every available HLS
+segment back to back well ahead of the wall clock the video was recorded against - measured at
+close to double speed on a real playlist before this existed. `Live__AllowedSchemes` does not
+carry `http` or `https` by default, on purpose: a source URL this service dials is no longer only
+"read this local file", it is "reach anything on the network this pod can reach", so pulling HTTP
+is a deployment's own decision to add rather than something it inherits.
+
 ### How it is built
 
 One demultiplexer per stream feeds one hub, and packets flow one way through it.
