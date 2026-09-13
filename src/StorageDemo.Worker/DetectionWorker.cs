@@ -112,7 +112,13 @@ public sealed class DetectionWorker : BackgroundService
                 catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
                 {
                     // An API that is briefly unreachable must not take the worker down.
-                    _logger.LogWarning(ex, "A poll of the stream listing failed");
+                    // A stack trace says where in the HTTP stack a connect gave up, which nobody needs
+                // every two seconds. The address and the reason are the whole of what is
+                // actionable, and the usual reason is that nothing is listening there.
+                _logger.LogWarning(
+                    "Could not reach the API at {Url} to list streams: {Reason}. Retrying.",
+                    _options.ApiBaseUrl,
+                    ex.InnerException?.Message ?? ex.Message);
                 }
             }
             while (await beats.WaitForNextTickAsync(stoppingToken));

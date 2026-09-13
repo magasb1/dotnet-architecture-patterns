@@ -15,6 +15,12 @@ public sealed class WorkerOptions
     /// Where the worker lists streams, for example "http://storage-demo:80". Any replica answers a
     /// listing; the owner of each stream is reached at the address the listing carries, and at
     /// this one when the owner recorded none, which is what a single replica does.
+    ///
+    /// The local default is 127.0.0.1 rather than localhost, deliberately. Kestrel binds IPv4, and
+    /// on a Windows machine where localhost resolves to ::1 first the connection spends about five
+    /// seconds failing over to IPv4 - longer than the connect budget below, so every poll failed
+    /// with a timeout against an API that was answering in milliseconds. Measured on this machine:
+    /// localhost 5.2 s, 127.0.0.1 1.9 s.
     /// </summary>
     [Required]
     public string ApiBaseUrl { get; init; } = string.Empty;

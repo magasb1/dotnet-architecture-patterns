@@ -159,7 +159,7 @@ dotnet run --project src/StorageDemo.Worker
 It needs to be told where the API is, and its token if one is set:
 
 ```
-Worker__ApiBaseUrl=http://localhost:8080
+Worker__ApiBaseUrl=http://127.0.0.1:8080   # not localhost: it resolves to IPv6 first here
 Worker__Token=<the same Live__Token>
 Worker__Model=rf-detr        # or yolo26
 Worker__ModelPath=           # empty follows the model; set it to use a file elsewhere
