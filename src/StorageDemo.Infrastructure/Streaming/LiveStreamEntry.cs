@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using StorageDemo.Core.Streaming;
 
@@ -91,6 +92,18 @@ public sealed class LiveStreamEntry : IAsyncDisposable
     /// </summary>
     public SrtSocketStream? Transport { get; private set; }
 
+    /// <summary>
+    /// The forwards running for this stream, by forward id.
+    ///
+    /// Here, on the entry, and not in a structure of their own. A forward only exists where the
+    /// bytes are, so hanging it off the stream's local entry makes it follow the stream's owner for
+    /// free: a name that moves to another pod is claimed there and reconciled there, and the pod
+    /// that lost it tears its copies down in <see cref="DisposeAsync"/>. No forward lease, no second
+    /// thing to keep honest, and no window where two pods are pushing the same stream to the same
+    /// far end - which is the failure a separate lease would have been invented to prevent.
+    /// </summary>
+    public ConcurrentDictionary<string, StreamForwarder> Forwards { get; } = new(StringComparer.Ordinal);
+
     public StreamRecorder? Recorder { get; private set; }
 
     public Task<Guid?>? Recording { get; private set; }
@@ -173,6 +186,16 @@ public sealed class LiveStreamEntry : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         Recorder?.Stop();
+
+        // Before the lifetime is cancelled, so a far end is told the copy has ended by a trailer
+        // rather than by a socket going quiet. Not waited for: a forward is a copy, and nothing
+        // downstream of this service is owed a tidy close at the cost of holding up a failover.
+        foreach (var forwarder in Forwards.Values)
+        {
+            forwarder.Dispose();
+        }
+
+        Forwards.Clear();
 
         await Lifetime.CancelAsync();
 
