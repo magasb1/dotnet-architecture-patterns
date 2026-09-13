@@ -70,6 +70,28 @@ service Documents {
   // the short ring the owner keeps beside the KLV ring. NOT_FOUND when the stream is unknown or
   // no worker has posted a frame yet. Guarded like ListLive.
   rpc GetLiveDetections(LiveStreamName) returns (LiveDetectionsMessage);
+
+  // Configured sources: what an operator asked this service to fetch and where to copy it on, as
+  // opposed to what is on air. Guarded like ListLive.
+  //
+  // Unlike the live calls above, none of these three is forwarded to an owning replica. Those need
+  // a stream's bytes; these need the source store, which every replica shares, so whichever one
+  // the call lands on answers it.
+  //
+  // Each source carries the live stream of the same name when there is one, so a client that shows
+  // configuration beside current state makes one call rather than one per row.
+  rpc ListLiveSources(google.protobuf.Empty) returns (LiveSourceListResponse);
+
+  // Creates the source or replaces it whole, forwards included. The source is the aggregate: a
+  // forward is removed by sending the row back without it, and there is deliberately no RPC for an
+  // individual forward. INVALID_ARGUMENT when the name is not a usable stream name, when a URL
+  // names a transport outside the allowed list, or when two forwards share an id. The returned
+  // message carries the ids minted for forwards that arrived without one.
+  rpc SaveLiveSource(LiveSourceMessage) returns (LiveSourceMessage);
+
+  // Forgets the configuration. A stream already on air under this name keeps running: this stops
+  // the service establishing it again, and stopping a live feed is StopLive's job.
+  rpc DeleteLiveSource(LiveStreamName) returns (google.protobuf.Empty);
 }
 
 // Streams are addressed by name. The name is the identity: a feed that drops and reconnects under
@@ -161,7 +183,7 @@ message LiveStreamMessage {
   //
   // Fields are only ever added here, never renumbered or removed: an older client reads zero
   // for what it does not know and a newer one reads zero from an older server. 19 to 21 are
-  // detection, below; 22 to 25 stay held for further KLV fields.
+  // detection, below; 22 to 25 stay held for further KLV fields; 26 is the forward list.
   int32 packets_lost = 14;
   int32 packets_dropped = 15;
 
@@ -183,6 +205,71 @@ message LiveStreamMessage {
   bool detection_enabled = 19;
   int32 detection_rate = 20;
   optional string detection_worker = 21;
+
+  // What each configured forward is doing on the replica holding this stream, empty when none is
+  // configured. Here rather than on the source because a forward only exists where the bytes are,
+  // and this message is already the answer to "what is this stream doing, wherever it is".
+  repeated ForwardStatusMessage forwards = 26;
+}
+
+// Somewhere a stream is copied to, besides the local consumption port. The scheme picks the
+// container - RTP carries MPEG-TS in the RTP muxer, everything else is plain MPEG-TS - and query
+// options are libav's, which is how one field covers dialling out, waiting to be pulled from, and
+// pushing with no handshake at all.
+message ForwardTargetMessage {
+  // Empty on the way in, and the server mints one and returns it. Stable across edits afterwards,
+  // so a target whose URL changed is the same forward rather than a new one.
+  string id = 1;
+
+  string url = 2;
+
+  // False stops the copy without forgetting where it went. Switching a forward off and on again is
+  // routine and should not cost the operator a URL they then have to retype.
+  bool enabled = 3;
+}
+
+// What a forward is actually doing, as opposed to what it was asked to do.
+message ForwardStatusMessage {
+  string id = 1;
+  string url = 2;
+  bool connected = 3;
+  int64 bytes = 4;
+  google.protobuf.Timestamp connected_at = 5;
+
+  // Why the last attempt stopped, when one did. Kept while the forward waits to retry, because a
+  // forward that is simply not running looks identical to one that has never been asked to run.
+  optional string error = 6;
+}
+
+// A standing instruction about one stream name: fetch it from here, and copy it to there.
+//
+// The difference from LiveStreamMessage is the point of the type. That one is what is on air now
+// and disappears when the feed stops; this is what an operator configured, and it outlives every
+// pod that ever served it. One is a reading, the other is the setting.
+message LiveSourceMessage {
+  string name = 1;
+
+  // Where to pull from. Empty is not "unconfigured": it is the statement that an encoder brings
+  // this name in on the ingest port, which still leaves the forwards below worth configuring.
+  string url = 2;
+
+  // False leaves the row in place and stops acting on it. Deleting is how a source is forgotten;
+  // this is how one is parked.
+  bool enabled = 3;
+
+  // The whole list, not a delta: sending the row back without a forward is how one is removed.
+  repeated ForwardTargetMessage forwards = 4;
+
+  // When the row was last written, set by the server and ignored on the way in.
+  google.protobuf.Timestamp updated_at = 5;
+
+  // The stream of this name that is on air, absent when none is. Set on the listing only and
+  // ignored by SaveLiveSource, so that showing configuration beside current state costs one call.
+  LiveStreamMessage stream = 6;
+}
+
+message LiveSourceListResponse {
+  repeated LiveSourceMessage sources = 1;
 }
 
 message SetLiveDetectionRequest {

@@ -20,6 +20,7 @@ namespace StorageDemo.Api.Grpc;
 public sealed class DocumentsGrpcService(
     IDocumentService documents,
     ILiveStreamService live,
+    ILiveSourceStore sources,
     LivePeerProxy peers,
     IOptions<LiveOptions> liveOptions,
     IOptions<RetentionOptions> retention,
@@ -262,6 +263,124 @@ public sealed class DocumentsGrpcService(
         if (stream.DetectionWorker is { } worker)
         {
             message.DetectionWorker = worker;
+        }
+
+        foreach (var forward in stream.Forwards ?? [])
+        {
+            message.Forwards.Add(ToMessage(forward));
+        }
+
+        return message;
+    }
+
+    /// <summary>
+    /// Configuration rather than state, so nothing is asked of an owning replica: the store is
+    /// shared and whichever replica this call reached can answer it. Each source carries the
+    /// stream of its name when one is on air, so a client showing both makes one call.
+    /// </summary>
+    public override async Task<LiveSourceListResponse> ListLiveSources(Empty request, ServerCallContext context)
+    {
+        RequireLive();
+
+        var response = new LiveSourceListResponse();
+        var streams = (await live.StreamsAsync(context.CancellationToken)).ToDictionary(stream => stream.Name);
+
+        foreach (var source in await sources.ListAsync(context.CancellationToken))
+        {
+            response.Sources.Add(ToMessage(source, streams.GetValueOrDefault(source.Name)));
+        }
+
+        return response;
+    }
+
+    /// <summary>
+    /// Creates the source or replaces it whole. The same rules the REST route applies, from the
+    /// same place: a row this port could save and that one refuses would make the allowlist a
+    /// suggestion.
+    /// </summary>
+    public override async Task<LiveSourceMessage> SaveLiveSource(
+        LiveSourceMessage request,
+        ServerCallContext context)
+    {
+        RequireLive();
+
+        var source = new LiveSource(
+            request.Name,
+            string.IsNullOrWhiteSpace(request.Url) ? null : request.Url,
+            request.Enabled,
+            LiveSourceRules.WithIds([.. request.Forwards.Select(forward =>
+                new ForwardTarget(forward.Id, forward.Url, forward.Enabled))]),
+            DateTimeOffset.UtcNow);
+
+        if (LiveSourceRules.Refuse(source, liveOptions.Value.AllowedSchemes) is { } rejection)
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, rejection));
+        }
+
+        await sources.SaveAsync(source, context.CancellationToken);
+
+        // Returned rather than acknowledged, because the ids minted above are on it.
+        return ToMessage(source);
+    }
+
+    public override async Task<Empty> DeleteLiveSource(LiveStreamName request, ServerCallContext context)
+    {
+        RequireLive();
+
+        // The configuration only. A stream already on air under this name belongs to whoever is
+        // watching it until an operator stops it themselves.
+        await sources.RemoveAsync(request.Name, context.CancellationToken);
+
+        return new Empty();
+    }
+
+    private static LiveSourceMessage ToMessage(LiveSource source, LiveStream? stream = null)
+    {
+        var message = new LiveSourceMessage
+        {
+            Name = source.Name,
+            Url = source.Url ?? string.Empty,
+            Enabled = source.Enabled,
+            UpdatedAt = Timestamp.FromDateTimeOffset(source.UpdatedAt),
+        };
+
+        foreach (var forward in source.Forwards)
+        {
+            message.Forwards.Add(new ForwardTargetMessage
+            {
+                Id = forward.Id,
+                Url = forward.Url,
+                Enabled = forward.Enabled,
+            });
+        }
+
+        if (stream is not null)
+        {
+            message.Stream = ToMessage(stream);
+        }
+
+        return message;
+    }
+
+    private static ForwardStatusMessage ToMessage(ForwardStatus forward)
+    {
+        var message = new ForwardStatusMessage
+        {
+            Id = forward.Id,
+            Url = forward.Url,
+            Connected = forward.Connected,
+            Bytes = forward.Bytes,
+        };
+
+        if (forward.ConnectedAt is { } connectedAt)
+        {
+            message.ConnectedAt = Timestamp.FromDateTimeOffset(connectedAt);
+        }
+
+        // Null stays absent: a forward that has never run is not one that failed without a reason.
+        if (forward.Error is { } error)
+        {
+            message.Error = error;
         }
 
         return message;
