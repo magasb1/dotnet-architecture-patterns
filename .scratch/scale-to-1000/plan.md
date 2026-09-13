@@ -16,6 +16,35 @@ Constraints, fixed by the repository owner:
 - The desktop client speaks gRPC. REST is the surface for AI agents and command-line tools, so a
   live feature is not finished until it is on the proto as well as on a route.
 
+## Two deployment shapes, and the desktop is the harder one to get right
+
+Stated by the owner on 2026-09-13, and it is a constraint on almost every decision below rather
+than a footnote.
+
+| | Windows desktop | Kubernetes |
+| --- | --- | --- |
+| Streams | 5 to 10 | up to 1000 |
+| Detection | on 1 or 2 of them | on whatever is switched on |
+| Hardware | no GPU, one machine | GPU worker nodes |
+| Scales | no, and is not meant to | yes, that is the point |
+
+The cluster shape is what this plan is named for and most of it is written against. The desktop
+shape is the one that is easy to break by accident, because **everything shares one machine**:
+ingest, the viewer, the detector and the user's own applications. A change that is free in a
+cluster, where the detector is a separate pod on a separate node, can make a desktop stutter.
+
+The sharpest instance is thread settings. ONNX Runtime's default spins one thread per core, and on
+a desktop a single detection then competes with the five to ten streams being ingested and the one
+being watched. That failure was already seen from the other side: the detector's tests had to be
+put in a non-parallel collection because the runtime saturating every core starved five live-stream
+timing tests. On a desktop that is not a test annoyance, it is video stuttering while a detection
+runs. So the desktop optimum is the best detection latency that leaves the ingest path healthy,
+which is not the same as the lowest latency and not the same as the highest throughput.
+
+Where the two shapes want different numbers, the answer is configuration with both values
+documented and a default that suits the desktop, since the desktop is where a bad default is felt
+immediately and the cluster is where someone is already tuning.
+
 ## What is wrong today, in one line each
 
 | Ceiling | Cause | Fixed by |
