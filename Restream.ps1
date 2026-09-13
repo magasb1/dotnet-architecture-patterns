@@ -68,9 +68,9 @@ param(
     [Parameter(Position = 1)]
     [string] $Name,
 
-    [string] $Ingest = 'srt://10.10.10.122:9000',
+    [string] $Ingest = 'srt://127.0.0.1:9000',
 
-    [string] $Watch = 'srt://10.10.10.122:9010',
+    [string] $Watch = 'srt://127.0.0.1:9010',
 
     [switch] $Transcode,
 
@@ -178,16 +178,26 @@ function Get-FfmpegArguments {
         $keyframeInterval = $KeyframeSeconds * 25
 
         $arguments += @(
+            '-map', '0',
             '-c:v', 'mpeg2video', '-b:v', '4000k',
             '-g', "$keyframeInterval", '-keyint_min', "$keyframeInterval", '-sc_threshold', '0',
-            '-c:a', 'mp2', '-b:a', '128k')
+            '-c:a', 'mp2', '-b:a', '128k',
+            '-c:d', 'copy')
     }
     else {
         # A remultiplex: encoded frames are copied across untouched, which is what keeps this
         # cheap enough to run several of at once. Keyframes come across as they are, so this path
         # cannot answer for the interval; -KeyframeSeconds says what that costs.
-        $arguments += @('-c', 'copy')
+        $arguments += @('-map', '0', '-c', 'copy')
     }
+
+    # -map 0 on both paths, and it is load-bearing rather than tidy. Without it ffmpeg's default
+    # stream selection takes the best video and the best audio and nothing else, so a data stream
+    # is dropped in silence: a MISB source arrives here with three streams and leaves with two.
+    # Every KLV feature in this repository - the classification marking, the sensor panel, the
+    # heads-up display, geo-referencing - then sees a stream that simply has no metadata, and
+    # looks broken rather than unfed. The transcode path pairs it with -c:d copy, because a data
+    # stream has no encoder to re-encode it with.
 
     # Timestamps are generated where the source carries none, rather than the muxer refusing the
     # first packet it cannot place.
