@@ -1,17 +1,25 @@
 /* One hand-written sheet for one page. Dark and dense because this sits next to a video wall,
-   where the screen is mostly moving pictures and anything bright next to them is a lamp. */
+   where the screen is mostly moving pictures and anything bright next to them is a lamp.
+
+   The palette and the card-per-source layout below are deliberately close to the gateway UIs this
+   page's job resembles (Haivision Media Gateway's route list): a colour-coded edge per row states
+   the health before anyone reads a word, and the detail an operator only sometimes wants is folded
+   behind the row rather than crowding a table column. */
 
 :root {
-  --ground: #14171a;
-  --panel: #1c2024;
-  --line: #2b3138;
-  --text: #d7dde3;
-  --dim: #8a949e;
-  --good: #4ec47a;
-  --warn: #e0a33c;
-  --bad: #e2614c;
-  --off: #5a646e;
-  --accent: #4a8fd6;
+  --ground: #0c0e13;
+  --panel: #12151c;
+  --card: #161a22;
+  --card-hover: #1b212b;
+  --line: #262c38;
+  --text: #e7eaf0;
+  --dim: #838d9d;
+  --good: #22c55e;
+  --warn: #f0a942;
+  --bad: #ef5b56;
+  --off: #5b6472;
+  --accent: #3b82f6;
+  --accent-hover: #2f6fe0;
 }
 
 html, body {
@@ -21,10 +29,17 @@ html, body {
   font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
 }
 
-body { padding: 16px 20px 48px; }
+body { padding: 20px 24px 48px; }
 
-h1 { font-size: 17px; font-weight: 600; margin: 0 0 12px; }
-h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+h1 {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  margin: 0 0 16px;
+  padding-left: 12px;
+  border-left: 3px solid var(--accent);
+}
+h2 { font-size: 12px; font-weight: 700; margin: 0 0 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .07em; }
 
 code, .mono, .mono input { font-family: Consolas, "Cascadia Mono", ui-monospace, monospace; font-size: 12px; }
 
@@ -35,35 +50,63 @@ code, .mono, .mono input { font-family: Consolas, "Cascadia Mono", ui-monospace,
 .notice {
   background: var(--panel);
   border-left: 3px solid var(--accent);
-  padding: 10px 14px;
+  border-radius: 0 6px 6px 0;
+  padding: 12px 16px;
   max-width: 70ch;
 }
 
 .gate { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
 .gate input { width: 220px; }
 
-.bar { display: flex; gap: 14px; align-items: center; margin-bottom: 10px; }
+/* --- Top bar: the count-by-state chips read like Haivision's STREAMING/ALERT/INACTIVE pills,
+   because that summary is the first thing an operator scanning a wall of sources wants. --- */
+.bar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.bar .spacer { flex: 1; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: 6px;
+  border: 1px solid var(--line);
+  font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--dim);
+}
+.chip b { color: inherit; font-weight: 700; }
+.chip.good { border-color: color-mix(in srgb, var(--good) 55%, var(--line)); color: var(--good); }
+.chip.warn { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); color: var(--warn); }
 
 button {
   background: var(--accent);
   color: #fff;
   border: 0;
-  border-radius: 2px;
-  padding: 4px 10px;
+  border-radius: 6px;
+  padding: 7px 14px;
   font: inherit;
+  font-weight: 600;
   cursor: pointer;
 }
+button:hover { background: var(--accent-hover); }
 button:disabled { opacity: .5; cursor: default; }
-button.quiet { background: transparent; color: var(--dim); border: 1px solid var(--line); }
-button.quiet:hover { color: var(--text); border-color: var(--dim); }
+button.quiet { background: transparent; color: var(--dim); border: 1px solid var(--line); font-weight: 500; }
+button.quiet:hover { color: var(--text); border-color: var(--dim); background: var(--card-hover); }
 button.danger { background: var(--bad); }
+button.danger:hover { background: color-mix(in srgb, var(--bad) 85%, black); }
+
+/* Borderless icon-only buttons for a row's actions, in place of the old table's text buttons - a
+   wall of rows has no column to keep text narrow inside otherwise. A visible box around each one
+   would out-weigh the row it sits in, so only the hover state draws a box. */
+button.icon {
+  background: transparent; color: var(--dim); border: 1px solid transparent;
+  width: 28px; height: 28px; padding: 0; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 13px;
+}
+button.icon:hover { color: var(--text); border-color: var(--line); background: var(--card-hover); }
+button.icon.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); background: color-mix(in srgb, var(--bad) 12%, transparent); }
 
 input[type="text"], input[type="password"], input:not([type]) {
-  background: #0f1316;
+  background: #0e1116;
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: 2px;
-  padding: 4px 6px;
+  border-radius: 6px;
+  padding: 6px 9px;
   font: inherit;
   width: 100%;
   box-sizing: border-box;
@@ -71,52 +114,93 @@ input[type="text"], input[type="password"], input:not([type]) {
 input:disabled { color: var(--dim); }
 input:focus { outline: 1px solid var(--accent); }
 
-.panel { background: var(--panel); border: 1px solid var(--line); padding: 14px; margin-bottom: 14px; max-width: 720px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; max-width: 720px; }
 .fields { display: flex; flex-direction: column; gap: 10px; }
 .fields label { display: flex; flex-direction: column; gap: 3px; color: var(--dim); font-size: 12px; }
 .fields label.inline { flex-direction: row; align-items: baseline; gap: 7px; color: var(--text); max-width: 70ch; }
 .fields label.inline input { width: auto; }
 .panel .actions { display: flex; gap: 8px; margin-top: 14px; }
 
-/* A wide table scrolls inside itself rather than pushing the page sideways: the operator's window
-   is whatever is left beside the wall, and a horizontal page scrollbar hides the state column. */
-.scroller { overflow-x: auto; border: 1px solid var(--line); }
+/* --- The source list: one card per row instead of a table, so a wide URL or a long forward list
+   never forces the page to scroll sideways, and a card's left edge can carry its state colour the
+   way a route card does in the gateway UIs this page takes its shape from. --- */
+/* One continuous bordered list rather than a card per row with a gap around it: a thin coloured
+   strip on each row's left edge carries its state, the way a route's left edge does in the
+   gateway UI this page's shape follows, and a hairline only between rows reads as one list rather
+   than a stack of boxes. */
+.list { background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 
-table { border-collapse: collapse; width: 100%; }
-th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
-th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; background: var(--panel); }
-td.num, th.num { text-align: right; }
-tbody tr:hover > td { background: #191d21; }
-tr.open > td { background: #191d21; }
+.card { border-left: 3px solid var(--off); border-bottom: 1px solid var(--line); }
+.card:last-child { border-bottom: 0; }
+.card.good { border-left-color: var(--good); }
+.card.warn { border-left-color: var(--warn); }
 
-td.grip, th.grip { width: 1.2em; cursor: pointer; color: var(--dim); user-select: none; padding-right: 0; }
-td.name { font-weight: 600; }
+.card-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+.card-head:hover { background: var(--card-hover); }
 
-.tag { margin-left: 6px; font-size: 10px; color: var(--dim); border: 1px solid var(--line); border-radius: 2px; padding: 0 4px; text-transform: uppercase; }
+.chev { color: var(--dim); width: 1em; flex: none; user-select: none; }
+
+/* A plain glyph stands in for the live thumbnail a real gateway shows; see the ponytail note
+   above the list for why decoding one here was left out. */
+.thumb {
+  flex: none; width: 44px; height: 32px; border-radius: 5px;
+  background: var(--panel); border: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: center;
+}
+.thumb .glyph { width: 0; height: 0; border-style: solid; border-width: 6px 0 6px 9px; border-color: transparent transparent transparent var(--off); }
+.card.good .thumb .glyph { border-left-color: var(--good); }
+.card.warn .thumb .glyph { border-left-color: var(--warn); }
+
+.meta { flex: 1 1 260px; min-width: 0; }
+.meta .title { display: flex; align-items: center; gap: 7px; font-weight: 600; }
+.meta .sub { color: var(--dim); font-size: 11px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.badge { font-size: 10px; color: var(--dim); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; text-transform: uppercase; letter-spacing: .04em; }
+
+.stat { flex: none; }
+.stat.num { min-width: 74px; text-align: right; }
+.stat.fwd { min-width: 108px; font-size: 11px; }
+.stat.fwd.warn { color: var(--warn); }
 
 /* Colour never carries the answer on its own: the word beside the dot is the state, and the dot
    only makes a row findable at a glance. */
-.state .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--off); }
-.state.good { color: var(--good); } .state.good .dot { background: var(--good); }
-.state.warn { color: var(--warn); } .state.warn .dot { background: var(--warn); }
-.state.off  { color: var(--dim); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-size: 11px; font-weight: 600; min-width: 92px; }
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--off); flex: none; }
+.pill.good { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); } .pill.good .dot { background: var(--good); }
+.pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); } .pill.warn .dot { background: var(--warn); }
+.pill.off  { color: var(--dim); }
 
-td.out { max-width: 46ch; overflow: hidden; text-overflow: ellipsis; }
-td.out span { color: var(--dim); }
-button.copy { background: transparent; border: 1px solid var(--line); color: var(--dim); font-size: 10px; padding: 0 5px; margin-left: 8px; text-transform: uppercase; }
-button.copy:hover { color: var(--text); }
+.out { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.out span { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-td.actions { white-space: nowrap; }
-td.actions button { margin-left: 6px; font-size: 12px; }
+.row-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.row-actions .confirm { display: flex; align-items: center; gap: 6px; }
+.row-actions .confirm span { font-size: 11px; color: var(--warn); white-space: nowrap; }
 
-tr.detail > td { background: #11151800; padding-bottom: 14px; white-space: normal; }
-table.inner { width: auto; min-width: 520px; margin-bottom: 12px; border: 1px solid var(--line); }
-table.inner th, table.inner td { border-bottom: 1px solid var(--line); }
+.detail { border-top: 1px solid var(--line); padding: 14px 16px 16px 45px; background: var(--panel); }
 
-.fields.forward { flex-direction: row; align-items: flex-end; gap: 8px; max-width: 720px; }
+/* --- Sub-cards for local output and each forward, echoing the input/output panels a gateway
+   route expands into. --- */
+.subgrid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.subcard {
+  flex: 1 1 240px; max-width: 340px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+}
+.subcard .subhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.subcard .subhead .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); }
+.subcard .row { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; font-size: 12px; }
+.subcard .row .k { color: var(--dim); }
+.subcard .row .v { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.subcard .remove { width: 100%; margin-top: 8px; }
+
+.fields.forward { flex-direction: row; align-items: flex-end; gap: 8px; max-width: 720px; margin-bottom: 8px; }
 .fields.forward label { flex: 1; }
 
 ul.help { margin: 8px 0 0; padding-left: 18px; color: var(--dim); font-size: 11px; }
 ul.help b { color: var(--text); font-weight: 600; }
 
-.empty { color: var(--dim); padding: 18px 10px; text-align: center; }
+.empty { color: var(--dim); padding: 26px 10px; text-align: center; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }

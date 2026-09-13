@@ -48,16 +48,28 @@ else if (!_authorised)
 }
 else
 {
+    @* The counts below are read straight off the rendered rows rather than kept as their own
+       field: it is a display aggregate with nothing to test, and computing it beside the markup
+       it describes is less to keep in step than a duplicate count updated in RefreshAsync. *@
+    var live = _rows.Count(row => CardClass(row) == "good");
+    var alert = _rows.Count(row => CardClass(row) == "warn");
+    var idle = _rows.Count - live - alert;
+
     <div class="bar">
-        <button @onclick="@(() => Edit(null))">Add source</button>
+        <span class="chip"><b>@_rows.Count</b> total</span>
+        <span class="chip good"><b>@live</b> streaming</span>
+        <span class="chip warn"><b>@alert</b> alert</span>
+        <span class="chip"><b>@idle</b> inactive</span>
+        <span class="spacer"></span>
         @if (_error is not null)
         {
             <span class="bad">Last refresh failed: @_error</span>
         }
         else
         {
-            <span class="dim">@_rows.Count source@(_rows.Count == 1 ? "" : "s"), refreshed @_refreshedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+            <span class="dim">refreshed @_refreshedAt.ToLocalTime().ToString("HH:mm:ss")</span>
         }
+        <button @onclick="@(() => Edit(null))">Add source</button>
     </div>
 
     @if (_form is not null)
@@ -106,161 +118,129 @@ else
        a few hundred rows, well short of the thousand-stream target, and it binds on the diff the
        circuit ships every two seconds rather than on the store, which is small and read-heavy by
        design. The upgrade is a name filter and <Virtualize>, neither of which changes anything
-       below this file. *@
-    <div class="scroller">
-        <table>
-            <thead>
-                <tr>
-                    <th class="grip"></th>
-                    <th>Name</th>
-                    <th>Mode</th>
-                    <th>State</th>
-                    <th class="num">Throughput</th>
-                    <th>Local output</th>
-                    <th>Forwards</th>
-                    <th class="num"></th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var row in _rows)
-                {
-                    <tr class="@(_expanded.Contains(row.Source.Name) ? "open" : null)">
-                        <td class="grip" @onclick="@(() => Toggle(row.Source.Name))">
-                            @(_expanded.Contains(row.Source.Name) ? "▾" : "▸")
-                        </td>
-                        <td class="name">
-                            @row.Source.Name
-                            @if (!row.Source.Enabled)
-                            {
-                                <span class="tag">parked</span>
-                            }
-                        </td>
-                        <td>@(row.Source.IsPull ? "pull" : "push")</td>
-                        @* Colour carries no information on its own here: the word is the answer and
-                           the dot only makes it findable in a wall of rows. *@
-                        <td class="state @StateClass(row.State)">
+       below this file. Also skipped: a live thumbnail per card, the way a real gateway shows the
+       picture. Decoding a frame for a tile nobody may be looking at is the desktop client's job,
+       which already does it; this page draws a plain glyph instead. *@
+    @if (_rows.Count == 0)
+    {
+        <p class="empty">No sources configured. Add one to pull a stream in or to forward one that is already arriving.</p>
+    }
+    else
+    {
+        <div class="list">
+            @foreach (var row in _rows)
+            {
+                var open = _expanded.Contains(row.Source.Name);
+
+                <div class="card @CardClass(row)">
+                    <div class="card-head" @onclick="@(() => Toggle(row.Source.Name))">
+                        <span class="chev">@(open ? "▾" : "▸")</span>
+                        <span class="thumb"><span class="glyph"></span></span>
+                        <div class="meta">
+                            <div class="title">
+                                <span class="name">@row.Source.Name</span>
+                                <span class="badge">@(row.Source.IsPull ? "pull" : "push")</span>
+                                @if (!row.Source.Enabled)
+                                {
+                                    <span class="badge">parked</span>
+                                }
+                            </div>
+                            <div class="sub mono">@row.LocalOutput</div>
+                        </div>
+                        @* Colour carries no information on its own here: the word is the answer
+                           and the dot only makes it findable in a wall of cards. *@
+                        <span class="stat pill @StateClass(row.State)">
                             <span class="dot"></span>@StateWord(row.State)
-                        </td>
-                        <td class="num mono">@Throughput(row)</td>
-                        <td class="mono out">
-                            <span>@row.LocalOutput</span>
-                            <button class="copy" title="Copy" @onclick="@(() => Copy(row.LocalOutput))">
-                                @(_copied == row.LocalOutput ? "copied" : "copy")
+                        </span>
+                        <span class="stat num mono">@Throughput(row)</span>
+                        <span class="stat fwd @(row.ForwardsConfigured > 0 && row.ForwardsConnected < row.ForwardsConfigured ? "warn" : "dim")">
+                            @(row.ForwardsConfigured == 0 ? "no forwards" : $"{row.ForwardsConnected}/{row.ForwardsConfigured} forwards")
+                        </span>
+                        <div class="row-actions" @onclick:stopPropagation="true">
+                            <button class="icon" title="Copy local output" @onclick="@(() => Copy(row.LocalOutput))">
+                                @(_copied == row.LocalOutput ? "✓" : "⧉")
                             </button>
-                        </td>
-                        <td class="@(row.ForwardsConfigured > 0 && row.ForwardsConnected < row.ForwardsConfigured ? "warn" : null)">
-                            @if (row.ForwardsConfigured == 0)
-                            {
-                                <span class="dim">none</span>
-                            }
-                            else
-                            {
-                                <span class="mono">@row.ForwardsConnected/@row.ForwardsConfigured</span>
-                                <text> connected</text>
-                            }
-                        </td>
-                        <td class="num actions">
-                            <button class="quiet" @onclick="@(() => Edit(row.Source))">Edit</button>
+                            <button class="icon" title="Edit" @onclick="@(() => Edit(row.Source))">✎</button>
                             @if (_confirmDelete == row.Source.Name)
                             {
-                                <button class="danger" @onclick="@(() => DeleteSource(row.Source))">Really delete</button>
-                                <button class="quiet" @onclick="@(() => _confirmDelete = null)">Keep</button>
+                                <div class="confirm">
+                                    <span>Delete?</span>
+                                    <button class="danger" @onclick="@(() => DeleteSource(row.Source))">Yes</button>
+                                    <button class="quiet" @onclick="@(() => _confirmDelete = null)">No</button>
+                                </div>
                             }
                             else
                             {
-                                <button class="quiet" @onclick="@(() => { _confirmDelete = row.Source.Name; _formError = null; })">Delete</button>
+                                <button class="icon danger" title="Delete" @onclick="@(() => { _confirmDelete = row.Source.Name; _formError = null; })">✕</button>
                             }
-                        </td>
-                    </tr>
+                        </div>
+                    </div>
 
                     @if (_confirmDelete == row.Source.Name)
                     {
-                        <tr class="detail">
-                            <td></td>
-                            <td colspan="7" class="warn">
-                                Deleting <span class="mono">@row.Source.Name</span> forgets the
-                                configuration only. @(row.State == SourceState.NotOnAir
-                                    ? "It is not on air, so nothing stops."
-                                    : "It is on air now and will keep running until the feed ends or you stop the stream.")
-                            </td>
-                        </tr>
+                        <div class="detail warn">
+                            Deleting <span class="mono">@row.Source.Name</span> forgets the
+                            configuration only. @(row.State == SourceState.NotOnAir
+                                ? "It is not on air, so nothing stops."
+                                : "It is on air now and will keep running until the feed ends or you stop the stream.")
+                        </div>
                     }
 
-                    @if (_expanded.Contains(row.Source.Name))
+                    @if (open)
                     {
-                        <tr class="detail">
-                            <td></td>
-                            <td colspan="7">
-                                @if (row.ForwardsConfigured == 0)
-                                {
-                                    <p class="dim">No forwards configured. This source is served from its local output only.</p>
-                                }
-                                else
-                                {
-                                    <table class="inner">
-                                        <thead>
-                                            <tr>
-                                                <th>Forward</th>
-                                                <th>State</th>
-                                                <th class="num">Bytes</th>
-                                                <th>Last error</th>
-                                                <th></th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            @foreach (var (target, status) in row.Detail)
-                                            {
-                                                <tr>
-                                                    <td class="mono">
-                                                        @target.Url
-                                                        @if (!target.Enabled)
-                                                        {
-                                                            <span class="tag">off</span>
-                                                        }
-                                                    </td>
-                                                    <td class="state @ForwardClass(target, status)">
-                                                        <span class="dot"></span>@ForwardWord(row, target, status)
-                                                    </td>
-                                                    <td class="num mono">@(status is null ? "-" : Size(status.Bytes))</td>
-                                                    <td class="bad">@status?.Error</td>
-                                                    <td class="num">
-                                                        <button class="quiet" @onclick="@(() => RemoveForward(row.Source, target))">Remove</button>
-                                                    </td>
-                                                </tr>
-                                            }
-                                        </tbody>
-                                    </table>
-                                }
-
-                                <div class="fields forward">
-                                    <label>
-                                        Add a forward
-                                        <input class="mono" placeholder="srt://gateway.example:9000?streamid=@row.Source.Name"
-                                               value="@(_forwardFor == row.Source.Name ? _forwardUrl : "")"
-                                               @onchange="@(e => { _forwardFor = row.Source.Name; _forwardUrl = e.Value?.ToString() ?? ""; })" />
-                                    </label>
-                                    <button @onclick="@(() => AddForward(row.Source))" disabled="@_saving">Add</button>
+                        <div class="detail">
+                            <div class="subgrid">
+                                <div class="subcard">
+                                    <div class="subhead">
+                                        <span class="label">Local output</span>
+                                        <span class="pill @StateClass(row.State)"><span class="dot"></span>@StateWord(row.State)</span>
+                                    </div>
+                                    <div class="row"><span class="k">URL</span><span class="v mono">@row.LocalOutput</span></div>
+                                    <div class="row"><span class="k">Total</span><span class="v mono">@(row.Stream is null ? "-" : Size(row.Stream.Bytes))</span></div>
                                 </div>
-                                <ul class="help mono">
-                                    <li><b>srt://host:9000?streamid=name</b> &mdash; dial another server and push to it</li>
-                                    <li><b>srt://0.0.0.0:9100?mode=listener</b> &mdash; wait here for the far end to pull</li>
-                                    <li><b>udp://239.0.0.1:5000?ttl=2</b> or <b>rtp://host:5004</b> &mdash; push with no handshake</li>
-                                </ul>
-                                @if (_forwardFor == row.Source.Name && _forwardError is not null)
+
+                                @foreach (var (target, status) in row.Detail)
                                 {
-                                    <p class="bad">@_forwardError</p>
+                                    <div class="subcard">
+                                        <div class="subhead">
+                                            <span class="label">Forward@(!target.Enabled ? " (off)" : "")</span>
+                                            <span class="pill @ForwardClass(target, status)"><span class="dot"></span>@ForwardWord(row, target, status)</span>
+                                        </div>
+                                        <div class="row"><span class="k">URL</span><span class="v mono">@target.Url</span></div>
+                                        <div class="row"><span class="k">Bytes</span><span class="v mono">@(status is null ? "-" : Size(status.Bytes))</span></div>
+                                        @if (status?.Error is { } error)
+                                        {
+                                            <div class="row"><span class="k">Error</span><span class="v bad">@error</span></div>
+                                        }
+                                        <button class="quiet remove" @onclick="@(() => RemoveForward(row.Source, target))">Remove</button>
+                                    </div>
                                 }
-                            </td>
-                        </tr>
+                            </div>
+
+                            <div class="fields forward">
+                                <label>
+                                    Add a forward
+                                    <input class="mono" placeholder="srt://gateway.example:9000?streamid=@row.Source.Name"
+                                           value="@(_forwardFor == row.Source.Name ? _forwardUrl : "")"
+                                           @onchange="@(e => { _forwardFor = row.Source.Name; _forwardUrl = e.Value?.ToString() ?? ""; })" />
+                                </label>
+                                <button @onclick="@(() => AddForward(row.Source))" disabled="@_saving">Add</button>
+                            </div>
+                            <ul class="help mono">
+                                <li><b>srt://host:9000?streamid=name</b> &mdash; dial another server and push to it</li>
+                                <li><b>srt://0.0.0.0:9100?mode=listener</b> &mdash; wait here for the far end to pull</li>
+                                <li><b>udp://239.0.0.1:5000?ttl=2</b> or <b>rtp://host:5004</b> &mdash; push with no handshake</li>
+                            </ul>
+                            @if (_forwardFor == row.Source.Name && _forwardError is not null)
+                            {
+                                <p class="bad">@_forwardError</p>
+                            }
+                        </div>
                     }
-                }
-                @if (_rows.Count == 0)
-                {
-                    <tr><td colspan="8" class="empty">No sources configured. Add one to pull a stream in or to forward one that is already arriving.</td></tr>
-                }
-            </tbody>
-        </table>
-    </div>
+                </div>
+            }
+        </div>
+    }
 }
 
 @code {
@@ -603,6 +583,20 @@ else
         SourceState.Interrupted => "warn",
         _ => "off",
     };
+
+    /// <summary>
+    /// The colour for a row's left edge and the bucket it counts toward in the top chips.
+    ///
+    /// Not just <see cref="StateClass"/>: a source that is live but whose forwards are not keeping
+    /// up is the case an operator most needs the colour to catch, the way a route with a broken
+    /// output reads as an alert in the gateway UI this page is shaped after rather than as healthy
+    /// because the input side is fine. One method decides it so the edge colour and the count above
+    /// the list never disagree with each other.
+    /// </summary>
+    private static string CardClass(SourceRow row)
+        => row.State == SourceState.Live && row.ForwardsConfigured > 0 && row.ForwardsConnected < row.ForwardsConfigured
+            ? "warn"
+            : StateClass(row.State);
 
     private static string ForwardWord(SourceRow row, ForwardTarget target, ForwardStatus? status) => status switch
     {
