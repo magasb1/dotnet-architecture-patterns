@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http.Features;
 using Serilog;
+using StorageDemo.Api.Components;
 using StorageDemo.Api.Grpc;
 using StorageDemo.Api.Controllers;
 using StorageDemo.Api.Middleware;
@@ -37,6 +38,12 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+// The operator page for configured sources and their forwards. Interactive server rather than
+// WebAssembly, because it renders in the process that holds the sources and the streams: the
+// components call the store and the stream service on this thread, where a WebAssembly page would
+// have to reach back in over the same REST API for objects already in memory here.
+builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+
 // The only line that decides which storage and database implementations exist.
 builder.Services.AddInfrastructure(builder.Configuration, builder.Environment.IsDevelopment());
 
@@ -51,8 +58,15 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+// Required before the component endpoints. The page posts nothing as a form - every write goes
+// over the circuit - but the framework refuses to map components without it.
+app.UseAntiforgery();
+
 app.MapGrpcService<DocumentsGrpcService>();
 app.MapControllers();
+
+app.MapStaticAssets();
+app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
 // Liveness must not touch external infrastructure, or a database blip restarts healthy pods.
 app.MapHealthChecks("/health/live", new() { Predicate = _ => false });

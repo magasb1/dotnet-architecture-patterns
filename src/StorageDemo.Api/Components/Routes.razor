@@ -1,0 +1,12 @@
+@*
+    Only this assembly is scanned, and it holds exactly one routable component. Anything else that
+    reaches the router is a URL the controllers and gRPC already declined.
+*@
+<Router AppAssembly="@typeof(Program).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" />
+    </Found>
+    <NotFound>
+        <p class="empty">No such page.</p>
+    </NotFound>
+</Router>

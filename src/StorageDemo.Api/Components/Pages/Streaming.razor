@@ -1,0 +1,659 @@
+@page "/streaming"
+@rendermode InteractiveServer
+@implements IDisposable
+@using System.Security.Cryptography
+@using System.Text
+@using Microsoft.JSInterop
+@inject ILiveSourceStore Sources
+@inject ILiveStreamService Live
+@inject IOptions<LiveOptions> Options
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+@*
+    The sources view, in the shape Haivision Media Gateway uses: one dense row per configured
+    source, state readable without clicking anything, and the detail an operator only sometimes
+    wants folded away behind the row it belongs to.
+
+    It renders in the same process as the service it is about, so it calls ILiveSourceStore and
+    ILiveStreamService straight. Going back out through this service's own REST API would add a
+    hop, a serialisation round trip and a second thing that can fail, to reach objects that are
+    already in memory on this thread.
+*@
+
+<h1>Sources</h1>
+
+@if (!_options.Enabled)
+{
+    @* An empty table would read as "nothing configured yet" rather than "this is switched off". *@
+    <p class="notice">
+        Live streaming is disabled on this service. Set <code>Live:Enabled</code> to true and
+        restart; until then nothing is ingested, pulled or forwarded.
+    </p>
+}
+else if (!_authorised)
+{
+    <p class="notice">
+        This page changes what the service connects to, so it is behind the same token as every
+        other live endpoint.
+    </p>
+    <div class="gate">
+        <input type="password" placeholder="Token" @bind="_token" @bind:event="oninput" />
+        <button @onclick="Authorise">Unlock</button>
+        @if (_gateError is not null)
+        {
+            <span class="bad">@_gateError</span>
+        }
+    </div>
+}
+else
+{
+    <div class="bar">
+        <button @onclick="@(() => Edit(null))">Add source</button>
+        @if (_error is not null)
+        {
+            <span class="bad">Last refresh failed: @_error</span>
+        }
+        else
+        {
+            <span class="dim">@_rows.Count source@(_rows.Count == 1 ? "" : "s"), refreshed @_refreshedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+        }
+    </div>
+
+    @if (_form is not null)
+    {
+        <div class="panel">
+            <h2>@(_form.Existing is null ? "New source" : $"Edit {_form.Existing.Name}")</h2>
+            <div class="fields">
+                <label>
+                    Name
+                    @* The name is the identity of the stream, the registry key and part of every
+                       document it produces, so an edit cannot change it: that would be a different
+                       source wearing the same row. Delete and add is the honest way to rename. *@
+                    <input @bind="_form.Name" disabled="@(_form.Existing is not null)" placeholder="camera1" />
+                </label>
+                <label class="inline">
+                    <input type="checkbox" checked="@_form.IsPull"
+                           @onchange="@(e => _form.IsPull = (bool)e.Value!)" />
+                    Pull (this service dials the URL). Unticked means an encoder pushes it in on the
+                    ingest port.
+                </label>
+                @if (_form.IsPull)
+                {
+                    <label>
+                        Source URL
+                        <input class="mono" @bind="_form.Url" placeholder="srt://camera:9000?streamid=camera1" />
+                    </label>
+                }
+                <label class="inline">
+                    <input type="checkbox" checked="@_form.Enabled"
+                           @onchange="@(e => _form.Enabled = (bool)e.Value!)" />
+                    Enabled
+                </label>
+            </div>
+            @if (_formError is not null)
+            {
+                <p class="bad">@_formError</p>
+            }
+            <div class="actions">
+                <button @onclick="SaveSource" disabled="@_saving">Save</button>
+                <button class="quiet" @onclick="@(() => { _form = null; _formError = null; })">Cancel</button>
+            </div>
+        </div>
+    }
+
+    @* ponytail: every source is rendered, with no paging, filter or virtualisation. The ceiling is
+       a few hundred rows, well short of the thousand-stream target, and it binds on the diff the
+       circuit ships every two seconds rather than on the store, which is small and read-heavy by
+       design. The upgrade is a name filter and <Virtualize>, neither of which changes anything
+       below this file. *@
+    <div class="scroller">
+        <table>
+            <thead>
+                <tr>
+                    <th class="grip"></th>
+                    <th>Name</th>
+                    <th>Mode</th>
+                    <th>State</th>
+                    <th class="num">Throughput</th>
+                    <th>Local output</th>
+                    <th>Forwards</th>
+                    <th class="num"></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in _rows)
+                {
+                    <tr class="@(_expanded.Contains(row.Source.Name) ? "open" : null)">
+                        <td class="grip" @onclick="@(() => Toggle(row.Source.Name))">
+                            @(_expanded.Contains(row.Source.Name) ? "▾" : "▸")
+                        </td>
+                        <td class="name">
+                            @row.Source.Name
+                            @if (!row.Source.Enabled)
+                            {
+                                <span class="tag">parked</span>
+                            }
+                        </td>
+                        <td>@(row.Source.IsPull ? "pull" : "push")</td>
+                        @* Colour carries no information on its own here: the word is the answer and
+                           the dot only makes it findable in a wall of rows. *@
+                        <td class="state @StateClass(row.State)">
+                            <span class="dot"></span>@StateWord(row.State)
+                        </td>
+                        <td class="num mono">@Throughput(row)</td>
+                        <td class="mono out">
+                            <span>@row.LocalOutput</span>
+                            <button class="copy" title="Copy" @onclick="@(() => Copy(row.LocalOutput))">
+                                @(_copied == row.LocalOutput ? "copied" : "copy")
+                            </button>
+                        </td>
+                        <td class="@(row.ForwardsConfigured > 0 && row.ForwardsConnected < row.ForwardsConfigured ? "warn" : null)">
+                            @if (row.ForwardsConfigured == 0)
+                            {
+                                <span class="dim">none</span>
+                            }
+                            else
+                            {
+                                <span class="mono">@row.ForwardsConnected/@row.ForwardsConfigured</span>
+                                <text> connected</text>
+                            }
+                        </td>
+                        <td class="num actions">
+                            <button class="quiet" @onclick="@(() => Edit(row.Source))">Edit</button>
+                            @if (_confirmDelete == row.Source.Name)
+                            {
+                                <button class="danger" @onclick="@(() => DeleteSource(row.Source))">Really delete</button>
+                                <button class="quiet" @onclick="@(() => _confirmDelete = null)">Keep</button>
+                            }
+                            else
+                            {
+                                <button class="quiet" @onclick="@(() => { _confirmDelete = row.Source.Name; _formError = null; })">Delete</button>
+                            }
+                        </td>
+                    </tr>
+
+                    @if (_confirmDelete == row.Source.Name)
+                    {
+                        <tr class="detail">
+                            <td></td>
+                            <td colspan="7" class="warn">
+                                Deleting <span class="mono">@row.Source.Name</span> forgets the
+                                configuration only. @(row.State == SourceState.NotOnAir
+                                    ? "It is not on air, so nothing stops."
+                                    : "It is on air now and will keep running until the feed ends or you stop the stream.")
+                            </td>
+                        </tr>
+                    }
+
+                    @if (_expanded.Contains(row.Source.Name))
+                    {
+                        <tr class="detail">
+                            <td></td>
+                            <td colspan="7">
+                                @if (row.ForwardsConfigured == 0)
+                                {
+                                    <p class="dim">No forwards configured. This source is served from its local output only.</p>
+                                }
+                                else
+                                {
+                                    <table class="inner">
+                                        <thead>
+                                            <tr>
+                                                <th>Forward</th>
+                                                <th>State</th>
+                                                <th class="num">Bytes</th>
+                                                <th>Last error</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var (target, status) in row.Detail)
+                                            {
+                                                <tr>
+                                                    <td class="mono">
+                                                        @target.Url
+                                                        @if (!target.Enabled)
+                                                        {
+                                                            <span class="tag">off</span>
+                                                        }
+                                                    </td>
+                                                    <td class="state @ForwardClass(target, status)">
+                                                        <span class="dot"></span>@ForwardWord(row, target, status)
+                                                    </td>
+                                                    <td class="num mono">@(status is null ? "-" : Size(status.Bytes))</td>
+                                                    <td class="bad">@status?.Error</td>
+                                                    <td class="num">
+                                                        <button class="quiet" @onclick="@(() => RemoveForward(row.Source, target))">Remove</button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+
+                                <div class="fields forward">
+                                    <label>
+                                        Add a forward
+                                        <input class="mono" placeholder="srt://gateway.example:9000?streamid=@row.Source.Name"
+                                               value="@(_forwardFor == row.Source.Name ? _forwardUrl : "")"
+                                               @onchange="@(e => { _forwardFor = row.Source.Name; _forwardUrl = e.Value?.ToString() ?? ""; })" />
+                                    </label>
+                                    <button @onclick="@(() => AddForward(row.Source))" disabled="@_saving">Add</button>
+                                </div>
+                                <ul class="help mono">
+                                    <li><b>srt://host:9000?streamid=name</b> &mdash; dial another server and push to it</li>
+                                    <li><b>srt://0.0.0.0:9100?mode=listener</b> &mdash; wait here for the far end to pull</li>
+                                    <li><b>udp://239.0.0.1:5000?ttl=2</b> or <b>rtp://host:5004</b> &mdash; push with no handshake</li>
+                                </ul>
+                                @if (_forwardFor == row.Source.Name && _forwardError is not null)
+                                {
+                                    <p class="bad">@_forwardError</p>
+                                }
+                            </td>
+                        </tr>
+                    }
+                }
+                @if (_rows.Count == 0)
+                {
+                    <tr><td colspan="8" class="empty">No sources configured. Add one to pull a stream in or to forward one that is already arriving.</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    /// <summary>
+    /// The service's own heartbeat. Refreshing faster would show a client a state the service has
+    /// not decided yet; slower, and the page is behind what every other surface is already saying.
+    /// </summary>
+    private static readonly TimeSpan Beat = TimeSpan.FromSeconds(2);
+
+    private LiveOptions _options = new();
+    private readonly ThroughputMeter _meter = new();
+    private readonly HashSet<string> _expanded = new(StringComparer.Ordinal);
+
+    private IReadOnlyList<SourceRow> _rows = [];
+    private CancellationTokenSource? _loop;
+    private bool _polling;
+    private DateTimeOffset _refreshedAt;
+    private string? _host;
+    private string? _error;
+
+    // The gate's answer lives here, in the circuit's own memory. Not in the browser: a token in
+    // session storage is a token an operator's next tab, and anything else running on that origin,
+    // can read.
+    private bool _authorised;
+    private string _token = string.Empty;
+    private string? _gateError;
+
+    private SourceForm? _form;
+    private string? _formError;
+    private string? _confirmDelete;
+    private string? _copied;
+    private bool _saving;
+
+    private string? _forwardFor;
+    private string _forwardUrl = string.Empty;
+    private string? _forwardError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _options = Options.Value;
+
+        // The host the browser reached this page on, which is the only host this process knows a
+        // client can resolve. Used for the local output URL when the deployment has not said where
+        // its consumption port is published.
+        _host = Uri.TryCreate(Nav.BaseUri, UriKind.Absolute, out var uri) ? uri.Host : null;
+
+        // Exactly LiveStreamsController's policy: no configured token means no token demanded.
+        // Inventing a stricter rule here would leave an operator locked out of the page on a
+        // deployment where every other live call is open.
+        _authorised = string.IsNullOrEmpty(_options.Token);
+
+        // Loaded here rather than once the circuit is up, so the first paint is the real table.
+        // The alternative flashes "no sources configured" at an operator whose sources are fine.
+        if (_options.Enabled && _authorised)
+        {
+            await RefreshAsync(CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// The timer belongs to the interactive render and not to the prerender, which has no circuit
+    /// to push a second frame into and is thrown away as soon as it has produced its HTML.
+    /// </summary>
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender && _options.Enabled && _authorised)
+        {
+            Start();
+        }
+    }
+
+    private async Task Authorise()
+    {
+        var provided = Encoding.UTF8.GetBytes(_token);
+        var expected = Encoding.UTF8.GetBytes(_options.Token ?? string.Empty);
+
+        // The same fixed-time comparison both existing guards use. A token checked with string
+        // equality leaks its length and prefix to anyone willing to time the answer, and this page
+        // is reached over the same network they are.
+        if (!CryptographicOperations.FixedTimeEquals(provided, expected))
+        {
+            _gateError = "Bad token.";
+            return;
+        }
+
+        _authorised = true;
+        _gateError = null;
+        _token = string.Empty;
+
+        Start();
+
+        // Straight away rather than on the first tick, so unlocking fills the table now.
+        await RefreshAsync(_loop!.Token);
+    }
+
+    private void Start()
+    {
+        _loop ??= new CancellationTokenSource();
+
+        if (!_polling)
+        {
+            _polling = true;
+            _ = PollAsync(_loop.Token);
+        }
+    }
+
+    /// <summary>
+    /// One refresh per heartbeat, and never two at once: the next tick is awaited only after this
+    /// one has finished rendering, so a store that has gone slow costs a stale table rather than a
+    /// queue of overlapping reads that all land at once when it recovers.
+    /// </summary>
+    private async Task PollAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(Beat);
+
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await RefreshAsync(cancellationToken);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task RefreshAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var sources = await Sources.ListAsync(cancellationToken);
+            var streams = (await Live.StreamsAsync(cancellationToken))
+                .ToDictionary(stream => stream.Name, StringComparer.Ordinal);
+
+            _refreshedAt = DateTimeOffset.UtcNow;
+
+            // The copy button says "copied" until the next refresh, which is a couple of seconds.
+            // Leaving it there permanently would have every row an operator has ever touched
+            // claiming it is on the clipboard.
+            _copied = null;
+
+            _rows = sources
+                .OrderBy(source => source.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(source =>
+                {
+                    var stream = streams.GetValueOrDefault(source.Name);
+
+                    return StreamingRows.Build(
+                        source,
+                        stream,
+                        _options,
+                        _host,
+                        stream is null ? null : _meter.Sample(source.Name, stream.Bytes, _refreshedAt));
+                })
+                .ToList();
+
+            _error = null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // The last good table stays on screen with the failure named beside it. Blanking it
+            // would tell the operator every source had vanished.
+            _error = ex.Message;
+        }
+    }
+
+    private void Toggle(string name)
+    {
+        if (!_expanded.Remove(name))
+        {
+            _expanded.Add(name);
+        }
+    }
+
+    private void Edit(LiveSource? source)
+    {
+        _formError = null;
+        _confirmDelete = null;
+
+        _form = source is null
+            ? new SourceForm()
+            : new SourceForm
+            {
+                Existing = source,
+                Name = source.Name,
+                IsPull = source.IsPull,
+                Url = source.Url ?? string.Empty,
+                Enabled = source.Enabled,
+            };
+    }
+
+    private async Task SaveSource()
+    {
+        if (_form is null)
+        {
+            return;
+        }
+
+        var name = _form.Name.Trim();
+
+        // The one rule stream names obey, borrowed rather than restated. A second copy of it here
+        // would drift, and the drift would show up as a source that saves and can never claim its
+        // own name. TryParse also accepts the #!::r=name envelope, so the parsed name has to come
+        // back unchanged: an operator naming a source after a stream identifier means the literal
+        // string they typed.
+        if (!StreamName.TryParse(name, out var parsed, out var rejection) || parsed != name)
+        {
+            _formError = rejection.Length > 0 ? rejection : "That is not a usable stream name.";
+            return;
+        }
+
+        var url = _form.Url.Trim();
+
+        if (_form.IsPull && !StreamingRows.SchemeAllowed(url, _options.AllowedSchemes))
+        {
+            _formError = $"The URL must start with one of: {string.Join(", ", _options.AllowedSchemes.Select(s => s + "://"))}.";
+            return;
+        }
+
+        if (await WriteAsync(
+            () => Sources.SaveAsync(new LiveSource(
+                name,
+                _form.IsPull ? url : null,
+                _form.Enabled,
+                _form.Existing?.Forwards ?? [],
+                DateTimeOffset.UtcNow)),
+            message => _formError = message))
+        {
+            _form = null;
+        }
+    }
+
+    private async Task AddForward(LiveSource source)
+    {
+        _forwardFor = source.Name;
+        var url = _forwardUrl.Trim();
+
+        if (!StreamingRows.SchemeAllowed(url, _options.AllowedSchemes))
+        {
+            _forwardError = $"The URL must start with one of: {string.Join(", ", _options.AllowedSchemes.Select(s => s + "://"))}.";
+            return;
+        }
+
+        var forwards = source.Forwards
+            .Append(new ForwardTarget(Guid.NewGuid().ToString("n"), url))
+            .ToList();
+
+        if (await WriteAsync(
+            () => Sources.SaveAsync(source with { Forwards = forwards, UpdatedAt = DateTimeOffset.UtcNow }),
+            message => _forwardError = message))
+        {
+            _forwardUrl = string.Empty;
+        }
+    }
+
+    private Task RemoveForward(LiveSource source, ForwardTarget target)
+        => WriteAsync(
+            () => Sources.SaveAsync(source with
+            {
+                Forwards = source.Forwards.Where(f => f.Id != target.Id).ToList(),
+                UpdatedAt = DateTimeOffset.UtcNow,
+            }),
+            message => _forwardError = message);
+
+    private async Task DeleteSource(LiveSource source)
+    {
+        if (await WriteAsync(() => Sources.RemoveAsync(source.Name), message => _formError = message))
+        {
+            _confirmDelete = null;
+            _expanded.Remove(source.Name);
+        }
+    }
+
+    /// <summary>
+    /// Every write to the store goes through here, because the store is allowed to throw.
+    ///
+    /// Its Redis implementation lets the exception out of SaveAsync and RemoveAsync rather than
+    /// swallowing it, which is right: a source that was not written must not look written. The
+    /// failure has to reach the operator though, and a form that clears itself and shows nothing is
+    /// the worst possible answer - they will believe the source is configured and find out when it
+    /// never comes on air. So the form keeps what they typed and says what went wrong.
+    /// </summary>
+    private async Task<bool> WriteAsync(Func<Task> write, Action<string?> report)
+    {
+        _saving = true;
+
+        try
+        {
+            await write();
+            report(null);
+
+            // Straight back to the store rather than waiting up to two seconds for the next tick,
+            // so the row appears the moment the operator presses save.
+            await RefreshAsync(_loop?.Token ?? CancellationToken.None);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            report($"Not saved: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task Copy(string url)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", url);
+            _copied = url;
+        }
+        catch (JSException)
+        {
+            // The clipboard API is refused outside a secure context. The URL is on screen in full
+            // and selectable, so there is nothing to recover from beyond not claiming it worked.
+            _copied = null;
+        }
+    }
+
+    private static string StateWord(SourceState state) => state switch
+    {
+        SourceState.Live => "live",
+        SourceState.Interrupted => "interrupted",
+        _ => "not on air",
+    };
+
+    private static string StateClass(SourceState state) => state switch
+    {
+        SourceState.Live => "good",
+        SourceState.Interrupted => "warn",
+        _ => "off",
+    };
+
+    private static string ForwardWord(SourceRow row, ForwardTarget target, ForwardStatus? status) => status switch
+    {
+        { Connected: true } => "connected",
+        { } => "not connected",
+        _ when !target.Enabled => "off",
+        _ when row.State == SourceState.NotOnAir => "waiting for the source",
+        _ => "not running",
+    };
+
+    private static string ForwardClass(ForwardTarget target, ForwardStatus? status)
+        => status is { Connected: true } ? "good" : target.Enabled ? "warn" : "off";
+
+    private string Throughput(SourceRow row)
+    {
+        if (row.BitsPerSecond is { } bits)
+        {
+            return bits >= 1_000_000
+                ? (bits / 1_000_000).ToString("0.0", CultureInfo.InvariantCulture) + " Mb/s"
+                : (bits / 1_000).ToString("0", CultureInfo.InvariantCulture) + " kb/s";
+        }
+
+        // No second sample yet, or the counter reset. The total is a fact; a rate would not be.
+        return row.Stream is null ? "-" : Size(row.Stream.Bytes);
+    }
+
+    private static string Size(long bytes) => bytes switch
+    {
+        >= 1L << 30 => (bytes / (double)(1L << 30)).ToString("0.0", CultureInfo.InvariantCulture) + " GB",
+        >= 1L << 20 => (bytes / (double)(1L << 20)).ToString("0.0", CultureInfo.InvariantCulture) + " MB",
+        >= 1L << 10 => (bytes / (double)(1L << 10)).ToString("0", CultureInfo.InvariantCulture) + " kB",
+        _ => bytes + " B",
+    };
+
+    public void Dispose()
+    {
+        _loop?.Cancel();
+        _loop?.Dispose();
+    }
+
+    private sealed class SourceForm
+    {
+        /// <summary>Null for a new source; the row being replaced otherwise, so its forwards survive the edit.</summary>
+        public LiveSource? Existing { get; init; }
+
+        public string Name { get; set; } = string.Empty;
+
+        public bool IsPull { get; set; } = true;
+
+        public string Url { get; set; } = string.Empty;
+
+        public bool Enabled { get; set; } = true;
+    }
+}
