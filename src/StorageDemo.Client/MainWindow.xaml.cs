@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -14,6 +14,7 @@ using FlyleafLib.MediaFramework.MediaRenderer;
 using FlyleafLib.MediaPlayer;
 using Microsoft.Win32;
 using StorageDemo.Core.Documents;
+using StorageDemo.Core.Streaming;
 using StorageDemo.Grpc;
 
 // Aliased because the generated namespace is StorageDemo.Grpc, which hides the transport's own
@@ -120,6 +121,7 @@ public partial class MainWindow : Window
         // clears. Only documents are filtered: a stream is either running or gone.
         _view = CollectionViewSource.GetDefaultView(_documents);
         _view.Filter = MatchesFilters;
+        HudToggle.IsChecked = ClientPreferences.Hud;
         ServerBox.ItemsSource = _servers.Entries;
         ServerBox.Text = initialAddress;
         TokenBox.Text = _servers.TokenFor(initialAddress);
@@ -811,6 +813,10 @@ public partial class MainWindow : Window
         KlvPanel.Visibility = Visibility.Collapsed;
         KlvList.ItemsSource = null;
         KlvHint.Visibility = Visibility.Collapsed;
+
+        // No KLV, no heads-up display: an overlay left over a stream that stopped carrying the
+        // metadata is a readout of a moment that has passed.
+        HudLayer.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>The newest packet's fields, once a second, for the stream on screen and no other.</summary>
@@ -844,7 +850,156 @@ public partial class MainWindow : Window
         KlvList.ItemsSource = klv is null ? null : DocumentItem.KlvRows(klv);
         KlvHint.Text = "No KLV packet has arrived yet.";
         KlvHint.Visibility = klv is null ? Visibility.Visible : Visibility.Collapsed;
+
+        UpdateHud(klv);
     }
+
+    private void OnHudToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_ready)
+        {
+            return;
+        }
+
+        ClientPreferences.Hud = HudToggle.IsChecked == true;
+
+        if (ClientPreferences.Hud)
+        {
+            // Comes back on the next poll at the latest; ask now so the switch feels immediate.
+            _ = RefreshKlvAsync();
+        }
+        else
+        {
+            HudLayer.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>
+    /// The sensor heads-up display over the picture: the corner blocks, the frame-centre reticle
+    /// and the north arrow, from the newest KLV packet and nothing else.
+    ///
+    /// Absent is drawn as absent. A field the packet did not carry is two dashes, a packet that
+    /// was not an ST 0601 local set gets no display at all, and the arrow disappears rather than
+    /// pointing somewhere plausible when the items it is computed from are missing.
+    ///
+    /// ponytail: this redraws on the once-a-second KLV poll, so the arrow steps rather than sweeps
+    /// while the platform turns. Interpolating between two polls, or polling faster, is the
+    /// upgrade if a demo ever looks bad because of it.
+    /// </summary>
+    private void UpdateHud(LiveKlvMessage? klv)
+    {
+        var fields = klv?.Fields;
+
+        if (!ClientPreferences.Hud || fields is null)
+        {
+            HudLayer.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        static double? Opt(bool has, double value) => has ? value : null;
+
+        var heading = Opt(fields.HasPlatformHeading, fields.PlatformHeading);
+        var azimuth = Opt(fields.HasSensorRelativeAzimuth, fields.SensorRelativeAzimuth);
+        var roll = Opt(fields.HasSensorRelativeRoll, fields.SensorRelativeRoll);
+
+        HudTopLeft.Text = string.Join(
+            '\n',
+            fields.Timestamp?.ToDateTimeOffset().UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss'Z'") ?? "----",
+            $"MSN {Str(fields.HasMissionId, fields.MissionId)}",
+            $"PLT {Str(fields.HasPlatformDesignation, fields.PlatformDesignation)}");
+
+        // The client already knows how old the set is, so it says so rather than letting a frozen
+        // readout look live. Two polls' worth of slack, because one late poll is not a stale set.
+        var age = klv!.ReceivedAt is { } received
+            ? (DateTimeOffset.UtcNow - received.ToDateTimeOffset()).TotalSeconds
+            : double.NaN;
+
+        var stale = double.IsNaN(age) ? "AGE UNKNOWN" : age > 3 ? $"STALE {age:0.0} S" : null;
+
+        HudStale.Text = stale ?? string.Empty;
+        HudStale.Visibility = stale is null ? Visibility.Collapsed : Visibility.Visible;
+
+        HudTopRight.Text = string.Join(
+            '\n',
+            "SENSOR",
+            Latitude(Opt(fields.HasSensorLatitude, fields.SensorLatitude)),
+            Longitude(Opt(fields.HasSensorLongitude, fields.SensorLongitude)),
+            $"ALT {Number(Opt(fields.HasSensorTrueAltitude, fields.SensorTrueAltitude), 0)} M");
+
+        var hfov = Opt(fields.HasSensorHorizontalFov, fields.SensorHorizontalFov);
+        var vfov = Opt(fields.HasSensorVerticalFov, fields.SensorVerticalFov);
+
+        HudBottomLeft.Text = string.Join(
+            '\n',
+            $"HDG  {Number(heading, 1)}",
+            $"AZ   {Number(azimuth, 1)}",
+            $"EL   {Number(Opt(fields.HasSensorRelativeElevation, fields.SensorRelativeElevation), 1)}",
+            $"ROLL {Number(roll, 1)}",
+            $"FOV  {Number(hfov, 2)} x {Number(vfov, 2)}",
+            $"RNG  {Number(Opt(fields.HasSlantRange, fields.SlantRange), 0)} M");
+
+        HudCentre.Text = string.Join(
+            '\n',
+            $"{Latitude(Opt(fields.HasFrameCenterLatitude, fields.FrameCenterLatitude))}"
+            + $"  {Longitude(Opt(fields.HasFrameCenterLongitude, fields.FrameCenterLongitude))}",
+            $"ELEV {Number(Opt(fields.HasFrameCenterElevation, fields.FrameCenterElevation), 0)} M");
+
+        if (SensorGeometry.NorthInImage(heading, azimuth, roll) is { } north)
+        {
+            HudNorthArrow.Visibility = Visibility.Visible;
+            HudNorthRotate.Angle = north;
+            HudNorthLabelRotate.Angle = -north;
+            HudNorthText.Text = $"BRG {SensorGeometry.SensorBearing(heading, azimuth)!.Value:000}"
+                + (roll is null ? "\nNO ROLL" : string.Empty);
+        }
+        else
+        {
+            // Hidden, not collapsed: the caption stays where it was rather than jumping down.
+            HudNorthArrow.Visibility = Visibility.Hidden;
+            HudNorthText.Text = "NORTH --";
+        }
+
+        HudLayer.Visibility = Visibility.Visible;
+        LayoutHud();
+    }
+
+    /// <summary>
+    /// Fits the display to the picture rather than to the host, so a letterboxed stream keeps its
+    /// corner blocks on the imagery and, more to the point, keeps the reticle on the frame centre:
+    /// the centre of this grid is the centre of the video rectangle by construction.
+    /// </summary>
+    private void LayoutHud()
+    {
+        if (HudLayer.Visibility != Visibility.Visible || _player?.Renderer is not { } renderer)
+        {
+            return;
+        }
+
+        var (left, top, width, height) = VideoRectangle(renderer);
+
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        HudLayer.Margin = new Thickness(
+            left,
+            top,
+            Math.Max(0, DetectionCanvas.ActualWidth - left - width),
+            Math.Max(0, DetectionCanvas.ActualHeight - top - height));
+    }
+
+    private static string Str(bool has, string value) => has && value.Length > 0 ? value : "--";
+
+    /// <summary>Right-aligned in a monospaced column, so a column of numbers stays a column.</summary>
+    private static string Number(double? value, int decimals)
+        => value is { } d ? d.ToString($"F{decimals}").PadLeft(7) : "--".PadLeft(7);
+
+    private static string Latitude(double? value)
+        => value is { } d ? $"{Math.Abs(d):00.00000}{(d >= 0 ? 'N' : 'S')}" : "--";
+
+    private static string Longitude(double? value)
+        => value is { } d ? $"{Math.Abs(d):000.00000}{(d >= 0 ? 'E' : 'W')}" : "--";
 
     private void ShowMetadata(DocumentItem item)
     {
@@ -1567,7 +1722,13 @@ public partial class MainWindow : Window
         return brush;
     }
 
-    private void OnDetectionCanvasSizeChanged(object sender, SizeChangedEventArgs e) => LayoutDetections();
+    /// <summary>The overlay's size changes when the host does, and going fullscreen is the case
+    /// that matters: both the boxes and the heads-up display are measured off the picture.</summary>
+    private void OnDetectionCanvasSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        LayoutDetections();
+        LayoutHud();
+    }
 
     /// <summary>
     /// Draws the current frame's boxes over the picture, in the host's overlay so they go

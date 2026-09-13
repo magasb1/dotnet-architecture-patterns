@@ -113,6 +113,28 @@ Selecting a stream that carries KLV fills a **Sensor** panel under the player wi
 metadata set: platform position and attitude, sensor pointing, slant range and frame centre. It is
 polled once a second while that stream is playing and not at all otherwise.
 
+The same set is drawn over the picture as a **heads-up display**, in the player's overlay so it
+follows the video into fullscreen and inside the rectangle the renderer painted the video in, so a
+letterboxed stream keeps its readouts on the imagery. Monospaced blocks in the corners: time,
+mission and platform; sensor position and altitude; heading, pointing, field of view and slant
+range. A broken cross marks the frame centre with its coordinates and elevation, and a **north
+arrow** sits by the bearing it was computed from. A field the packet did not carry reads `--`, a
+stream with no KLV gets no display at all, and a set older than three seconds says its age rather
+than looking live. The **HUD** box in the toolbar turns it off for an audience that wants the clean
+picture, remembered in `%APPDATA%\StorageDemoClient\preferences.json`. The classification banner is
+drawn over all of it and is never dimmed by it.
+
+North is derived rather than guessed. ST 0601 tag 5 (platform heading, clockwise from true north)
+plus tag 18 (sensor relative azimuth, clockwise from the platform's nose) is where the sensor
+points; with the camera unrolled that direction is the top of the picture, so north sits at minus
+that bearing, and tag 20 (sensor relative roll, clockwise about the lens axis seen from behind the
+camera) turns the scene inside the frame the other way and subtracts as well. The first half of
+that is checked against geodesy on the Esri sample in `Misb0601RealStreamTests`: the bearing from
+the sensor position to the frame centre position, computed from the two coordinate pairs alone,
+agrees with heading-plus-azimuth to within six degrees over all 711 packets, the residual being the
+platform's bank, which the expression deliberately leaves out. At one poll a second the arrow steps
+rather than sweeps while the platform turns.
+
 **Detect**, beside Record and Snapshot, asks a worker to run object detection on the selected
 stream at 1, 5 or 25 detections a second; like a recording it is the server's state and outlives
 the window. While it is on, the newest MISB ST 0903 VMTI frame is polled once a second and its
@@ -123,6 +145,40 @@ so letterboxing does not shift them off their objects. They trail the picture by
 network delay, and the **Detections** panel under the player says how old they are rather than
 pretending they are live. Against a server without the detection calls the button is disabled with
 that reason in its tooltip, and everything else works as before.
+
+### Detection: a second process, which has to be running
+
+Detection does not happen in the API. A **worker** subscribes to the streams whose toggle is on,
+decodes them, runs the model and posts the results back, so nothing appears in the client until one
+is running:
+
+```bash
+dotnet run --project src/StorageDemo.Worker
+```
+
+It needs to be told where the API is, and its token if one is set:
+
+```
+Worker__ApiBaseUrl=http://localhost:8080
+Worker__Token=<the same Live__Token>
+Worker__Model=rf-detr        # or yolo26
+Worker__ModelPath=           # empty follows the model; set it to use a file elsewhere
+Worker__DefaultRate=1        # detections a second when the stream does not say
+```
+
+`Worker__Model` chooses the contract, not just the file, because the two families disagree on
+tensor names, box format, whether scores are logits, and whether the frame is stretched or
+letterboxed. Naming one while pointing at the other's file is refused at load rather than decoded
+into plausible nonsense. Fetch a model first with `scripts/fetch-rfdetr.sh` or `scripts/fetch-yolo.sh`.
+
+RF-DETR Nano is the default because its weights are Apache-2.0. YOLO26 Nano is four to five times
+faster on a processor and misses things RF-DETR finds; it is AGPL-3.0 or commercial, so read
+`.scratch/scale-to-1000/detection-plan.md` before shipping it.
+
+**Boxes lag the picture and are meant to.** A detection at one a second on a processor takes about
+half of that second, and the result then travels back through the owner, so the client draws the
+newest set it has rather than waiting for one that matches the current frame. The Detections panel
+says how old the set is.
 
 The client is deliberately a demonstration of the service rather than a monitoring product. It
 plays one stream at a time and lists what it is given; a wall of simultaneous players and a grid

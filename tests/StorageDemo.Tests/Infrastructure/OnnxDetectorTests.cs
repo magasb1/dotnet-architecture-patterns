@@ -1,10 +1,12 @@
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Runtime.InteropServices;
 using FFmpeg.AutoGen.Abstractions;
 using Microsoft.Extensions.Logging;
 using StorageDemo.Core.Streaming;
 using StorageDemo.Infrastructure.Detection;
 using StorageDemo.Infrastructure.Media;
+using StorageDemo.Infrastructure.Streaming;
 
 namespace StorageDemo.Tests.Infrastructure;
 
@@ -238,6 +240,54 @@ public sealed class OnnxDetectorTests(ITestOutputHelper output) : DetectorTests
         var two = stopwatch.Elapsed / rounds;
 
         output.WriteLine($"{detector.Provider}: one frame {one.TotalMilliseconds:F0} ms, batch of two {two.TotalMilliseconds:F0} ms");
+    }
+
+    /// <summary>
+    /// The one number the worker has no other way to see. An instrument nobody reads until the day
+    /// a pod is slow is exactly the kind that breaks silently, so the name, the unit and the tags
+    /// are asserted as <c>dotnet-counters</c> would read them.
+    /// </summary>
+    [Fact]
+    public void A_detection_is_timed_onto_the_pods_meter_by_provider_and_batch()
+    {
+        Assert.SkipUnless(File.Exists(Model), NoModel);
+
+        var measured = new List<(double Ms, string Provider, int Batch)>();
+
+        using var listener = new MeterListener();
+
+        listener.InstrumentPublished = (instrument, self) =>
+        {
+            if (instrument.Meter.Name == LiveMetrics.MeterName && instrument.Name == "live.detection.duration")
+            {
+                Assert.Equal("ms", instrument.Unit);
+                self.EnableMeasurementEvents(instrument);
+            }
+        };
+
+        listener.SetMeasurementEventCallback<double>((_, value, tags, _) =>
+        {
+            var read = tags.ToArray().ToDictionary(tag => tag.Key, tag => tag.Value);
+            measured.Add((value, (string)read["provider"]!, (int)read["batch"]!));
+        });
+
+        listener.Start();
+
+        using var detector = Detector(threshold: 0.5f);
+        var frame = Decode(Dog);
+
+        detector.Detect(frame);
+        detector.Detect([frame, frame]);
+
+        Assert.Collection(
+            measured,
+            one =>
+            {
+                Assert.Equal(detector.Provider, one.Provider);
+                Assert.Equal(1, one.Batch);
+                Assert.True(one.Ms > 0, "a detection that took no time at all");
+            },
+            two => Assert.Equal(2, two.Batch));
     }
 
     /// <summary>Where a wrong table would ship: the README's sparse id, not a position in an 80-name list.</summary>

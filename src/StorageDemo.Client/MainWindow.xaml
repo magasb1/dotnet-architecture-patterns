@@ -154,6 +154,14 @@
                 <ComboBoxItem>5/s</ComboBoxItem>
                 <ComboBoxItem>25/s</ComboBoxItem>
             </ComboBox>
+            <Separator />
+            <!-- Remembered across restarts: a demo audience wants the clean picture too. -->
+            <CheckBox x:Name="HudToggle"
+                      VerticalAlignment="Center"
+                      Margin="4,0"
+                      Checked="OnHudToggled"
+                      Unchecked="OnHudToggled"
+                      ToolTip="Draw the sensor metadata over the picture while the stream carries KLV.">HUD</CheckBox>
         </ToolBar>
 
         <StatusBar DockPanel.Dock="Bottom">
@@ -304,6 +312,105 @@
                             <Canvas x:Name="DetectionCanvas"
                                     SizeChanged="OnDetectionCanvasSizeChanged"
                                     ClipToBounds="True" />
+
+                            <!--
+                                The heads-up display, in the same overlay for the same reason,
+                                and inside the picture rather than inside the host: the margin is
+                                set from code to the rectangle the renderer painted the video in,
+                                so the corner blocks sit on the imagery and not on the letterbox,
+                                and the centre of this grid is the centre of the frame.
+
+                                Everything here is one TextBlock per corner, monospaced, so the
+                                columns line up without a layout for each field. Drawn under the
+                                marking banner and never over it.
+                            -->
+                            <Grid x:Name="HudLayer" Visibility="Collapsed">
+                                <Grid.Resources>
+                                    <!--
+                                        A black glow rather than a panel behind the text: it keeps
+                                        white text readable over snow and over shadow without
+                                        putting a grey box over the imagery.
+                                    -->
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="FontFamily" Value="Consolas" />
+                                        <Setter Property="FontSize" Value="12" />
+                                        <Setter Property="Foreground" Value="#F2F2F2" />
+                                        <Setter Property="Effect">
+                                            <Setter.Value>
+                                                <DropShadowEffect ShadowDepth="0" BlurRadius="4" Color="Black" Opacity="1" />
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </Grid.Resources>
+
+                                <!-- 28 down the picture, which clears the marking banner across the top of the host. -->
+                                <StackPanel HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,28,0,0">
+                                    <TextBlock x:Name="HudTopLeft" />
+                                    <TextBlock x:Name="HudStale" Visibility="Collapsed" Foreground="#FBBF24" />
+                                </StackPanel>
+
+                                <TextBlock x:Name="HudTopRight"
+                                           HorizontalAlignment="Right"
+                                           VerticalAlignment="Top"
+                                           TextAlignment="Right"
+                                           Margin="0,28,10,0" />
+
+                                <TextBlock x:Name="HudBottomLeft"
+                                           HorizontalAlignment="Left"
+                                           VerticalAlignment="Bottom"
+                                           Margin="10,0,0,10" />
+
+                                <!-- The frame centre: a broken cross, so the thing being looked at is not covered. -->
+                                <Grid VerticalAlignment="Center" HorizontalAlignment="Center">
+                                    <Path Data="M -22,0 H -8 M 8,0 H 22 M 0,-22 V -8 M 0,8 V 22"
+                                          Stroke="#F2F2F2"
+                                          StrokeThickness="1">
+                                        <Path.Effect>
+                                            <DropShadowEffect ShadowDepth="0" BlurRadius="4" Color="Black" Opacity="1" />
+                                        </Path.Effect>
+                                    </Path>
+                                    <TextBlock x:Name="HudCentre"
+                                               TextAlignment="Center"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               Margin="0,76,0,0" />
+                                </Grid>
+
+                                <!-- Right edge, vertically centred: the owner's placement. It sits clear of the
+                                     classification banner at the top, the corner blocks, and the reticle in the
+                                     middle of the picture. -->
+                                <StackPanel HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,14,0">
+                                    <Grid x:Name="HudNorthArrow" Width="54" Height="54" RenderTransformOrigin="0.5,0.5">
+                                        <Grid.RenderTransform>
+                                            <RotateTransform x:Name="HudNorthRotate" />
+                                        </Grid.RenderTransform>
+                                        <Path Data="M 0,-13 L 6,13 L 0,8 L -6,13 Z"
+                                              Fill="#F2F2F2"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center">
+                                            <Path.Effect>
+                                                <DropShadowEffect ShadowDepth="0" BlurRadius="4" Color="Black" Opacity="1" />
+                                            </Path.Effect>
+                                        </Path>
+                                        <!-- On the arrowhead, not ahead of it. The letter marks which end of the
+                                             needle is north, so it belongs over the head; floating beyond the tip
+                                             reads as a separate thing that happens to be nearby. It rides the
+                                             rotation and is held upright by the opposite one, so it stays readable
+                                             at every bearing. -->
+                                        <TextBlock Text="N"
+                                                   FontWeight="Bold"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"
+                                                   Margin="0,-16,0,0"
+                                                   RenderTransformOrigin="0.5,0.5">
+                                            <TextBlock.RenderTransform>
+                                                <RotateTransform x:Name="HudNorthLabelRotate" />
+                                            </TextBlock.RenderTransform>
+                                        </TextBlock>
+                                    </Grid>
+                                    <TextBlock x:Name="HudNorthText" TextAlignment="Center" />
+                                </StackPanel>
+                            </Grid>
 
                             <Border x:Name="MarkingBanner"
                                     Visibility="{Binding MarkingVisibility, FallbackValue=Collapsed}"

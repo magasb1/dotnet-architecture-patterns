@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using FFmpeg.AutoGen.Abstractions;
@@ -6,6 +8,7 @@ using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using StorageDemo.Core.Streaming;
 using StorageDemo.Infrastructure.Media;
+using StorageDemo.Infrastructure.Streaming;
 
 namespace StorageDemo.Infrastructure.Detection;
 
@@ -22,6 +25,31 @@ namespace StorageDemo.Infrastructure.Detection;
 public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
 {
     private const int Channels = 3;
+
+    /// <summary>
+    /// How long a detection took, in milliseconds, published on the pod's own meter
+    /// (<see cref="LiveMetrics"/>) so <c>dotnet-counters monitor --counters StorageDemo.Live</c>
+    /// reads it with no package and no exporter.
+    ///
+    /// A histogram rather than a log line, because at five a second on a thousand streams a line
+    /// each is five thousand lines a second to say a number that only matters as a distribution;
+    /// and because the question this answers is "is this pod slow", which is the p50 and the p99,
+    /// not any single call. It is the total only: about 99 % of a detection is
+    /// <c>InferenceSession.Run</c> and swscale is a quarter of one percent, so a preprocess and a
+    /// postprocess series would be two instruments reporting rounding error
+    /// (perf-detection.md, experiment 3).
+    ///
+    /// Static because there is one detector per process and the meter belongs to the process, not
+    /// to the object. Two tags, both with a small fixed set of values, as this meter's rule
+    /// requires: <c>provider</c> says CPU or CUDA, which is how a pod that silently fell back to
+    /// the processor is visible at all, and <c>batch</c> separates the calls that carry eight
+    /// frames from the ones that carry one — without it the distribution is the mixture of the two
+    /// and neither mode means anything. No stream name, ever.
+    /// </summary>
+    private static readonly Histogram<double> Duration = new Meter(LiveMetrics.MeterName).CreateHistogram<double>(
+        "live.detection.duration",
+        unit: "ms",
+        description: "Wall time of one detection call, by execution provider and batch size.");
 
     /// <summary>
     /// One thread pool for the process rather than one per session, which is the default and
@@ -95,6 +123,16 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
     /// Full chroma interpolation and accurate rounding close the last hundredths. The fast
     /// horizontal path is corner-aligned rather than centred, a sub-pixel shift on the canvas that
     /// is under a source pixel here; that is the trade for matching the reference's sharpness.
+    ///
+    /// Asked once more whether swscale will give both at once — centred <em>and</em> two-tap — and
+    /// the answer is no. The centred kernel is the general filter path, and that path widens its
+    /// support by the downscale ratio by construction; no flag in <c>SwsFlags</c> reaches that,
+    /// and <c>sws_getCachedContext</c>'s <c>param</c> is read only by the bicubic, gauss, sinc and
+    /// spline branches, never by the bilinear one. Its <c>srcFilter</c>/<c>dstFilter</c> are
+    /// convolved with the kernel, so they can only widen it further. Re-measured on the dog to be
+    /// sure the question was asked of the right thing: 66 with these flags and 53 with
+    /// SWS_BILINEAR, which is the pair already recorded above. Closing the last 0.028 means a
+    /// resampler, not a flag, and perf-detection.md prices that at 0.25 % of a detection.
     /// </summary>
     private const SwsFlags Flags = SwsFlags.SWS_FAST_BILINEAR | SwsFlags.SWS_FULL_CHR_H_INT | SwsFlags.SWS_ACCURATE_RND;
 
@@ -159,6 +197,8 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
 
         _stride = descriptor.InputSize * Channels;
         _targetStride[0] = _stride;
+
+        Warm(logger);
     }
 
     /// <summary>"CUDA" or "CPU": which provider the session was built with.</summary>
@@ -182,6 +222,11 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
 
         lock (_gate)
         {
+            // Timed inside the lock: what is wanted is what a detection costs, not how long this
+            // caller queued behind another one. The worker has one detect loop, so there is no
+            // second caller to queue behind anyway.
+            var started = Stopwatch.GetTimestamp();
+
             EnsureCapacity(frames.Length);
 
             for (var i = 0; i < frames.Length; i++)
@@ -233,6 +278,11 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
                     ? DecodeRows(rows, columns, frame->width, frame->height)
                     : Decode(rows, scores.Slice(i * queries * classes, queries * classes), classes, frame->width, frame->height);
             }
+
+            Duration.Record(
+                Stopwatch.GetElapsedTime(started).TotalMilliseconds,
+                new KeyValuePair<string, object?>("provider", Provider),
+                new KeyValuePair<string, object?>("batch", frames.Length));
 
             return results;
         }
@@ -341,19 +391,27 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
     [GeneratedRegex(@"(\d+)\s*:\s*'((?:[^'\\]|\\.)*)'")]
     private static partial Regex EmbeddedName();
 
+    /// <summary>
+    /// <c>'dets' [-1,300,4], 'labels' [-1,300,91]</c>. The name says a descriptor and a file
+    /// disagree; the shape says which file you have, which is the question anyone reading this
+    /// error is actually asking. A dimension of -1 is the dynamic axis, as ORT reports it.
+    /// </summary>
+    private static string Shapes(IReadOnlyDictionary<string, NodeMetadata> metadata)
+        => string.Join(", ", metadata.Select(node => $"'{node.Key}' [{string.Join(",", node.Value.Dimensions)}]"));
+
     /// <summary>The file matches the descriptor: names exist, input is uint8 NHWC at the canvas size.</summary>
     private void VerifyContract()
     {
         if (!_session.InputMetadata.TryGetValue(_descriptor.InputName, out var input))
         {
-            throw new InvalidOperationException($"The model has no input named '{_descriptor.InputName}'; it has {string.Join(", ", _session.InputMetadata.Keys)}.");
+            throw new InvalidOperationException($"The model has no input named '{_descriptor.InputName}'; it has {Shapes(_session.InputMetadata)}.");
         }
 
         foreach (var name in _outputNames)
         {
             if (!_session.OutputMetadata.ContainsKey(name))
             {
-                throw new InvalidOperationException($"The model has no output named '{name}'; it has {string.Join(", ", _session.OutputMetadata.Keys)}.");
+                throw new InvalidOperationException($"The model has no output named '{name}'; it has {Shapes(_session.OutputMetadata)}.");
             }
         }
 
@@ -372,6 +430,45 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
                 $"Input '{_descriptor.InputName}' is {input.ElementDataType} [{string.Join(", ", dimensions)}], "
                 + $"not uint8 [batch, {size}, {size}, {Channels}]; the descriptor and the file disagree.");
         }
+    }
+
+    /// <summary>
+    /// One inference on a blank canvas, at construction, so whatever the provider defers to its
+    /// first <c>Run</c> is paid at startup rather than by the first stream's first frame. The blank
+    /// canvas decodes to nothing, so the result is dropped without looking at it.
+    ///
+    /// On the processor this is worth nothing and was measured saying so: the first `Run` costs
+    /// what any other `Run` costs, so the whole of it is one extra inference at startup
+    /// (perf-detection.md, "Warming the session"). It is here for CUDA, where cuDNN algorithm
+    /// selection and kernel load happen on the first call and TensorRT's engine build is minutes.
+    ///
+    /// The time is logged because it is the only place the deferred cost is visible: this run
+    /// against the steady-state figure the histogram then publishes is what the provider held
+    /// back, and on a GPU node that difference is the one worth looking at.
+    /// </summary>
+    private void Warm(ILogger logger)
+    {
+        var started = Stopwatch.GetTimestamp();
+
+        EnsureCapacity(1);
+        NativeMemory.Fill(_input, (nuint)_frameBytes, _padValue);
+
+        var size = _descriptor.InputSize;
+
+        using (var input = OrtValue.CreateTensorValueWithData(
+            OrtMemoryInfo.DefaultInstance,
+            TensorElementType.UInt8,
+            [1, size, size, Channels],
+            (IntPtr)_input,
+            _frameBytes))
+        {
+            using var _ = _session.Run(_runOptions, _inputNames, [input], _outputNames);
+        }
+
+        logger.LogInformation(
+            "Session warmed on {Provider} in {Elapsed:F0} ms; the first frame pays a steady-state detection now.",
+            Provider,
+            Stopwatch.GetElapsedTime(started).TotalMilliseconds);
     }
 
     private void EnsureCapacity(int frames)

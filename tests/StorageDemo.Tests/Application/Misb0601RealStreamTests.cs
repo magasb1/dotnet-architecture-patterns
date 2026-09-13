@@ -17,14 +17,32 @@ namespace StorageDemo.Tests.Application;
 /// </summary>
 public sealed class Misb0601RealStreamTests
 {
-    private static readonly string Sample = Path.Combine(
-        AppContext.BaseDirectory, "..", "..", "..", "..", "..", "data", "fmv", "FMV tutorial data", "Truck.ts");
+    /// <summary>
+    /// Where the fetch script puts it, and where a person who unpacked the archive by hand is
+    /// likely to have left it. Searched rather than fixed because the first arrangement of these
+    /// tests skipped in silence the moment the file moved, and a test that reports "not fetched"
+    /// when the file is sitting two directories away is worse than one that simply fails.
+    /// </summary>
+    private static readonly string[] Candidates =
+    [
+        Path.Combine("data", "fmv", "FMV tutorial data", "Truck.ts"),
+        Path.Combine("data", "Truck.ts"),
+    ];
+
+    private static readonly string Root = Path.Combine(
+        AppContext.BaseDirectory, "..", "..", "..", "..", "..");
+
+    private static readonly string? Sample = Candidates
+        .Select(candidate => Path.Combine(Root, candidate))
+        .FirstOrDefault(File.Exists);
 
     private static List<(long? Pts, Misb0601Set Set)> Decoded()
     {
         Assert.SkipUnless(
-            File.Exists(Sample),
-            $"Run scripts/fetch-fmv-sample.sh to put the Esri FMV sample at {Path.GetFullPath(Sample)}.");
+            Sample is not null,
+            "Run scripts/fetch-fmv-sample.sh to fetch the Esri FMV sample. Looked for "
+                + string.Join(" and ", Candidates.Select(c => $"'{c}'"))
+                + $" under {Path.GetFullPath(Root)}.");
 
         var packets = Misb.ReadKlv(Sample);
 
@@ -121,6 +139,45 @@ public sealed class Misb0601RealStreamTests
             // factor, not by metres; the residual here is the spherical-earth approximation.
             Assert.Equal(Math.Sqrt(north * north + east * east + up * up), set.SlantRange!.Value, 10.0);
         }
+    }
+
+    /// <summary>
+    /// The check that keeps a north arrow honest. Where the sensor points comes from ST 0601 tag 5
+    /// plus tag 18; where it points can also be had from the sensor position and the frame centre
+    /// position alone, by spherical trigonometry, with no heading, no azimuth and no standard
+    /// involved. The two are computed from disjoint items, so a flipped sign or a dropped term in
+    /// the first is a hundred-odd degrees away from the second rather than a plausible arrow.
+    ///
+    /// Measured over the sample's 711 packets on 2026-09-13: mean -2.96 degrees, from -5.78 to
+    /// +0.39, worst 5.78. The bias is the platform's attitude, which
+    /// <see cref="SensorGeometry.SensorBearing"/> deliberately leaves out: the Cessna is banked
+    /// left through most of its orbit (platform roll -25.5 to +2.4 degrees, pitch +0.7 to +8.9)
+    /// and the sensor looks 10 to 40 degrees below the horizon, so the platform's own tilt swings
+    /// the look direction a few degrees off the heading-plus-azimuth answer. Composing the full
+    /// body-to-NED rotation from tags 5, 6, 7, 18 and 19 instead was measured at mean +0.13 and
+    /// worst 0.79 degrees against the same geodetic bearing, which is what says the residual is
+    /// the attitude term and not a decode error.
+    /// </summary>
+    [Fact]
+    public void Where_the_sensor_says_it_points_agrees_with_the_bearing_to_the_frame_centre()
+    {
+        var worst = 0.0;
+
+        foreach (var (_, set) in Decoded())
+        {
+            var pointed = SensorGeometry.SensorBearing(set.PlatformHeading, set.SensorRelativeAzimuth);
+            var geodetic = SensorGeometry.BearingBetween(
+                set.SensorLatitude, set.SensorLongitude, set.FrameCenterLatitude, set.FrameCenterLongitude);
+
+            worst = Math.Max(worst, Math.Abs(SensorGeometry.BearingDifference(pointed!.Value, geodetic!.Value)));
+
+            // The one item in the north arrow this file cannot check: the sensor is never rolled
+            // here, so tag 20's sign is on the reading of the standard alone. Asserted so that a
+            // sample that did roll would say so rather than quietly making the claim untrue.
+            Assert.Equal(0, set.SensorRelativeRoll!.Value);
+        }
+
+        Assert.InRange(worst, 0, 6);
     }
 
     [Fact]

@@ -304,6 +304,57 @@ job it becomes worth revisiting**, and on a GPU it becomes a different question 
 engine build is minutes, not seconds, and that is where startup caching earns its keep
 (research §2).
 
+## Warming the session
+
+**Verdict: on the processor it is worth nothing measurable, and it was taken anyway. The CUDA path
+is the whole reason, and there is still no GPU here to measure it on.**
+
+`OnnxDetector`'s constructor now ends with one inference on a blank canvas
+(`Warm`), which is what their runtime does and we did not
+(`detection-comparison.md` 1.1). The question this was supposed to settle is how much the first
+frame of the first stream was paying, which nothing here had ever separated from the steady state.
+
+Measured 2026-09-13, same laptop part, same `models/dog-2.jpeg` decoded to 720x1280 yuvj420p, both
+descriptors, CPU execution provider. **Two binaries built from the same harness — one against the
+detector without the warm-up, one with it — and run alternately, process by process**, because a
+before-taken-first and an after-taken-later pair on this machine differ by more than the effect.
+Fourteen replicates of each condition, each a fresh process: one `Detect`, then eight or ten timed.
+
+| first `Detect` ÷ steady-state median, median of 14 | without warm-up | with warm-up |
+| --- | --- | --- |
+| RF-DETR Nano 384 | 0.74x | 0.78x |
+| YOLO26 Nano 640 | 1.48x | 1.47x |
+
+**Neither number moves.** The replicate spread is the reason it cannot: single ratios run from
+0.25x to 1.95x for RF-DETR and 0.79x to 3.58x for YOLO, on a part this file already documents as
+drifting 50 % across an hour. What can be said is bounded from the other side, and that bound is
+the useful result: **the warm-up run itself costs about what an ordinary detection costs** — median
+434 ms for RF-DETR against a steady-state median of 658 ms in the same processes, and 297 ms for
+YOLO against 160 ms — so the CPU provider is not holding anything back for the first `Run`.
+Experiment 5 said the same thing a different way without anyone noticing: its "first `Run`" column
+is 271 to 302 ms against a control whose steady state is 434 to 452 ms. **A first inference on this
+provider is a normal inference.**
+
+Two things fall out that are worth more than the non-result:
+
+- **YOLO's first `Detect` is half again as expensive as its steady state, and warming the session
+  does not fix it** (1.48x → 1.47x). So that excess is not the provider: it is the managed path's
+  first pass — the JIT of `Place`, `DecodeRows` and the geometry, and the first
+  `sws_getCachedContext` — which `Warm` does not exercise, because it runs the session and not the
+  frame path. It is ~50 ms on a 113 ms model and invisible on a 450 ms one. Warming the frame path
+  too would mean a synthetic `AVFrame` in the constructor; it is not worth it at one detection a
+  second, and it is written down here so the next person does not read the 1.47x as a warm-up that
+  failed.
+- **The cost of keeping it is one inference at startup**, against a model load of 1.2 to 3.4 s. That
+  is 15 to 25 % more time to first detection on the processor, all of it before the worker claims
+  anything, and the end-to-end figure below is dominated by the load and the keyframe wait either
+  way.
+
+**Kept, on the CUDA argument alone**: cuDNN algorithm selection and kernel load happen on the first
+`Run` (research §2), TensorRT's is minutes rather than seconds, and D3 is where that starts
+mattering. The constructor logs what the warm run cost, so on the first machine that has a GPU the
+number is on the startup log with no harness at all — which is the point of having taken it.
+
 ## The end to end, on the processor
 
 The worker against the test host in one process, the README's dog pushed as a still MPEG-2
@@ -427,8 +478,11 @@ than a rebuild.
 
 ## What is kept, and what it cost
 
-Kept in `src/`: **nothing.** Every experiment either failed to clear its replicate spread or was
-bounded at nothing before it was built.
+Kept in `src/` from the five experiments: **nothing.** Every one of them either failed to clear its
+replicate spread or was bounded at nothing before it was built. The constructor warm-up added later
+is the one thing in `Detection/` that this file's measurements did not justify and that was taken
+anyway, on the CUDA argument and at a cost of one startup inference; the section above says so in
+its own words.
 
 | Experiment | Number | Verdict |
 | --- | --- | --- |
@@ -438,9 +492,11 @@ bounded at nothing before it was built.
 | 1. Spin control off | **+22 %**, three clean replicates | already in the code |
 | 2. Batching | batch 2 +13 %, batch 4/8/12/16 the same +13 % | already in the code, `MaxBatch = 8` kept |
 | 3. Input path | swscale is 0.28 % of a detection at 720p, 0.91 % at 1080p | bounded at nothing, not built |
+| 3. Centred two-tap from swscale | dog 66 with SWS_FAST_BILINEAR, 53 with SWS_BILINEAR; no flag or `param` gives both | asked and answered no |
 | 4. Arena on/off | 141 against 142 MB at load, no time difference | default kept |
 | 4. Per-call allocation | 784 B fixed, 0 gen0 collections in ten calls | claim holds |
 | 5. Startup | pre-optimised model saves 550 ms of a 4 s first-detection | not kept |
+| Warm-up in the constructor | first `Detect` ÷ steady median unmoved, 0.74→0.78x and 1.48→1.47x | kept for CUDA, not for this |
 | Desktop shape, ingest health | zero loss and unchanged bitrate at every thread setting, even oversubscribed | one default, not two |
 | Desktop shape, capped threads | intra-op 4 at two detecting: 109 served against 115, for 312 % against 416 % | not adopted |
 

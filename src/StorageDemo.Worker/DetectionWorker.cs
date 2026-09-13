@@ -82,7 +82,20 @@ public sealed class DetectionWorker : BackgroundService
     {
         FfmpegLibrary.EnsureLoaded();
 
-        using var detector = new OnnxDetector(_options.ModelPath, DetectorDescriptor.RfDetrNano, _options.Threshold, _logger);
+        var (descriptor, defaultPath) = _options.Model.Trim().ToLowerInvariant() switch
+        {
+            "rf-detr" or "rfdetr" => (DetectorDescriptor.RfDetrNano, "models/rf-detr-nano.onnx"),
+            "yolo26" or "yolo" => (DetectorDescriptor.Yolo26Nano, "models/yolo26-nano.onnx"),
+            var other => throw new InvalidOperationException(
+                $"Worker__Model is '{other}'. It must be 'rf-detr' or 'yolo26'; the file alone "
+                + "cannot say which contract to decode."),
+        };
+
+        var modelPath = _options.ModelPath.Length > 0 ? _options.ModelPath : defaultPath;
+
+        _logger.LogInformation("Detecting with {Model} from {Path}", _options.Model, modelPath);
+
+        using var detector = new OnnxDetector(modelPath, descriptor, _options.Threshold, _logger);
 
         var detecting = Task.Run(() => DetectAsync(detector, stoppingToken), CancellationToken.None);
 

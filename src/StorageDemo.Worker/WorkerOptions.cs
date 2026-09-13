@@ -28,7 +28,20 @@ public sealed class WorkerOptions
     /// </summary>
     public string? NodeName { get; init; }
 
-    public string ModelPath { get; init; } = "models/rf-detr-nano.onnx";
+    /// <summary>
+    /// Which model's contract to decode, because a file alone does not say. The two families
+    /// disagree on tensor names, box format, whether scores are logits and whether the frame is
+    /// stretched or letterboxed, so pointing <see cref="ModelPath"/> at one family's file while
+    /// this says the other is refused at load rather than decoded into plausible nonsense.
+    ///
+    /// "rf-detr" is the default because its weights are Apache-2.0. "yolo26" is four to five times
+    /// faster on a processor and misses things RF-DETR finds, and its licence is AGPL or
+    /// commercial; see .scratch/scale-to-1000/detection-plan.md before shipping it.
+    /// </summary>
+    public string Model { get; init; } = "rf-detr";
+
+    /// <summary>The file. Its default follows <see cref="Model"/> when this is left empty.</summary>
+    public string ModelPath { get; init; } = string.Empty;
 
     /// <summary>
     /// The detector keeps boxes scoring above this. Low on purpose: the tracker wants the weak

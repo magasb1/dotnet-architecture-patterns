@@ -19,6 +19,55 @@ public sealed record ServerEntry(string Name, string Address)
 }
 
 /// <summary>
+/// The switches that are the user's rather than any server's, beside servers.json in the same
+/// profile folder and with the same attitude to a file it cannot read: a forgotten preference is
+/// a nuisance, not a reason to fail startup.
+/// </summary>
+public static class ClientPreferences
+{
+    private static readonly string FilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "StorageDemoClient",
+        "preferences.json");
+
+    private sealed record Stored(bool Hud);
+
+    private static bool _hud = Read();
+
+    /// <summary>Whether the sensor heads-up display is drawn over a stream that carries KLV.</summary>
+    public static bool Hud
+    {
+        get => _hud;
+        set
+        {
+            _hud = value;
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+                File.WriteAllText(FilePath, JsonSerializer.Serialize(new Stored(value)));
+            }
+            catch (Exception)
+            {
+            }
+        }
+    }
+
+    private static bool Read()
+    {
+        try
+        {
+            return !File.Exists(FilePath)
+                || JsonSerializer.Deserialize<Stored>(File.ReadAllText(FilePath))?.Hud != false;
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+    }
+}
+
+/// <summary>
 /// The endpoints the client can switch between, kept in the user's profile so the list survives
 /// a rebuild. One client, many servers: Windows, Linux, Docker Compose, a port-forwarded cluster.
 /// </summary>

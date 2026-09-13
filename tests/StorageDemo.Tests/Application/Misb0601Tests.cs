@@ -1,4 +1,4 @@
-using StorageDemo.Core.Streaming;
+﻿using StorageDemo.Core.Streaming;
 using StorageDemo.Tests.Infrastructure;
 
 namespace StorageDemo.Tests.Application;
@@ -96,5 +96,50 @@ public sealed class Misb0601Tests
 
         Assert.NotNull(set);
         Assert.Null(set.Classification);
+    }
+
+    /// <summary>
+    /// The two rotations the north arrow is made of, each on its own, at right angles where a sign
+    /// slip is unmistakable. A camera looking east has north to the left of the picture; a camera
+    /// looking north but twisted a quarter turn clockwise about its lens has north to the left too,
+    /// because twisting the camera turns the scene inside the frame the other way.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, 0, 0)]
+    [InlineData(90, 0, 0, 270)]
+    [InlineData(0, 90, 0, 270)]
+    [InlineData(45, 45, 0, 270)]
+    [InlineData(0, 0, 90, 270)]
+    [InlineData(180, 0, 180, 0)]
+    public void North_in_the_image_turns_with_the_pointing_and_against_the_camera_twist(
+        double heading, double azimuth, double roll, double expected)
+        => Assert.Equal(expected, SensorGeometry.NorthInImage(heading, azimuth, roll)!.Value, 6);
+
+    [Fact]
+    public void Without_a_heading_or_an_azimuth_there_is_no_north_to_draw()
+    {
+        Assert.Null(SensorGeometry.NorthInImage(null, 12, 0));
+        Assert.Null(SensorGeometry.NorthInImage(12, null, 0));
+
+        // An absent roll is the one that still answers: an unrolled camera is the assumption, and
+        // the display says which roll it used.
+        Assert.Equal(348, SensorGeometry.NorthInImage(10, 2, null)!.Value, 6);
+    }
+
+    /// <summary>Due east along the equator, where the great circle and the rhumb line agree.</summary>
+    [Fact]
+    public void The_bearing_between_two_positions_is_the_one_a_compass_would_read()
+    {
+        Assert.Equal(90, SensorGeometry.BearingBetween(0, 10, 0, 11)!.Value, 3);
+        Assert.Equal(0, SensorGeometry.BearingBetween(50, 10, 51, 10)!.Value, 3);
+        Assert.Equal(180, SensorGeometry.BearingBetween(50, 10, 49, 10)!.Value, 3);
+        Assert.Null(SensorGeometry.BearingBetween(50, 10, null, 10));
+    }
+
+    [Fact]
+    public void The_difference_between_two_bearings_goes_the_short_way_round()
+    {
+        Assert.Equal(2, SensorGeometry.BearingDifference(1, 359), 6);
+        Assert.Equal(-2, SensorGeometry.BearingDifference(359, 1), 6);
     }
 }
