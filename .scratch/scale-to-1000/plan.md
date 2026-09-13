@@ -968,6 +968,13 @@ A manual stream is created by a `POST`, owned by whichever pod took the request,
 For a thousand inputs where some are pulled, a pull has to be a standing instruction the cluster
 carries out, not a one-off on one pod.
 
+**Superseded in part by `gateway-plan.md`, which builds this along with forwarding and an operator
+page.** The claim mechanism below is unchanged and is what got built. One thing in it is reversed:
+the standing instructions are a *second* store rather than more fields on the registry, because
+the registry is emptied as streams end and configuration has to survive exactly that. The original
+reasoning is left below because it is a reasonable argument that turned out to be wrong for a
+statable reason.
+
 ### Build
 
 The registry gains the standing instructions, since it is already the one piece of shared state

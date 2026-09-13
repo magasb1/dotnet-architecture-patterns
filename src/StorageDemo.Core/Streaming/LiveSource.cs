@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace StorageDemo.Core.Streaming;
 
 /// <summary>
@@ -74,7 +76,15 @@ public sealed record LiveSource(
     IReadOnlyList<ForwardTarget> Forwards,
     DateTimeOffset UpdatedAt)
 {
-    /// <summary>True when this service is meant to fetch the stream rather than wait for it.</summary>
+    /// <summary>
+    /// True when this service is meant to fetch the stream rather than wait for it.
+    ///
+    /// Not serialised. It is derived from <see cref="Url"/> and nothing reads it back, so writing
+    /// it out would put a second, redundant statement of the same fact into a file an operator may
+    /// open and edit by hand - and into Redis, where it would be one more thing that can disagree
+    /// with itself.
+    /// </summary>
+    [JsonIgnore]
     public bool IsPull => !string.IsNullOrWhiteSpace(Url);
 }
 
