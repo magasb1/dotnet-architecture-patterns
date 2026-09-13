@@ -135,6 +135,11 @@ public static class DependencyInjection
                 services.AddSingleton<IAnalysisQueue, InMemoryAnalysisQueue>();
                 services.AddSingleton<IDistributedLock, InMemoryLock>();
                 services.AddSingleton<ILiveStreamRegistry, InMemoryLiveStreamRegistry>();
+
+                // A file rather than a dictionary, unlike the registry beside it. The registry holds
+                // what is on air and may start empty; this holds what an operator configured, and
+                // starting empty would mean they have to type it again after every restart.
+                services.AddSingleton<ILiveSourceStore, FileLiveSourceStore>();
                 break;
 
             case "redis":
@@ -160,6 +165,7 @@ public static class DependencyInjection
                 services.AddSingleton<IAnalysisQueue, RedisAnalysisQueue>();
                 services.AddSingleton<IDistributedLock, RedisLock>();
                 services.AddSingleton<ILiveStreamRegistry, RedisLiveStreamRegistry>();
+                services.AddSingleton<ILiveSourceStore, RedisLiveSourceStore>();
                 services.AddHealthChecks().AddCheck<RedisHealthCheck>("messaging", tags: ["ready"]);
                 break;
 
