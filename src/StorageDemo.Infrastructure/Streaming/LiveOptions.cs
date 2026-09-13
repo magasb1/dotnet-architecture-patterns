@@ -259,17 +259,65 @@ public sealed class LiveOptions
     /// Transports a manual stream may name. Anything outside this list is refused, which is what
     /// stops "create a stream" from turning into "read this local file". Automatic ingest needs no
     /// such list: it is one port and one protocol, and nobody chooses a URL.
+    ///
+    /// Adding <c>http</c> or <c>https</c> here is a further decision beyond the one this list was
+    /// first drawn up to guard, worth stating plainly: a source URL this service dials is not only
+    /// "read this local file" any more, it is "reach anything on the network this pod can reach",
+    /// cloud metadata endpoints included. The default leaves both out for exactly that reason -
+    /// pulling HTTP or HLS is something a deployment opts into, not something it inherits.
     /// </summary>
     public string[] AllowedSchemes { get; init; } = ["udp", "rtp", "srt"];
 
     /// <summary>
-    /// Demuxer options for a manual input. The timeout gives up on a source nothing arrives from,
-    /// rather than holding a socket until the process restarts, and the buffer absorbs a burst on
-    /// a busy link.
+    /// Demuxer options for a manual input over udp, rtp or srt. The timeout gives up on a source
+    /// nothing arrives from, rather than holding a socket until the process restarts, and the
+    /// buffer absorbs a burst on a busy link.
+    ///
+    /// Not used for http or https: <see cref="HttpInputOptions"/> is its own dictionary, because
+    /// <c>fifo_size</c> means nothing to a TCP connection and the one option HTTP genuinely needs -
+    /// a reconnect on a dropped connection - means nothing to UDP.
     /// </summary>
     public Dictionary<string, string> ManualInputOptions { get; init; } = new()
     {
         ["timeout"] = "30000000",
         ["fifo_size"] = "1000000",
     };
+
+    /// <summary>
+    /// Demuxer options for a manual input pulled over http or https, HLS included: libav auto-
+    /// detects the HLS demuxer from the playlist it fetches over this same protocol, so one set of
+    /// options covers a raw HTTP container and a live HLS playlist alike.
+    ///
+    /// The reconnect options are the reason this exists as its own dictionary rather than a branch
+    /// in <see cref="ManualInputOptions"/>: an HTTP source is ordinarily a long-lived TCP
+    /// connection to a server this deployment does not run, and a connection that drops for a
+    /// moment is the common case rather than the stream ending. Without them a dropped socket ends
+    /// the whole pull and leaves the reconcile pass to notice and redial from cold, seconds later
+    /// at best; with them libav's own http protocol reconnects the one request that failed.
+    /// </summary>
+    public Dictionary<string, string> HttpInputOptions { get; init; } = new()
+    {
+        ["timeout"] = "10000000",
+        ["reconnect"] = "1",
+        ["reconnect_streamed"] = "1",
+        ["reconnect_delay_max"] = "2",
+    };
+
+    /// <summary>
+    /// How long an http or https pull may spend working out what it is, and how much it may read
+    /// doing it - the same pair <see cref="ProbeSeconds"/> and <see cref="ProbeBytes"/> are for
+    /// every other manual input, sized differently because the two are not comparable sources. A
+    /// live UDP or SRT feed is mid-stream the moment its socket opens and MPEG-TS repeats its
+    /// tables every hundred milliseconds, so a second is generous; an HTTP pull pays a TCP and
+    /// often a TLS handshake before its first byte, and HLS pays a playlist fetch on top of that
+    /// before a single frame of video has even been requested. Kept separate rather than raising
+    /// the shared figures, which would slow every other pull's join time to suit a source most
+    /// deployments never use.
+    /// </summary>
+    [Range(0.1, 30)]
+    public double HttpProbeSeconds { get; init; } = 5;
+
+    /// <inheritdoc cref="HttpProbeSeconds"/>
+    [Range(32 * 1024, 64 * 1024 * 1024)]
+    public long HttpProbeBytes { get; init; } = 4 * 1024 * 1024;
 }
