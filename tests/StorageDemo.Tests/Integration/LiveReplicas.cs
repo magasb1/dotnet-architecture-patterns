@@ -77,6 +77,14 @@ internal sealed class LiveReplicas : IAsyncDisposable
             builder.UseSetting("Live:GracePeriodSeconds", graceSeconds.ToString());
             builder.UseSetting("Live:FeedTimeoutSeconds", "2");
             builder.UseSetting("Live:MaxStreams", maxStreams.ToString());
+
+            // One file under this fixture's own sandbox, not per node: a source is shared cluster
+            // state, the same reason pod-a and pod-b share one Registry below. Without this the
+            // default FileLiveSourceStore path is the real one a developer's own machine uses, and
+            // whatever that developer has configured on their own running instance - a real pull
+            // source, a real forward, a real passphrase - leaks into every test that reconciles
+            // sources, exactly as unrelated to this test's own scenario as it sounds.
+            builder.UseSetting("Live:SourceFile", Path.Combine(_root, "sources.json"));
             builder.UseEnvironment("Production");
 
             // Registered last, so these instances are what the application resolves. Sharing them is
