@@ -384,6 +384,10 @@ internal sealed class StreamJob : IAsyncDisposable
                     if (!response.IsSuccessStatusCode)
                         _logger.LogWarning("The owner of '{Name}' answered {Status} to a VMTI frame", _name, (int)response.StatusCode);
                 }
+                catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogWarning("The owner of '{Name}' did not accept its VMTI frame within 2 seconds; the next result replaces it", _name);
+                }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     _logger.LogWarning(ex, "Could not post a VMTI frame for '{Name}'", _name);

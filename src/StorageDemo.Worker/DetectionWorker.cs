@@ -115,6 +115,12 @@ public sealed class DetectionWorker : BackgroundService
                 {
                     await PollAsync(stoppingToken);
                 }
+                catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+                {
+                    _logger.LogWarning(
+                        "The API did not return the stream list within 2 seconds at {Url}; retrying.",
+                        _options.ApiBaseUrl);
+                }
                 catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
                 {
                     // An API that is briefly unreachable must not take the worker down.
@@ -227,7 +233,12 @@ public sealed class DetectionWorker : BackgroundService
                 _ => null,
             };
         }
-        catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is HttpRequestException or OperationCanceledException)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("The owner of '{Name}' did not renew within 2 seconds; retrying next beat", stream.Name);
+            return null;
+        }
+        catch (HttpRequestException ex) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "Could not reach the owner of '{Name}' at {Owner}", stream.Name, Owner(stream));
             return null;
