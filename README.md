@@ -5,12 +5,15 @@ and scale out across a multi-node Kubernetes cluster** — with nothing but conf
 which world it's in?
 
 Nothing in the application or domain code knows whether a file lands on disk or in a bucket,
-whether metadata lives in LiteDB or PostgreSQL, whether a live video stream is served by the one
-process handling it or relayed from a pod on the other side of the cluster. Every one of those
-decisions is behind an interface, chosen by configuration, and proven identical on both sides by
-running the same tests against every implementation.
+whether metadata lives in LiteDB or PostgreSQL, whether a live stream's registry is a dictionary in
+this process or a Redis hash every replica reads. Every one of those decisions is behind an
+interface, chosen by configuration, and proven identical on both sides by running the same tests
+against every implementation.
 
-Two subsystems carry that test:
+Four abstractions carry that test, two of them for documents and two for live streaming - added to
+see whether the same idea survives a much harder problem: a stream that arrives over a socket, not
+a request, and that other replicas have to know about within a couple of seconds of one pod
+claiming it.
 
 - **Documents** — upload, store, list, download, delete, with pluggable file storage and database
   providers.
@@ -19,19 +22,31 @@ Two subsystems carry that test:
   to scale to hundreds of concurrent streams across many Kubernetes replicas with GPU workers.
 
 ```
-                              ASP.NET Core API
-                  gRPC :5080 (primary)   REST :8080 (secondary)
-                                     |
-                                     v
-                             DocumentService
-                             /             \
-                            v               v
-                    IFileStorage       IDocumentRepository
-                         |                    |
-                   +-----+-----+        +-----+------+
-                   v           v        v            v
-              Filesystem      S3     LiteDB     PostgreSQL
+                                       ASP.NET Core API
+                    gRPC :5080          REST :8080          SRT ingest :9000 / play :9010
+                        |                   |                          |
+                        +-------------------+                          |
+                                  |                                    |
+                                  v                                    v
+                          DocumentService                   LiveStreamCoordinator
+                          /              \                    /                 \
+                         v                v                  v                   v
+                 IFileStorage   IDocumentRepository  ILiveStreamRegistry   ILiveSourceStore
+                      |                   |                   |                   |
+                +-----+-----+       +-----+-----+       +-----+-----+       +-----+-----+
+                v           v       v           v       v           v      v           v
+             Filesystem     S3   LiteDB   PostgreSQL  InMemory     Redis  File        Redis
 ```
+
+Same shape, harder reason. A document read needs no coordination between replicas, so an in-memory
+dictionary and a Redis hash behave identically and the choice is only about where the bytes should
+live. A live stream's registry entry is how every *other* replica finds out a name is claimed at
+all - in the clustered shape that has to be shared state, where the standalone shape gets away with
+a dictionary because there is only ever one replica to ask. `ILiveStreamRegistry` is what lets
+`LiveStreamCoordinator` not know which of those two worlds it's running in.
+`ILiveSourceStore` answers the same question for configuration instead of a live reading - the pull
+sources and forwards an operator set up, which a JSON file remembers alone and Redis remembers for
+the whole cluster.
 
 ## The four runtime combinations
 
