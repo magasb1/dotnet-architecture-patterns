@@ -125,6 +125,40 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
 
+  # The detection worker (detection-plan.md D2): subscribes to streams the API is running,
+  # decodes them, and posts detections back. On by default, unlike srt-sender/srt-viewer below,
+  # because a worker with nothing to detect is inert - it costs nothing until a stream turns
+  # detection on - where a permanently running sender is traffic nobody asked to see.
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: worker
+    depends_on:
+      - api
+    environment:
+      # The container's own hostname on the Compose network, the same way Live__PeerBaseUrl reaches
+      # the API from itself.
+      Worker__ApiBaseUrl: http://api:8080
+      Worker__Token: local-demo-token
+      # RF-DETR over YOLO26 for the demo: Apache-2.0 against YOLO26's AGPL-3.0 or commercial, the
+      # reason this project settled on it as the default (detection-comparison.md).
+      Worker__Model: rf-detr
+      # ONNX Runtime's own execution-provider probe picks CPU when no CUDA device is visible to the
+      # container, which is every machine that has not added a GPU reservation below - the image is
+      # built once, either processor serves it.
+      Worker__ExecutionProvider: auto
+
+    # Uncomment on a host with an NVIDIA GPU and the container toolkit installed, to exercise the
+    # same CUDA path detection-plan.md's D3 measures:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
   # A test pattern pushed in over SRT, so the live path can be demonstrated without an encoder.
   # Off by default, because a permanently running stream is not what every `up` should mean:
   #

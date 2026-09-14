@@ -31,6 +31,23 @@ RUN apt-get update \
     && chmod +x /app/ffmpeg/linux-x64/ffmpeg /app/ffmpeg/linux-x64/ffprobe \
     && rm -rf /tmp/ffmpeg.tar.xz /tmp/${FFMPEG_BUILD} /var/lib/apt/lists/*
 
+# RF-DETR Nano, exported to ONNX inside the image rather than expected on the host. This mirrors
+# scripts/fetch-rfdetr.sh exactly, minus the venv dance that script does for a shared host machine
+# and a throwaway build stage does not need. CPU wheels are correct here even though the worker
+# itself may run on a GPU: this stage exports one file and never runs inference at any real
+# throughput, so there is nothing for a GPU to speed up.
+#
+# The version pins matter more than usual and are kept identical to the script's: the .NET runner
+# is tested against the tensor names and shapes this exact exporter version produces, and rfdetr
+# has changed both before.
+FROM python:3.12-slim AS rfdetr-export
+WORKDIR /export
+RUN python -m pip install --no-cache-dir --quiet \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        rfdetr==1.10.1 torch==2.14.0+cpu torchvision==0.29.0+cpu onnxruntime==1.30.0 onnx==1.22.0
+COPY scripts/export-rfdetr.py scripts/export-rfdetr.py
+RUN mkdir -p models && python scripts/export-rfdetr.py
+
 # Shared by the API and the worker: the same FFmpeg, the same user, the same loader path. The
 # worker is a plain host and needs none of ASP.NET, but one base is one set of natives to keep
 # honest, and the difference in size is a few megabytes.
@@ -66,10 +83,11 @@ ENV LD_LIBRARY_PATH=/app/ffmpeg/linux-x64
 # The detection worker (detection-plan.md D2), a separate deployment from the ingest pod:
 #   docker build -f docker/Dockerfile --target worker -t storage-demo-worker .
 # It carries the same libav and the ONNX Runtime natives the Infrastructure project references,
-# and no ports: it subscribes to the API and posts back to it. The model is not baked in - it is
-# 108 MB, produced by scripts/fetch-rfdetr.sh, and mounted where Worker__ModelPath points. On a
-# GPU node this base becomes an NVIDIA CUDA runtime image and nothing else changes: the same
-# natives carry the CUDA provider and the runner picks it when it loads (D3).
+# and no ports: it subscribes to the API and posts back to it. RF-DETR Nano is baked in from the
+# rfdetr-export stage above - 108 MB added to the image, in exchange for `docker build` alone being
+# enough to run detection, nothing to fetch on the host first. On a GPU node this base becomes an
+# NVIDIA CUDA runtime image and nothing else changes: the same natives carry the CUDA provider and
+# the runner picks it when it loads (D3).
 FROM build AS build-worker
 COPY src/StorageDemo.Worker/ src/StorageDemo.Worker/
 RUN dotnet publish src/StorageDemo.Worker/StorageDemo.Worker.csproj -c Release -p:OnnxRuntimeFlavor=Cuda -o /worker \
@@ -78,6 +96,7 @@ RUN dotnet publish src/StorageDemo.Worker/StorageDemo.Worker.csproj -c Release -
 
 FROM base AS worker
 COPY --from=build-worker --chown=storagedemo:storagedemo /worker .
+COPY --from=rfdetr-export --chown=storagedemo:storagedemo /export/models/rf-detr-nano.onnx models/rf-detr-nano.onnx
 ENTRYPOINT ["dotnet", "StorageDemo.Worker.dll"]
 
 # Last, so a build that names no target is still the API.
