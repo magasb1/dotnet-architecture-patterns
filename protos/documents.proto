@@ -187,7 +187,7 @@ message LiveStreamMessage {
   // Fields are only ever added here, never renumbered or removed: an older client reads zero
   // for what it does not know and a newer one reads zero from an older server. 19 to 21 are
   // detection, below; 22 to 25 stay held for further KLV fields; 26 is the forward list; 27 is
-  // the link stats; 28 is the viewer count.
+  // the link stats; 28 is the viewer count; 29 and 30 are detection configuration.
   int32 packets_lost = 14;
   int32 packets_dropped = 15;
 
@@ -224,6 +224,11 @@ message LiveStreamMessage {
   // demultiplexer's subscriber count, which also carries the recorder, the harvester, the KLV
   // extractor and every forward.
   int32 viewers = 28;
+
+  // Requested detector family; absent means the worker's configured default. An empty label list
+  // retains every COCO class, preserving the behavior of older clients.
+  optional string detection_model = 29;
+  repeated string detection_labels = 30;
 }
 
 // A curated handful of SRT_TRACEBSTATS, not the roughly ninety fields libsrt actually tracks. See
@@ -321,6 +326,12 @@ message SetLiveDetectionRequest {
 
   // Detections per second. Zero means the worker's default.
   int32 rate = 3;
+
+  // Empty means the worker's configured default.
+  string model = 4;
+
+  // Empty means all COCO labels.
+  repeated string labels = 5;
 }
 
 // ST 0903.4 Table 16, the VTracker LS Detection Status, numbered as the standard numbers it so

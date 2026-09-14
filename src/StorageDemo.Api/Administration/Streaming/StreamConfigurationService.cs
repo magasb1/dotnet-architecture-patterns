@@ -23,6 +23,14 @@ public interface IStreamConfigurationService
     Task<StreamCommandResult> SaveAsync(SourceEditModel edit, CancellationToken cancellationToken);
 
     Task<StreamCommandResult> DeleteAsync(string name, CancellationToken cancellationToken);
+
+    Task<StreamDetectionResult> ConfigureDetectionAsync(
+        string name,
+        bool enabled,
+        int rate,
+        string? model,
+        IReadOnlyList<string> labels,
+        CancellationToken cancellationToken);
 }
 
 public sealed record StreamCommandResult(bool Succeeded, string? Error = null)
@@ -31,6 +39,8 @@ public sealed record StreamCommandResult(bool Succeeded, string? Error = null)
 
     public static StreamCommandResult Failure(string error) => new(false, error);
 }
+
+public sealed record StreamDetectionResult(bool Succeeded, LiveStream? Stream = null, string? Error = null);
 
 public sealed class SourceEditModel
 {
@@ -72,6 +82,7 @@ public sealed class ForwardEditModel
 public sealed class StreamConfigurationService(
     ILiveSourceStore sources,
     ILiveStreamService live,
+    LivePeerProxy peers,
     IOptions<LiveOptions> options) : IStreamConfigurationService
 {
     private readonly LiveOptions _options = options.Value;
@@ -169,6 +180,44 @@ public sealed class StreamConfigurationService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return StreamCommandResult.Failure($"Not deleted: {ex.Message}");
+        }
+    }
+
+    public async Task<StreamDetectionResult> ConfigureDetectionAsync(
+        string name,
+        bool enabled,
+        int rate,
+        string? model,
+        IReadOnlyList<string> labels,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            model = DetectionModels.Normalize(model);
+            labels = CocoClasses.Normalize(labels);
+            var known = await live.GetAsync(name, cancellationToken);
+            if (known is null)
+            {
+                return new(false, Error: "The stream is no longer on air.");
+            }
+
+            var stream = live.Owns(name)
+                ? await live.SetDetectionAsync(name, enabled, rate, model, labels, cancellationToken)
+                : await peers.FetchAsync<LiveStream>(
+                    known,
+                    $"api/live/detect/{name}",
+                    _options.Token,
+                    cancellationToken,
+                    HttpMethod.Put,
+                    new DetectRequest(enabled, rate, model, labels));
+
+            return stream is null
+                ? new(false, Error: "The stream owner did not accept the change.")
+                : new(true, stream);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new(false, Error: ex.Message);
         }
     }
 }

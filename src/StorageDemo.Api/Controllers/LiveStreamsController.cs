@@ -23,7 +23,13 @@ public sealed record CreateManualStreamRequest(string Name, string Url);
 public sealed record RecordRequest(double? Seconds, DetectionReference? Detection = null);
 
 /// <param name="Rate">Detections per second. Zero means the worker's default.</param>
-public sealed record DetectRequest(bool Enabled, int Rate = 0);
+/// <param name="Model">rf-detr, yolo26, or null for the worker default.</param>
+/// <param name="Labels">COCO labels to retain. Empty means all labels.</param>
+public sealed record DetectRequest(
+    bool Enabled,
+    int Rate = 0,
+    string? Model = null,
+    IReadOnlyList<string>? Labels = null);
 
 /// <param name="Worker">The worker's own name, as it is written into the stream's registry entry.</param>
 public sealed record DetectorClaim(string Worker);
@@ -195,16 +201,30 @@ public sealed class LiveStreamsController(
             return refused;
         }
 
-        return await ForwardOrRun(
-            name,
-            $"api/live/detect/{name}",
-            token,
-            async () => await live.SetDetectionAsync(name, request.Enabled, request.Rate, cancellationToken) is { } stream
-                ? Ok(stream)
-                : NotFound(),
-            cancellationToken,
-            method: HttpMethod.Put,
-            body: request);
+        try
+        {
+            var normalized = request with
+            {
+                Model = DetectionModels.Normalize(request.Model),
+                Labels = CocoClasses.Normalize(request.Labels),
+            };
+
+            return await ForwardOrRun(
+                name,
+                $"api/live/detect/{name}",
+                token,
+                async () => await live.SetDetectionAsync(
+                    name, normalized.Enabled, normalized.Rate, normalized.Model, normalized.Labels, cancellationToken) is { } stream
+                    ? Ok(stream)
+                    : NotFound(),
+                cancellationToken,
+                method: HttpMethod.Put,
+                body: normalized);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(ex.Message);
+        }
     }
 
     /// <summary>

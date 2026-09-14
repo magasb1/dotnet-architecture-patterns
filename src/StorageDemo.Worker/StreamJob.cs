@@ -23,6 +23,7 @@ internal sealed unsafe class PendingFrame : IDisposable
     private PendingFrame(StreamJob job, AVFrame* frame)
     {
         Job = job;
+        Model = job.Model;
         _frame = frame;
         Pts = frame->pts;
         Width = frame->width;
@@ -30,6 +31,7 @@ internal sealed unsafe class PendingFrame : IDisposable
     }
 
     public StreamJob Job { get; }
+    public string Model { get; }
     public long QueuedAt { get; } = Stopwatch.GetTimestamp();
     public DateTimeOffset DecodedAt { get; } = DateTimeOffset.UtcNow;
 
@@ -107,11 +109,15 @@ internal sealed class StreamJob : IAsyncDisposable
     private readonly Lock _frameGate = new();
     private PendingFrame? _pending;
     private bool _stopped;
+    private volatile string _model;
+    private IReadOnlySet<string>? _labels;
 
     public StreamJob(
         string name,
         string owner,
         double rate,
+        string model,
+        IReadOnlyList<string>? labels,
         HttpClient http,
         StreamDemuxer demuxer,
         LiveOptions live,
@@ -126,6 +132,8 @@ internal sealed class StreamJob : IAsyncDisposable
         _trackThreshold = trackThreshold;
         _logger = logger;
         Owner = owner;
+        _model = model;
+        _labels = LabelSet(labels);
 
         _hub = new StreamHub(name, live, logger);
         _decoder = new FrameDecoder(_hub, logger);
@@ -140,6 +148,29 @@ internal sealed class StreamJob : IAsyncDisposable
 
     /// <summary>Where the stream's bytes are. Re-read from each listing, because a stream can move.</summary>
     public string Owner { get; set; }
+
+    public string Model => _model;
+
+    /// <summary>Applies a listing change without reconnecting the media feed.</summary>
+    public void Configure(string model, IReadOnlyList<string>? labels)
+    {
+        var nextLabels = LabelSet(labels);
+        var changed = model != _model || !SameLabels(_labels, nextLabels);
+        _model = model;
+        _labels = nextLabels;
+
+        if (changed)
+        {
+            lock (_gate)
+            {
+                // A model/filter change is a new observation regime. Carrying old tracks through
+                // it produces ghosts for labels that were just removed.
+                _tracker = null;
+                _pendingPts.Clear();
+                _lastPts = long.MinValue;
+            }
+        }
+    }
 
     /// <summary>Detections per second. Changing it re-subscribes at the new rate.</summary>
     public double Rate
@@ -312,6 +343,12 @@ internal sealed class StreamJob : IAsyncDisposable
     /// </summary>
     public void Detected(PendingFrame frame, VmtiDetection[] detections)
     {
+        if (_labels is { } labels)
+        {
+            detections = [.. detections.Where(detection =>
+                detection.OntologyClass is { } label && labels.Contains(label))];
+        }
+
         VmtiFrame vmti;
 
         lock (_gate)
@@ -367,6 +404,14 @@ internal sealed class StreamJob : IAsyncDisposable
         FrameTime.Record(Stopwatch.GetElapsedTime(frame.QueuedAt).TotalMilliseconds);
         _results.Writer.TryWrite(new VmtiSample(vmti, Misb0903.Encode(vmti)));
     }
+
+    private static IReadOnlySet<string>? LabelSet(IReadOnlyList<string>? labels)
+        => labels is null || labels.Count == 0
+            ? null
+            : labels.ToHashSet(StringComparer.Ordinal);
+
+    private static bool SameLabels(IReadOnlySet<string>? left, IReadOnlySet<string>? right)
+        => left is null ? right is null : right is not null && left.SetEquals(right);
 
     private async Task PublishAsync(CancellationToken cancellationToken)
     {

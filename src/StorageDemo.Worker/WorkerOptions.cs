@@ -50,6 +50,14 @@ public sealed class WorkerOptions
     public string ModelPath { get; init; } = string.Empty;
 
     /// <summary>
+    /// Optional per-family paths used when streams select a model in the UI. ModelPath remains the
+    /// backwards-compatible override for the worker's default family.
+    /// </summary>
+    public string RfDetrModelPath { get; init; } = string.Empty;
+
+    public string Yolo26ModelPath { get; init; } = string.Empty;
+
+    /// <summary>
     /// Hardware used for inference. "auto" tries CUDA when that build is deployed, then Intel
     /// NPU, GPU and CPU when the OpenVINO build is deployed, then DirectML, and finally ORT CPU.
     /// A named provider is fail-fast except "openvino", which tries all three Intel devices.

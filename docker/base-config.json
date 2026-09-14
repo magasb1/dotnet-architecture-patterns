@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "storage-demo",
+      "credentials": [
+        {
+          "accessKey": "env:AWS_ACCESS_KEY_ID",
+          "secretKey": "env:AWS_SECRET_ACCESS_KEY"
+        }
+      ],
+      "actions": ["Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

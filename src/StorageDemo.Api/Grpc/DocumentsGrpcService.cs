@@ -282,6 +282,13 @@ public sealed class DocumentsGrpcService(
             message.DetectionWorker = worker;
         }
 
+        if (stream.DetectionModel is { } model)
+        {
+            message.DetectionModel = model;
+        }
+
+        message.DetectionLabels.AddRange(stream.DetectionLabels ?? []);
+
         foreach (var forward in stream.Forwards ?? [])
         {
             message.Forwards.Add(ToMessage(forward));
@@ -444,14 +451,25 @@ public sealed class DocumentsGrpcService(
     {
         RequireLive();
 
-        var stream = live.Owns(request.Name)
-            ? await live.SetDetectionAsync(request.Name, request.Enabled, request.Rate, context.CancellationToken)
-            : await FetchFromOwnerAsync<LiveStream>(
-                request.Name,
-                $"api/live/detect/{request.Name}",
-                context,
-                HttpMethod.Put,
-                new DetectRequest(request.Enabled, request.Rate));
+        LiveStream? stream;
+        try
+        {
+            var model = DetectionModels.Normalize(request.Model);
+            var labels = CocoClasses.Normalize(request.Labels);
+            stream = live.Owns(request.Name)
+                ? await live.SetDetectionAsync(
+                    request.Name, request.Enabled, request.Rate, model, labels, context.CancellationToken)
+                : await FetchFromOwnerAsync<LiveStream>(
+                    request.Name,
+                    $"api/live/detect/{request.Name}",
+                    context,
+                    HttpMethod.Put,
+                    new DetectRequest(request.Enabled, request.Rate, model, labels));
+        }
+        catch (ArgumentException ex)
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, ex.Message));
+        }
 
         return stream is null
             ? throw new RpcException(new Status(StatusCode.NotFound, "No such live stream."))

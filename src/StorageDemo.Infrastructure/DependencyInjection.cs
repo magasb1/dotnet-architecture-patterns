@@ -204,7 +204,7 @@ public static class DependencyInjection
 
                     if (!string.IsNullOrWhiteSpace(options.ServiceUrl))
                     {
-                        // MinIO and friends: an explicit endpoint overrides the region endpoint.
+                        // S3-compatible stores: an explicit endpoint overrides the region endpoint.
                         config.ServiceURL = options.ServiceUrl;
                         config.AuthenticationRegion = options.Region;
                     }

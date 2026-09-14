@@ -44,4 +44,49 @@ public static class CocoClasses
 
     /// <summary>YOLO: class index to name, 0..79.</summary>
     public static readonly IReadOnlyList<string> Yolo = [.. Coco.Select(c => c.Name)];
+
+    /// <summary>The common label vocabulary, in COCO display order.</summary>
+    public static IReadOnlyList<string> All => Yolo;
+
+    /// <summary>
+    /// Canonicalises an operator-supplied filter, rejecting typos rather than silently producing
+    /// an empty stream. Empty means no filtering.
+    /// </summary>
+    public static IReadOnlyList<string> Normalize(IEnumerable<string>? labels)
+    {
+        if (labels is null)
+        {
+            return [];
+        }
+
+        var requested = labels
+            .Where(label => !string.IsNullOrWhiteSpace(label))
+            .Select(label => label.Trim().ToLowerInvariant())
+            .ToHashSet(StringComparer.Ordinal);
+        var unknown = requested.Except(All, StringComparer.Ordinal).Order().ToArray();
+
+        if (unknown.Length > 0)
+        {
+            throw new ArgumentException($"Unknown COCO label(s): {string.Join(", ", unknown)}.");
+        }
+
+        return [.. All.Where(requested.Contains)];
+    }
+}
+
+public static class DetectionModels
+{
+    public const string RfDetr = "rf-detr";
+    public const string Yolo26 = "yolo26";
+
+    public static string? Normalize(string? model)
+        => string.IsNullOrWhiteSpace(model) || model.Equals("default", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : model.Trim().ToLowerInvariant() switch
+            {
+                "rf-detr" or "rfdetr" => RfDetr,
+                "yolo26" or "yolo" => Yolo26,
+                var value => throw new ArgumentException(
+                    $"Unknown detection model '{value}'. Choose rf-detr, yolo26, or the worker default."),
+            };
 }

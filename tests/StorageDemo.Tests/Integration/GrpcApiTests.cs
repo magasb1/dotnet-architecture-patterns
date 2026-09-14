@@ -255,11 +255,20 @@ public sealed class GrpcApiTests : IAsyncLifetime
 
         // Set through B, which forwards to A and answers with the stream as A now describes it.
         var toggled = await clientB.SetLiveDetectionAsync(
-            new SetLiveDetectionRequest { Name = name, Enabled = true, Rate = 5 },
+            new SetLiveDetectionRequest
+            {
+                Name = name,
+                Enabled = true,
+                Rate = 5,
+                Model = "yolo26",
+                Labels = { "person", "car", "truck" },
+            },
             token);
 
         Assert.True(toggled.DetectionEnabled);
         Assert.Equal(5, toggled.DetectionRate);
+        Assert.Equal("yolo26", toggled.DetectionModel);
+        Assert.Equal(["person", "car", "truck"], toggled.DetectionLabels);
         Assert.False(toggled.HasDetectionWorker);
         Assert.Equal("pod-a", toggled.Owner);
 
@@ -278,6 +287,8 @@ public sealed class GrpcApiTests : IAsyncLifetime
             var listed = Assert.Single((await client.ListLiveAsync(new Empty(), token)).Streams, s => s.Name == name);
             Assert.True(listed.DetectionEnabled);
             Assert.Equal(5, listed.DetectionRate);
+            Assert.Equal("yolo26", listed.DetectionModel);
+            Assert.Equal(["person", "car", "truck"], listed.DetectionLabels);
 
             var served = await client.GetLiveDetectionsAsync(new LiveStreamName { Name = name }, token);
             var expected = sample.Frame.Detections[0];

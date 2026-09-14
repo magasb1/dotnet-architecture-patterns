@@ -1,3 +1,5 @@
+@inject IStreamConfigurationService ConfigurationService
+
 <div class="details-panel">
     <section class="detail-card">
         <header>
@@ -22,6 +24,75 @@
                 <div class="unavailable"><dt>Link statistics</dt><dd>@(Row.Source.IsPull ? "Unavailable for a pulled stream" : "Unavailable")</dd></div>
             }
         </dl>
+    </section>
+
+    <section class="detail-card detection-card">
+        <header>
+            <div><span class="overline">Vision</span><strong>Object detection</strong></div>
+            <StatusBadge Text="@DetectionState" Tone="@(Row.Stream?.DetectionEnabled == true ? "success" : "neutral")" />
+        </header>
+
+        @if (Row.Stream is null)
+        {
+            <p class="detection-hint">Detection can be configured when this source is on air.</p>
+        }
+        else
+        {
+            <div class="detection-form">
+                <label>
+                    <span>Model</span>
+                    <select @bind="_model" disabled="@_savingDetection">
+                        <option value="">Worker default</option>
+                        <option value="rf-detr">RF-DETR Nano</option>
+                        <option value="yolo26">YOLO26 Nano</option>
+                    </select>
+                </label>
+                <label>
+                    <span>Rate</span>
+                    <select @bind="_rate" disabled="@_savingDetection">
+                        <option value="0">Worker default</option>
+                        <option value="1">1 / second</option>
+                        <option value="5">5 / second</option>
+                        <option value="25">25 / second</option>
+                    </select>
+                </label>
+
+                <div class="label-heading">
+                    <span>Visible classes</span>
+                    <span class="label-actions">
+                        <button type="button" @onclick="SelectRoadLabels">Road traffic</button>
+                        <button type="button" @onclick="SelectAllLabels">All</button>
+                    </span>
+                </div>
+                <details class="label-picker">
+                    <summary>@LabelSummary</summary>
+                    <div class="label-grid">
+                        @foreach (var label in CocoClasses.All)
+                        {
+                            <label>
+                                <input type="checkbox" checked="@_labels.Contains(label)"
+                                       @onchange="@(args => SetLabel(label, args))" />
+                                <span>@label</span>
+                            </label>
+                        }
+                    </div>
+                </details>
+
+                @if (_detectionError is not null)
+                {
+                    <span class="field-error" role="alert">@_detectionError</span>
+                }
+
+                <div class="detection-actions">
+                    <button type="button" class="button secondary" disabled="@_savingDetection"
+                            @onclick="@(() => SaveDetectionAsync(!Row.Stream.DetectionEnabled))">
+                        @(Row.Stream.DetectionEnabled ? "Stop detection" : "Start detection")
+                    </button>
+                    <button type="button" class="button primary" disabled="@_savingDetection"
+                            @onclick="@(() => SaveDetectionAsync(Row.Stream.DetectionEnabled))">Apply settings</button>
+                </div>
+            </div>
+        }
     </section>
 
     @foreach (var (target, status) in Row.Detail)
@@ -69,6 +140,93 @@
 @code {
     [Parameter, EditorRequired] public SourceRow Row { get; set; } = default!;
     [Parameter] public EventCallback Edit { get; set; }
+    [Parameter] public EventCallback DetectionChanged { get; set; }
+
+    private static readonly string[] RoadLabels = ["person", "bicycle", "car", "motorcycle", "bus", "truck"];
+    private readonly HashSet<string> _labels = new(StringComparer.Ordinal);
+    private string _model = string.Empty;
+    private int _rate;
+    private bool _savingDetection;
+    private string? _detectionError;
+    private bool _settingsLoaded;
+
+    protected override void OnParametersSet()
+    {
+        // The parent receives a fresh row every heartbeat. Load once per expanded component so an
+        // operator ticking boxes is not reset by the next two-second refresh.
+        if (_settingsLoaded || Row.Stream is null) return;
+        _settingsLoaded = true;
+        _model = Row.Stream.DetectionModel ?? string.Empty;
+        _rate = Row.Stream.DetectionRate;
+        _labels.Clear();
+        foreach (var label in Row.Stream.DetectionLabels ?? []) _labels.Add(label);
+        if (_labels.Count == 0) _labels.UnionWith(CocoClasses.All);
+    }
+
+    private string DetectionState => Row.Stream switch
+    {
+        null => "Unavailable",
+        { DetectionEnabled: true, DetectionWorker: not null } => "Running",
+        { DetectionEnabled: true } => "Waiting for worker",
+        _ => "Off",
+    };
+
+    private string LabelSummary => _labels.Count switch
+    {
+        0 => "No classes selected",
+        var count when count == CocoClasses.All.Count => $"All {count} COCO classes",
+        _ => $"{_labels.Count} of {CocoClasses.All.Count} classes",
+    };
+
+    private void SelectRoadLabels()
+    {
+        _labels.Clear();
+        _labels.UnionWith(RoadLabels);
+    }
+
+    private void SelectAllLabels()
+    {
+        _labels.Clear();
+        _labels.UnionWith(CocoClasses.All);
+    }
+
+    private void SetLabel(string label, ChangeEventArgs args)
+    {
+        if (args.Value is true) _labels.Add(label);
+        else _labels.Remove(label);
+    }
+
+    private async Task SaveDetectionAsync(bool enabled)
+    {
+        if (Row.Stream is null) return;
+        _savingDetection = true;
+        _detectionError = null;
+        try
+        {
+            // Empty is an explicit "none" in this UI. The transport uses empty for "all", so
+            // selecting none is refused here instead of surprisingly making every box return.
+            if (_labels.Count == 0)
+            {
+                _detectionError = "Select at least one class, or use All.";
+                return;
+            }
+
+            var labels = _labels.Count == CocoClasses.All.Count ? Array.Empty<string>() : [.. _labels];
+            var result = await ConfigurationService.ConfigureDetectionAsync(
+                Row.Source.Name, enabled, _rate, _model, labels, CancellationToken.None);
+            if (!result.Succeeded)
+            {
+                _detectionError = result.Error;
+                return;
+            }
+
+            await DetectionChanged.InvokeAsync();
+        }
+        finally
+        {
+            _savingDetection = false;
+        }
+    }
 
     private static string StateText(SourceState state) => state switch
     {

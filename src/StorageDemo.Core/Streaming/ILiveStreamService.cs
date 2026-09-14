@@ -44,7 +44,13 @@ public interface ILiveStreamService
     /// it off also drops whichever worker held the stream, so the listing tells the truth at once
     /// rather than when the worker next notices.
     /// </summary>
-    Task<LiveStream?> SetDetectionAsync(string name, bool enabled, int rate, CancellationToken cancellationToken = default);
+    Task<LiveStream?> SetDetectionAsync(
+        string name,
+        bool enabled,
+        int rate,
+        string? model = null,
+        IReadOnlyList<string>? labels = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// A worker taking, or renewing, its hold on a stream this replica owns. The claim is a lease:

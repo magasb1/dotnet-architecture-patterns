@@ -118,6 +118,13 @@ public sealed record RecordingStatus(
 /// quiet. A worker claims by writing its name through the owner and renews by writing it again;
 /// nothing pushes work to a worker.
 /// </param>
+/// <param name="DetectionModel">
+/// The detector family requested for this stream. Null lets the worker use its configured default,
+/// which preserves streams written by older replicas.
+/// </param>
+/// <param name="DetectionLabels">
+/// COCO class names retained before tracking and publication. Empty means every class.
+/// </param>
 public sealed record LiveStream(
     string Name,
     LiveStreamState State,
@@ -145,7 +152,9 @@ public sealed record LiveStream(
     string? DetectionWorker = null,
     IReadOnlyList<ForwardStatus>? Forwards = null,
     SrtLinkStats? Link = null,
-    int Viewers = 0);
+    int Viewers = 0,
+    string? DetectionModel = null,
+    IReadOnlyList<string>? DetectionLabels = null);
 
 /// <summary>
 /// What libsrt itself says about one connection, over the last heartbeat.

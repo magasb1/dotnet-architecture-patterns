@@ -296,12 +296,21 @@ public sealed class DocumentsApi : IDisposable
         string name,
         bool enabled,
         int rate,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? model = null,
+        IReadOnlyList<string>? labels = null)
     {
         try
         {
             return await _client.SetLiveDetectionAsync(
-                new SetLiveDetectionRequest { Name = name, Enabled = enabled, Rate = rate },
+                new SetLiveDetectionRequest
+                {
+                    Name = name,
+                    Enabled = enabled,
+                    Rate = rate,
+                    Model = model ?? string.Empty,
+                    Labels = { labels ?? [] },
+                },
                 cancellationToken: cancellationToken);
         }
         catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)

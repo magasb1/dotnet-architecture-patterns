@@ -54,7 +54,7 @@ the whole cluster.
 | --- | --- | --- | --- | --- |
 | A | Developer Windows | Filesystem | LiteDB | Local disk |
 | B | Developer Linux | Filesystem | LiteDB | Local disk |
-| C | Docker Compose | MinIO (S3-compatible) | PostgreSQL | Container volumes |
+| C | Docker Compose | SeaweedFS (S3-compatible) | PostgreSQL | Container volumes |
 | D | Kubernetes | AWS S3 | PostgreSQL | None in the pod |
 
 The two providers are chosen independently, so `Filesystem + PostgreSQL` and `S3 + LiteDB` work
@@ -67,9 +67,9 @@ too. Only the configuration changes between scenarios, never the source.
 dotnet run --project src/StorageDemo.Api
 # gRPC on :5080, REST and Swagger on :8080
 
-# C: containers, MinIO and PostgreSQL, api and the detection worker both included
+# C: containers, SeaweedFS and PostgreSQL, api and the detection worker both included
 docker compose -f docker/docker-compose.yml up --build
-# gRPC on :5081, REST on :8081, MinIO console on :9001 (minioadmin / minioadmin)
+# gRPC on :5081, REST on :8081, SeaweedFS S3 on :9000, admin UI on :23646
 # The first build also exports RF-DETR Nano to ONNX inside the worker image (~5-10 min, one-time
 # per image); nothing to fetch on the host first.
 

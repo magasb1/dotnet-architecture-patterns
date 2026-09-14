@@ -188,7 +188,8 @@ else
                             </tr>
                             @if (expanded)
                             {
-                                <tr class="details-row"><td colspan="7"><SourceDetails Row="row" Edit="@(() => OpenEditor(row.Source))" /></td></tr>
+                                <tr class="details-row"><td colspan="7"><SourceDetails Row="row" Edit="@(() => OpenEditor(row.Source))"
+                                                                                         DetectionChanged="RefreshNowAsync" /></td></tr>
                             }
                         </tbody>
                     }

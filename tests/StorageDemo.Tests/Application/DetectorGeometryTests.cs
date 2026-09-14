@@ -143,4 +143,17 @@ public sealed class DetectorGeometryTests
         Assert.Equal("toothbrush", CocoClasses.RfDetr[90]);
         Assert.Equal("toothbrush", CocoClasses.Yolo[79]);
     }
+
+    [Fact]
+    public void Detection_configuration_canonicalises_models_and_coco_filters()
+    {
+        Assert.Equal(DetectionModels.RfDetr, DetectionModels.Normalize("RFDETR"));
+        Assert.Equal(DetectionModels.Yolo26, DetectionModels.Normalize("yolo"));
+        Assert.Null(DetectionModels.Normalize("default"));
+
+        Assert.Equal(["person", "car", "truck"], CocoClasses.Normalize(["TRUCK", "car", "person", "car"]));
+        Assert.Empty(CocoClasses.Normalize([]));
+        Assert.Throws<ArgumentException>(() => CocoClasses.Normalize(["vehicle"]));
+        Assert.Throws<ArgumentException>(() => DetectionModels.Normalize("mystery"));
+    }
 }

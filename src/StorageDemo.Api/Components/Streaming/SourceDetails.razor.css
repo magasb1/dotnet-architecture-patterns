@@ -22,6 +22,21 @@ dd { min-width: 0; margin: 0; color: var(--text-secondary); text-align: right; }
 .error-row { margin-top: 6px; padding-top: 10px !important; border-top: 1px solid var(--danger-border); }
 .error-row dd { color: var(--danger-text); overflow-wrap: anywhere; }
 .details-actions { flex: 1 0 100%; }
+.detection-card { max-width: 520px; }
+.detection-hint { margin: 0; color: var(--text-faint); font-size: .73rem; }
+.detection-form { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+.detection-form > label { display: grid; gap: 5px; color: var(--text-faint); font-size: .68rem; font-weight: 650; }
+.detection-form select { min-width: 0; padding: 7px 9px; color: var(--text-secondary); background: var(--surface-sunken); border: 1px solid var(--border-default); border-radius: var(--radius-sm); }
+.label-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-faint); font-size: .68rem; font-weight: 650; }
+.label-actions { display: flex; gap: 3px; }
+.label-actions button { padding: 2px 5px; color: var(--accent-text); background: transparent; border: 0; cursor: pointer; font: inherit; }
+.label-picker { grid-column: 1 / -1; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-sunken); }
+.label-picker summary { padding: 8px 10px; color: var(--text-secondary); cursor: pointer; font-size: .72rem; }
+.label-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); max-height: 190px; padding: 7px 9px 10px; overflow-y: auto; border-top: 1px solid var(--border-subtle); }
+.label-grid label { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 3px 0; color: var(--text-muted); font-size: .68rem; }
+.label-grid input { width: 13px; height: 13px; }
+.field-error { grid-column: 1 / -1; color: var(--danger-text); font-size: .7rem; }
+.detection-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 7px; }
 .edit-forwards { align-self: stretch; min-height: 48px; }
 .edit-forwards ::deep svg { width: 16px; }
 
@@ -29,4 +44,11 @@ dd { min-width: 0; margin: 0; color: var(--text-secondary); text-align: right; }
     .details-panel { padding: 14px; }
     .detail-card { max-width: none; }
     .details-actions { width: 100%; }
+    .detection-card { max-width: none; }
+}
+
+@media (max-width: 520px) {
+    .detection-form { grid-template-columns: 1fr; }
+    .label-heading, .label-picker, .detection-actions, .field-error { grid-column: 1; }
+    .label-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

@@ -116,7 +116,9 @@ public sealed class DetectionWorkerTests(ITestOutputHelper output) : IAsyncLifet
             TimeSpan.FromSeconds(40),
             () => "the stream never appeared");
 
-        var toggled = await _client.PutAsJsonAsync($"/api/live/detect/{name}", new DetectRequest(true, 1));
+        var toggled = await _client.PutAsJsonAsync(
+            $"/api/live/detect/{name}",
+            new DetectRequest(true, 1, "rf-detr", ["dog"]));
         Assert.Equal(HttpStatusCode.OK, toggled.StatusCode);
 
         // The worker talks to the test host through its handler, the way a pod talks to a Service.
@@ -162,11 +164,14 @@ public sealed class DetectionWorkerTests(ITestOutputHelper output) : IAsyncLifet
 
             var stream = await Get(name);
             Assert.Equal("worker-test", stream!.DetectionWorker);
+            Assert.Equal("rf-detr", stream.DetectionModel);
+            Assert.Equal(["dog"], stream.DetectionLabels);
             Assert.Contains(name, worker.Held);
 
             // The picture went through MPEG-2 at its own size, so the geometry is the README's
             // within the codec's blur; the box is on the dog, not merely somewhere in the frame.
             var dog = sample!.Frame.Detections.First(d => d.OntologyClass == "dog");
+            Assert.All(sample.Frame.Detections, detection => Assert.Equal("dog", detection.OntologyClass));
             Assert.Equal(720, sample.Frame.FrameWidth);
             Assert.Equal(1280, sample.Frame.FrameHeight);
             Assert.InRange(dog.Left, 158 - 60, 158 + 60);

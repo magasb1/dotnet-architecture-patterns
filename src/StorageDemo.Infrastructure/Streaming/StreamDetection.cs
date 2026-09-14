@@ -41,6 +41,11 @@ public sealed class StreamDetection
 
     public int Rate { get; private set; }
 
+    public string? Model { get; private set; }
+
+    /// <summary>Empty means all COCO classes.</summary>
+    public IReadOnlyList<string> Labels { get; private set; } = [];
+
     /// <summary>The worker holding the stream, or null when none does or the holder's lease has lapsed.</summary>
     public string? Worker
     {
@@ -58,12 +63,14 @@ public sealed class StreamDetection
         get { lock (_gate) { return _count == 0 ? null : _ring[(_next - 1 + RingSize) % RingSize]; } }
     }
 
-    public void Set(bool enabled, int rate)
+    public void Set(bool enabled, int rate, string? model, IReadOnlyList<string>? labels)
     {
         lock (_gate)
         {
             Enabled = enabled;
             Rate = rate;
+            Model = string.IsNullOrWhiteSpace(model) ? null : model;
+            Labels = labels is null ? [] : [.. labels];
 
             if (!enabled)
             {
@@ -125,6 +132,8 @@ public sealed class StreamDetection
         {
             Enabled = shared.DetectionEnabled;
             Rate = shared.DetectionRate;
+            Model = shared.DetectionModel;
+            Labels = shared.DetectionLabels ?? [];
             _worker = shared.DetectionWorker;
             _workerSeenAt = DateTimeOffset.UtcNow;
         }

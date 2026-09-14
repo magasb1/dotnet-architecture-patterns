@@ -237,6 +237,14 @@ public sealed class DocumentItem : INotifyPropertyChanged
                         "Detection",
                         $"{(_live.DetectionRate > 0 ? $"{_live.DetectionRate}/s" : "default rate")}, "
                         + (_live.HasDetectionWorker ? $"worker {_live.DetectionWorker}" : "no worker yet")));
+                    rows.Add(new MetadataRow(
+                        "Detection model",
+                        _live.HasDetectionModel ? _live.DetectionModel : "worker default"));
+                    rows.Add(new MetadataRow(
+                        "Detection classes",
+                        _live.DetectionLabels.Count == 0
+                            ? "all COCO classes"
+                            : string.Join(", ", _live.DetectionLabels)));
                 }
 
                 if (!_live.Startable)

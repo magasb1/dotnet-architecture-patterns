@@ -13,7 +13,7 @@ namespace StorageDemo.Worker;
 
 /// <summary>
 /// Claims streams whose detection toggle is set, and runs one <see cref="StreamJob"/> per claimed
-/// stream against one shared detector.
+/// stream against detector sessions shared by every stream selecting the same model.
 ///
 /// A pull-lease, as detection-plan.md fixes it: every beat the worker lists the streams, claims
 /// any that are enabled and unheld by writing its name through the owner, renews the claims it
@@ -22,8 +22,8 @@ namespace StorageDemo.Worker;
 /// and a worker that dies is simply one whose claims stop being renewed.
 ///
 /// Detection is one loop for every stream. A job hands its due frame to a channel and the loop
-/// takes whatever is queued as one batch, so frames from several streams that fall due while a
-/// detection is running go to the model together.
+/// groups what is queued by model, so frames from several streams selecting the same family are
+/// inferred as one batch. The default session loads eagerly; alternate sessions load on first use.
 /// </summary>
 public sealed class DetectionWorker : BackgroundService
 {
@@ -82,28 +82,16 @@ public sealed class DetectionWorker : BackgroundService
     {
         FfmpegLibrary.EnsureLoaded();
 
-        var (descriptor, defaultPath) = _options.Model.Trim().ToLowerInvariant() switch
-        {
-            "rf-detr" or "rfdetr" => (DetectorDescriptor.RfDetrNano, "models/rf-detr-nano.onnx"),
-            "yolo26" or "yolo" => (DetectorDescriptor.Yolo26Nano, "models/yolo26-nano.onnx"),
-            var other => throw new InvalidOperationException(
-                $"Worker__Model is '{other}'. It must be 'rf-detr' or 'yolo26'; the file alone "
-                + "cannot say which contract to decode."),
-        };
+        var defaultModel = DetectionModels.Normalize(_options.Model)
+            ?? throw new InvalidOperationException("Worker__Model must name a concrete model.");
+        var detectors = new Dictionary<string, OnnxDetector>(StringComparer.Ordinal);
 
-        var modelPath = Resolve(_options.ModelPath.Length > 0 ? _options.ModelPath : defaultPath);
+        // Load the configured default up front so a bad deployment fails at startup. Alternate
+        // models are lazy: an RF-DETR session is large and should not occupy an accelerator until
+        // a stream actually selects it.
+        detectors[defaultModel] = CreateDetector(defaultModel, defaultModel);
 
-        _logger.LogInformation("Detecting with {Model} from {Path}", _options.Model, modelPath);
-
-        using var detector = new OnnxDetector(
-            modelPath,
-            descriptor,
-            _options.Threshold,
-            _logger,
-            _options.ExecutionProvider,
-            _options.OpenVinoCachePath);
-
-        var detecting = Task.Run(() => DetectAsync(detector, stoppingToken), CancellationToken.None);
+        var detecting = Task.Run(() => DetectAsync(detectors, defaultModel, stoppingToken), CancellationToken.None);
 
         try
         {
@@ -141,7 +129,14 @@ public sealed class DetectionWorker : BackgroundService
         finally
         {
             await StandDownAsync();
-            await detecting;
+            try
+            {
+                await detecting;
+            }
+            finally
+            {
+                foreach (var detector in detectors.Values) detector.Dispose();
+            }
         }
     }
 
@@ -171,6 +166,7 @@ public sealed class DetectionWorker : BackgroundService
 
             job.Owner = Owner(stream!);
             job.Rate = Rate(stream!);
+            job.Configure(Model(stream!), stream!.DetectionLabels);
 
             // Renewing the lease. A conflict means the lease lapsed and another worker took the
             // stream in between; an owner that cannot be reached is left for the next beat, since
@@ -200,6 +196,8 @@ public sealed class DetectionWorker : BackgroundService
                 stream.Name,
                 Owner(stream),
                 Rate(stream),
+                Model(stream),
+                stream.DetectionLabels,
                 _http,
                 _demuxer,
                 _live,
@@ -272,9 +270,14 @@ public sealed class DetectionWorker : BackgroundService
     /// Takes the newest waiting frames up to the batch size and runs them as one call. Result
     /// delivery has its own bounded queue per stream and never holds up the next inference.
     /// </summary>
-    private async Task DetectAsync(OnnxDetector detector, CancellationToken cancellationToken)
+    private async Task DetectAsync(
+        Dictionary<string, OnnxDetector> detectors,
+        string defaultModel,
+        CancellationToken cancellationToken)
     {
         var batch = new List<PendingFrame>(_options.MaxBatch);
+        var retryAfter = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+        var loading = new Dictionary<string, Task<OnnxDetector>>(StringComparer.Ordinal);
 
         try
         {
@@ -288,11 +291,52 @@ public sealed class DetectionWorker : BackgroundService
 
                 try
                 {
-                    var results = detector.Detect(batch.Select(frame => frame.Frame).ToArray());
-
-                    for (var i = 0; i < batch.Count; i++)
+                    foreach (var group in batch.GroupBy(frame => frame.Model))
                     {
-                        batch[i].Job.Detected(batch[i], results[i]);
+                        if (!detectors.ContainsKey(group.Key)
+                            && retryAfter.GetValueOrDefault(group.Key) > DateTimeOffset.UtcNow)
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            var frames = group.ToArray();
+                            if (!detectors.TryGetValue(group.Key, out var detector))
+                            {
+                                if (!loading.TryGetValue(group.Key, out var load))
+                                {
+                                    // Compiling an OpenVINO model can take seconds. Do it away
+                                    // from the inference loop so streams using a warm model remain
+                                    // smooth while the newly selected family starts up.
+                                    load = Task.Run(() => CreateDetector(group.Key, defaultModel), CancellationToken.None);
+                                    loading[group.Key] = load;
+                                    continue;
+                                }
+                                if (!load.IsCompleted)
+                                {
+                                    continue;
+                                }
+
+                                detector = await load;
+                                detectors[group.Key] = detector;
+                                loading.Remove(group.Key);
+                            }
+
+                            var results = detector.Detect(frames.Select(frame => frame.Frame).ToArray());
+                            for (var i = 0; i < frames.Length; i++)
+                            {
+                                frames[i].Job.Detected(frames[i], results[i]);
+                            }
+                        }
+                        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            // One unavailable optional model must not prevent streams using the
+                            // already-loaded default from being processed in this same batch.
+                            _logger.LogWarning(ex, "A {Model} batch of {Count} frames failed", group.Key, group.Count());
+                            retryAfter[group.Key] = DateTimeOffset.UtcNow.AddSeconds(30);
+                            loading.Remove(group.Key);
+                        }
                     }
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
@@ -317,6 +361,21 @@ public sealed class DetectionWorker : BackgroundService
         while (_due.Reader.TryRead(out var left))
         {
             left.TakeFrame()?.Dispose();
+        }
+
+        // A background compilation already in flight cannot be cancelled by ONNX Runtime. Observe
+        // it and release its session if shutdown won the race before it entered the shared map.
+        foreach (var load in loading.Values)
+        {
+            try
+            {
+                var detector = await load;
+                if (!detectors.Values.Contains(detector)) detector.Dispose();
+            }
+            catch
+            {
+                // Already reported when the loop was alive; shutdown has nothing to recover.
+            }
         }
     }
 
@@ -352,6 +411,40 @@ public sealed class DetectionWorker : BackgroundService
 
     private double Rate(LiveStream stream)
         => stream.DetectionRate > 0 ? stream.DetectionRate : _options.DefaultRate;
+
+    private string Model(LiveStream stream)
+        => DetectionModels.Normalize(stream.DetectionModel)
+            ?? DetectionModels.Normalize(_options.Model)
+            ?? DetectionModels.RfDetr;
+
+    private OnnxDetector CreateDetector(string model, string defaultModel)
+    {
+        var (descriptor, conventionalPath, configuredPath) = model switch
+        {
+            DetectionModels.RfDetr => (
+                DetectorDescriptor.RfDetrNano,
+                "models/rf-detr-nano.onnx",
+                _options.RfDetrModelPath),
+            DetectionModels.Yolo26 => (
+                DetectorDescriptor.Yolo26Nano,
+                "models/yolo26-nano.onnx",
+                _options.Yolo26ModelPath),
+            _ => throw new InvalidOperationException($"Unsupported detection model '{model}'."),
+        };
+        var path = configuredPath.Length > 0
+            ? configuredPath
+            : model == defaultModel && _options.ModelPath.Length > 0 ? _options.ModelPath : conventionalPath;
+        path = Resolve(path);
+
+        _logger.LogInformation("Loading detection model {Model} from {Path}", model, path);
+        return new OnnxDetector(
+            path,
+            descriptor,
+            _options.Threshold,
+            _logger,
+            _options.ExecutionProvider,
+            _options.OpenVinoCachePath);
+    }
 
     /// <summary>
     /// A model path as given, or the same relative path found by walking up from the binary. A

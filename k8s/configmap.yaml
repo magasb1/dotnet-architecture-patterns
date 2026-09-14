@@ -10,7 +10,7 @@ data:
   Storage__Provider: S3
   Storage__S3__Bucket: storage-demo
   Storage__S3__Region: eu-north-1
-  # ServiceUrl stays unset against real AWS; it exists for MinIO and other S3-compatible stores.
+  # ServiceUrl stays unset against real AWS; it exists for SeaweedFS and other S3-compatible stores.
   Storage__S3__ForcePathStyle: "false"
 
   Database__Provider: Postgres

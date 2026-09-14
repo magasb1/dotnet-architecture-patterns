@@ -211,13 +211,17 @@ public sealed class LiveStreamTests : IAsyncLifetime
         Push(name);
         Assert.NotNull(await WaitForStreamAsync(name, TimeSpan.FromSeconds(40)));
 
-        var toggled = await _client.PutAsJsonAsync($"/api/live/detect/{name}", new DetectRequest(true, 5));
+        var toggled = await _client.PutAsJsonAsync(
+            $"/api/live/detect/{name}",
+            new DetectRequest(true, 5, "yolo", ["truck", "person", "car"]));
         Assert.Equal(HttpStatusCode.OK, toggled.StatusCode);
 
         var stream = await toggled.Content.ReadFromJsonAsync<LiveStream>();
         Assert.NotNull(stream);
         Assert.True(stream.DetectionEnabled);
         Assert.Equal(5, stream.DetectionRate);
+        Assert.Equal("yolo26", stream.DetectionModel);
+        Assert.Equal(["person", "car", "truck"], stream.DetectionLabels);
         Assert.Null(stream.DetectionWorker);
 
         // Published at once, not on the next beat: a worker lists the registry, not the owner.

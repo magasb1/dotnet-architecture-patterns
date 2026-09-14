@@ -117,8 +117,27 @@ public sealed class LiveStreamCoordinator(
         return true;
     }
 
-    public Task<LiveStream?> SetDetectionAsync(string name, bool enabled, int rate, CancellationToken cancellationToken = default)
-        => Publish(name, entry => entry.Detection.Set(enabled, rate), cancellationToken);
+    public Task<LiveStream?> SetDetectionAsync(
+        string name,
+        bool enabled,
+        int rate,
+        string? model = null,
+        IReadOnlyList<string>? labels = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (rate is < 0 or > 60)
+        {
+            throw new ArgumentOutOfRangeException(nameof(rate), "Detection rate must be between 0 and 60 per second.");
+        }
+
+        var normalizedModel = DetectionModels.Normalize(model);
+        var normalizedLabels = CocoClasses.Normalize(labels);
+
+        return Publish(
+            name,
+            entry => entry.Detection.Set(enabled, rate, normalizedModel, normalizedLabels),
+            cancellationToken);
+    }
 
     public Task<LiveStream?> ClaimDetectorAsync(string name, string worker, CancellationToken cancellationToken = default)
         => Publish(
@@ -1120,7 +1139,9 @@ public sealed class LiveStreamCoordinator(
             // ordinary streams does not carry a thousand empty arrays through Redis and out again.
             entry.Forwards.IsEmpty ? null : [.. entry.Forwards.Values.Select(forwarder => forwarder.Status)],
             health?.Link,
-            entry.Viewers);
+            entry.Viewers,
+            entry.Detection.Model,
+            entry.Detection.Labels.Count == 0 ? null : entry.Detection.Labels);
     }
 
     /// <param name="forOutput">

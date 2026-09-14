@@ -1603,7 +1603,15 @@ public partial class MainWindow : Window
 
         try
         {
-            var stream = await _api.SetLiveDetectionAsync(item.Id, enable, rate, _connection.Token);
+            // This client changes the toggle/rate only. Preserve model and COCO filter selected in
+            // the web console instead of accidentally resetting them to worker-default/all.
+            var stream = await _api.SetLiveDetectionAsync(
+                item.Id,
+                enable,
+                rate,
+                _connection.Token,
+                item.Live.HasDetectionModel ? item.Live.DetectionModel : null,
+                item.Live.DetectionLabels);
             _detectionSupported = true;
 
             if (stream is null)
@@ -1866,6 +1874,13 @@ public partial class MainWindow : Window
         return text;
     }
 
+    /// <summary>The picture needs the fact, not database/debug identities already available below it.</summary>
+    private static string OverlayLabel(VmtiTargetMessage target)
+    {
+        var text = target.HasOntologyClass ? target.OntologyClass : "object";
+        return target.HasConfidencePercent ? $"{text} {target.ConfidencePercent}%" : text;
+    }
+
     private Brush BrushFor(VmtiTargetMessage target)
     {
         var key = target.HasTrackId ? target.TrackId : $"#{target.Id}";
@@ -1927,24 +1942,70 @@ public partial class MainWindow : Window
                 Width = Math.Max(1, (target.Right - target.Left + 1) * scaleX),
                 Height = Math.Max(1, (target.Bottom - target.Top + 1) * scaleY),
                 Stroke = brush,
-                StrokeThickness = 2,
+                StrokeThickness = 1.5,
+                Opacity = 0.82,
             };
 
             Canvas.SetLeft(box, x);
             Canvas.SetTop(box, y);
             DetectionCanvas.Children.Add(box);
 
-            var label = new TextBlock
-            {
-                Text = Label(target),
-                Foreground = Brushes.Black,
-                Background = brush,
-                FontSize = 11,
-                Padding = new Thickness(3, 0, 3, 0),
-            };
+        }
 
-            Canvas.SetLeft(label, x);
-            Canvas.SetTop(label, Math.Max(0, y - 16));
+        // Labels are laid out after boxes, strongest first. A compact neutral pill avoids the
+        // confetti effect of solid per-track backgrounds, and a pill is omitted when all three
+        // sensible positions would cover a stronger label. The full ids remain in the panel.
+        var occupied = new List<Rect>();
+        foreach (var target in _detections.Targets.OrderByDescending(target =>
+                     target.HasConfidencePercent ? target.ConfidencePercent : 100))
+        {
+            var brush = BrushFor(target);
+            var x = left + (target.Left - 1) * scaleX;
+            var y = top + (target.Top - 1) * scaleY;
+            var boxHeight = Math.Max(1, (target.Bottom - target.Top + 1) * scaleY);
+            var text = new TextBlock
+            {
+                Text = OverlayLabel(target),
+                Foreground = Brushes.White,
+                FontSize = 10.5,
+                FontWeight = FontWeights.SemiBold,
+            };
+            var label = new Border
+            {
+                Child = text,
+                Background = new SolidColorBrush(Color.FromArgb(210, 8, 15, 28)),
+                BorderBrush = brush,
+                BorderThickness = new Thickness(2, 0, 0, 0),
+                CornerRadius = new CornerRadius(2),
+                Padding = new Thickness(4, 1, 4, 1),
+            };
+            label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            var labelWidth = label.DesiredSize.Width;
+            var labelHeight = label.DesiredSize.Height;
+            var candidates = new[]
+            {
+                new Point(x, y - labelHeight - 2),
+                new Point(x + 2, y + 2),
+                new Point(x, y + boxHeight + 2),
+            };
+            Rect? placed = null;
+            foreach (var candidate in candidates)
+            {
+                var labelX = Math.Clamp(candidate.X, left, Math.Max(left, left + width - labelWidth));
+                var labelY = Math.Clamp(candidate.Y, top, Math.Max(top, top + height - labelHeight));
+                var bounds = new Rect(labelX, labelY, labelWidth, labelHeight);
+                if (occupied.All(existing => !existing.IntersectsWith(bounds)))
+                {
+                    placed = bounds;
+                    break;
+                }
+            }
+
+            if (placed is not { } position) continue;
+            occupied.Add(position);
+            Canvas.SetLeft(label, position.Left);
+            Canvas.SetTop(label, position.Top);
+            Panel.SetZIndex(label, 1);
             DetectionCanvas.Children.Add(label);
         }
     }
