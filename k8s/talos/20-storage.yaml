@@ -1,0 +1,14 @@
+# S3 from Ceph's object gateway, claimed the way a PersistentVolumeClaim claims a disk.
+#
+# Rook creates the bucket and a user that can only see it, then publishes both halves under the
+# claim's own name: a ConfigMap carrying BUCKET_NAME, BUCKET_HOST and BUCKET_PORT, and a Secret
+# carrying the two keys. Nothing here names a bucket or a credential, which is why this file has
+# no secrets in it and needs none.
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: storage-demo-bucket
+  namespace: storage-demo
+spec:
+  generateBucketName: storage-demo
+  storageClassName: ceph-bucket

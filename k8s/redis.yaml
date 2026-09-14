@@ -1,0 +1,65 @@
+# A demo Redis.
+#
+# It carries the change feed, the analysis queue and the scan lock, which is what lets the
+# Deployment run more than one replica without every pod scanning the store and without a pod
+# being the only one able to finish work it accepted.
+#
+# Production Redis belongs on a managed service or under an operator. Nothing here is persisted:
+# for this workload that is defensible, since losing the feed costs a client one refresh and losing
+# queued work costs one thumbnail, but decide it deliberately rather than inheriting it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: storage-demo
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: storage-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            # Started as the image's own redis user rather than as root dropping to it. Its
+            # entrypoint uses setpriv to make that switch, which needs a capability this drops,
+            # so a container that starts as root here fails before redis ever runs.
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            seccompProfile:
+              type: RuntimeDefault
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

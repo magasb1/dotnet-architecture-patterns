@@ -1,0 +1,85 @@
+# A registry for getting this image onto Talos nodes, which have no Docker and pull only from a
+# registry.
+#
+# Temporary and deliberately disposable: no persistence, no authentication, plain HTTP. It exists
+# so a locally built image can be pushed somewhere the nodes can reach, and it is paired with a
+# machine config patch that allows exactly this address as an insecure mirror:
+#
+#   talosctl patch mc -n <node> --patch @k8s/talos/talos-registry-patch.yaml
+#
+# Delete the namespace and revert that patch when you are finished. Nothing else depends on it:
+# the application's own image reference is the only thing that names it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lab-registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: lab-registry
+  annotations:
+    # Pinned, because the machine config patch on every node names this address and a reallocation
+    # would leave three nodes pointing at nothing.
+    lbipam.cilium.io/ips: "10.10.10.121"
+spec:
+  type: LoadBalancer
+  selector:
+    app: registry
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: 5000
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: lab-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      # This cluster enforces the restricted Pod Security standard, which wants all four of these.
+      # fsGroup is what makes the image directory writable to a non-root user.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: registry
+          image: registry:2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: images
+              mountPath: /var/lib/registry
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        # In memory on purpose. This holds one image for as long as it takes the nodes to pull it,
+        # and losing it costs one push.
+        - name: images
+          emptyDir: {}

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- No infrastructure packages here, on purpose. See README "Dependency direction". -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <!-- The extension-to-media-type table. Dependency-free lookups, no I/O, so it does not
+         breach the rule that keeps infrastructure out of this project. -->
+    <PackageReference Include="MimeTypesMap" Version="1.0.9" />
+  </ItemGroup>
+</Project>

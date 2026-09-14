@@ -1,0 +1,45 @@
+@inherits LayoutComponentBase
+@inject IWebHostEnvironment Environment
+
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="/streaming/sources" aria-label="Storage Demo home">
+            <span class="brand-mark" aria-hidden="true">
+                <span></span><span></span><span></span>
+            </span>
+            <span>
+                <strong>Storage Demo</strong>
+                <small>Operator console</small>
+            </span>
+        </a>
+
+        <nav>
+            <span class="nav-section">Streaming</span>
+            <NavLink href="/streaming/sources" Match="NavLinkMatch.Prefix">
+                <AppIcon Name="broadcast" />
+                <span>Sources</span>
+            </NavLink>
+        </nav>
+
+        <div class="sidebar-footer">
+            <span class="environment-dot" aria-hidden="true"></span>
+            <span>@Environment.EnvironmentName</span>
+        </div>
+    </aside>
+
+    <div class="workspace">
+        <header class="mobile-header">
+            <a class="brand compact" href="/streaming/sources">
+                <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+                <strong>Storage Demo</strong>
+            </a>
+            <span class="environment">@Environment.EnvironmentName</span>
+        </header>
+
+        <main id="main-content" tabindex="-1">
+            @Body
+        </main>
+    </div>
+</div>

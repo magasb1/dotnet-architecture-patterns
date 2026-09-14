@@ -1,0 +1,9 @@
+<span class="status @Tone">
+    <span class="indicator" aria-hidden="true"></span>
+    @Text
+</span>
+
+@code {
+    [Parameter, EditorRequired] public string Text { get; set; } = string.Empty;
+    [Parameter] public string Tone { get; set; } = "neutral";
+}

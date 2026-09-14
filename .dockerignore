@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+**/data/
+.git/
+.vs/
+docker/
+k8s/
+tests/
+src/StorageDemo.Client/
+# Half a gigabyte of weights that no image bakes in: the worker mounts its model.
+models/

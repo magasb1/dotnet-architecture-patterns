@@ -1,0 +1,71 @@
+# A demo database only.
+#
+# Production PostgreSQL belongs on a managed service (RDS, Cloud SQL, Azure Database) or under a
+# real operator with backups, failover and patching. A single pod with one volume has none of that:
+# delete it and the data is gone. It exists here so the manifests apply on a laptop cluster.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: storage-demo
+type: Opaque
+stringData:
+  POSTGRES_DB: storagedemo
+  POSTGRES_USER: storagedemo
+  POSTGRES_PASSWORD: CHANGE_ME
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: storage-demo
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: storage-demo
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "storagedemo", "-d", "storagedemo"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

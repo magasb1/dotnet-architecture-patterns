@@ -1,0 +1,4 @@
+Welcome to the Storage Demo.
+
+This file was written through IFileStorage by the development seeder,
+so it lands on the filesystem or in S3 depending only on configuration.

@@ -1,0 +1,525 @@
+syntax = "proto3";
+
+package storagedemo.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option csharp_namespace = "StorageDemo.Grpc";
+
+// The primary API. REST exists alongside it for tooling that cannot speak gRPC.
+service Documents {
+  rpc List(google.protobuf.Empty) returns (ListResponse);
+
+  rpc Get(DocumentId) returns (DocumentMessage);
+
+  // Every recording and snapshot one detection caused. Asked of documents rather than of the live
+  // stream because by the time anyone asks, the stream may be long gone.
+  rpc ListByDetection(DetectionReferenceMessage) returns (ListResponse);
+
+  // Server streaming: the file is chunked so a large object never sits in memory whole.
+  rpc Download(DocumentId) returns (stream Chunk);
+
+  // The generated preview image. NOT_FOUND when the type has no thumbnail.
+  rpc DownloadThumbnail(DocumentId) returns (stream Chunk);
+
+  // Client streaming: the first message carries metadata, the rest carry bytes.
+  rpc Upload(stream UploadRequest) returns (DocumentMessage);
+
+  rpc Delete(DocumentId) returns (google.protobuf.Empty);
+
+  // Long-lived stream of changes, including ones the storage monitor detects from outside.
+  rpc Watch(google.protobuf.Empty) returns (stream ChangeEvent);
+
+  rpc GetProviders(google.protobuf.Empty) returns (ProviderResponse);
+
+  // Live streams on air anywhere in the cluster, not only on the replica answering this call.
+  rpc ListLive(google.protobuf.Empty) returns (LiveListResponse);
+  rpc WatchLiveStreams(google.protobuf.Empty) returns (stream LiveListResponse);
+
+  // The current preview of a stream: the picture now, not a poster frame. Served from whichever
+  // replica owns the stream, so any replica answers. NOT_FOUND before the first one has been
+  // decoded. Open, like a thumbnail: it is a picture.
+  rpc DownloadLivePreview(LiveStreamName) returns (stream Chunk);
+
+  // The live calls below, and ListLive above, carry the configured token as x-storage-token
+  // metadata, exactly as REST carries it in the header of the same name. UNAUTHENTICATED when it
+  // is missing or wrong; nothing is required when the server has no token configured.
+  //
+  // Takes a picture now and stores it as a document. A person pressing the button and a detector
+  // firing are the same caller; the only difference is that the detector says which detection
+  // caused it, and the stored document then says so too.
+  rpc SnapshotLive(SnapshotLiveRequest) returns (DocumentId);
+
+  // Starts a recording, or extends the one already running. It continues whether or not any
+  // client is connected, and becomes a document when it ends.
+  rpc RecordLive(RecordLiveRequest) returns (LiveRecordingMessage);
+
+  rpc StopLiveRecording(LiveStreamName) returns (google.protobuf.Empty);
+
+  // The newest MISB KLV packet on a stream, decoded to the ST 0902 minimum set with the raw bytes
+  // alongside. Answered by the owning replica wherever the call lands, as the REST route is.
+  // NOT_FOUND when the stream is unknown or carries no KLV. Guarded like ListLive.
+  rpc GetLiveKlv(LiveStreamName) returns (LiveKlvMessage);
+  rpc WatchLiveKlv(LiveStreamName) returns (stream LiveKlvMessage);
+
+  // Switches detection on or off for one stream, and at what rate, through the owner. A worker
+  // claims a stream whose toggle is set and stands down when it clears; nothing pushes work to a
+  // worker. Returns the stream as it now stands. Guarded like RecordLive.
+  rpc SetLiveDetection(SetLiveDetectionRequest) returns (LiveStreamMessage);
+
+  // The newest MISB ST 0903 VMTI frame on a stream, decoded with the raw packet alongside, from
+  // the short ring the owner keeps beside the KLV ring. NOT_FOUND when the stream is unknown or
+  // no worker has posted a frame yet. Guarded like ListLive.
+  rpc GetLiveDetections(LiveStreamName) returns (LiveDetectionsMessage);
+  rpc WatchLiveDetections(LiveStreamName) returns (stream LiveDetectionsMessage);
+
+  // Configured sources: what an operator asked this service to fetch and where to copy it on, as
+  // opposed to what is on air. Guarded like ListLive.
+  //
+  // Unlike the live calls above, none of these three is forwarded to an owning replica. Those need
+  // a stream's bytes; these need the source store, which every replica shares, so whichever one
+  // the call lands on answers it.
+  //
+  // Each source carries the live stream of the same name when there is one, so a client that shows
+  // configuration beside current state makes one call rather than one per row.
+  rpc ListLiveSources(google.protobuf.Empty) returns (LiveSourceListResponse);
+
+  // Creates the source or replaces it whole, forwards included. The source is the aggregate: a
+  // forward is removed by sending the row back without it, and there is deliberately no RPC for an
+  // individual forward. INVALID_ARGUMENT when the name is not a usable stream name, when a URL
+  // names a transport outside the allowed list, or when two forwards share an id. The returned
+  // message carries the ids minted for forwards that arrived without one.
+  rpc SaveLiveSource(LiveSourceMessage) returns (LiveSourceMessage);
+
+  // Forgets the configuration. A stream already on air under this name keeps running: this stops
+  // the service establishing it again, and stopping a live feed is StopLive's job.
+  rpc DeleteLiveSource(LiveStreamName) returns (google.protobuf.Empty);
+}
+
+// Streams are addressed by name. The name is the identity: a feed that drops and reconnects under
+// the same name is the same stream resuming, so no opaque identifier would survive to be used here.
+message LiveStreamName {
+  string name = 1;
+}
+
+// Which detection caused a capture, and what to ask for its documents by: the three things that
+// identify a detection uniquely on the wire, and there is no fourth. The stream it was seen on,
+// the MISB ST 0903 VMTI precision timestamp of the frame, and the target id within that frame.
+//
+// It reaches a document as one metadata entry rather than three, reading "stream@moment#target",
+// so a person looking at a document's properties can see what caused it.
+message DetectionReferenceMessage {
+  string stream = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  int32 target_id = 3;
+}
+
+// A separate message from LiveStreamName, which is only ever a name: a snapshot is the one live
+// call that can be caused by something other than a person. Field 1 is the name, so a client
+// built against the older LiveStreamName is wire-compatible with this.
+message SnapshotLiveRequest {
+  string name = 1;
+
+  // Absent when a person pressed the button, and the document is then byte-for-byte what it was.
+  DetectionReferenceMessage detection = 2;
+}
+
+message RecordLiveRequest {
+  string name = 1;
+
+  // Zero means the server's default. A clip is a recording whose stop time was set at the start.
+  double seconds = 2;
+
+  // Absent when a person pressed record. Present, every part the recording stores carries it.
+  DetectionReferenceMessage detection = 3;
+}
+
+message LiveRecordingMessage {
+  string id = 1;
+  google.protobuf.Timestamp started_at = 2;
+  google.protobuf.Timestamp ends_at = 3;
+  int64 bytes = 4;
+
+  // The recorder could not keep up, so the document is real but short.
+  bool truncated = 5;
+}
+
+message LiveStreamMessage {
+  string name = 1;
+
+  // "Live" or "Interrupted". An interrupted stream is still claimed and still shown: a tile that
+  // vanishes and returns is worse than one showing a state.
+  string state = 2;
+
+  bool has_preview = 3;
+  int64 packets = 4;
+  int64 bytes = 5;
+  google.protobuf.Timestamp started_at = 6;
+
+  // The replica holding the connection. Shown so an operator can tell where a stream actually is.
+  string owner = 7;
+
+  // Codecs and dimensions, as the sender presented them.
+  string layout = 8;
+
+  // False while no keyframe has arrived recently enough to start from. Every pre-roll is then
+  // empty and every snapshot second-hand, and the fix is at the encoder.
+  bool startable = 9;
+
+  // The buffer's byte ceiling is evicting before its time window, which silently shortens every
+  // pre-roll taken from this stream.
+  bool ceiling_binding = 10;
+
+  double buffered_seconds = 11;
+
+  // Set while a recording is running. It is on the stream rather than in the document list,
+  // because a document appears only when there is a file.
+  LiveRecordingMessage recording = 12;
+
+  // Created by request rather than by an encoder naming itself. Indistinguishable afterwards.
+  bool manual = 13;
+
+  // Transport health over the last heartbeat, as libsrt counts it. Lost never arrived; dropped
+  // arrived too late for the latency window. Zero on a healthy stream, and the first thing to
+  // look at on one that is listed as live while most of what was sent is missing.
+  //
+  // Fields are only ever added here, never renumbered or removed: an older client reads zero
+  // for what it does not know and a newer one reads zero from an older server. 19 to 21 are
+  // detection, below; 22 to 25 stay held for further KLV fields; 26 is the forward list; 27 is
+  // the link stats; 28 is the viewer count.
+  int32 packets_lost = 14;
+  int32 packets_dropped = 15;
+
+  // Whether the transport carries a MISB KLV metadata stream, and when its last packet arrived.
+  bool has_klv = 16;
+  google.protobuf.Timestamp last_klv_at = 17;
+
+  // The ST 0102 marking from the newest KLV packet, on the list because a wall of a thousand
+  // tiles has to show its markings without a thousand calls. Absent when the stream carries no
+  // KLV or no security set; a client renders absence as UNMARKED, never as blank, because a
+  // picture without a marking is the failure the marking exists to prevent. Absent and empty are
+  // different answers, which is why this is optional rather than a plain string.
+  optional string classification = 18;
+
+  // Detection, per stream and on demand. The toggle is set through the owner and read by
+  // workers; the rate is detections per second while enabled, zero meaning the worker's default;
+  // the worker is which one holds the stream, absent until one has claimed it. An older server
+  // sends none of these, so a client reads "off" and shows nothing.
+  bool detection_enabled = 19;
+  int32 detection_rate = 20;
+  optional string detection_worker = 21;
+
+  // What each configured forward is doing on the replica holding this stream, empty when none is
+  // configured. Here rather than on the source because a forward only exists where the bytes are,
+  // and this message is already the answer to "what is this stream doing, wherever it is".
+  repeated ForwardStatusMessage forwards = 26;
+
+  // libsrt's own read on this connection, present only for a publisher accepted on the ingest
+  // port - a pulled stream and every forward are opened by libav instead, which cannot answer
+  // this. Absent means there was nothing to ask, not that every field below is zero.
+  optional SrtLinkStatsMessage link = 27;
+
+  // Players pulling this stream from this replica right now, a relayed viewer included - not the
+  // demultiplexer's subscriber count, which also carries the recorder, the harvester, the KLV
+  // extractor and every forward.
+  int32 viewers = 28;
+}
+
+// A curated handful of SRT_TRACEBSTATS, not the roughly ninety fields libsrt actually tracks. See
+// the Core SrtLinkStats record this mirrors for why each one is here.
+message SrtLinkStatsMessage {
+  double bandwidth_mbps = 1;
+  double receive_rate_mbps = 2;
+  double round_trip_time_ms = 3;
+  int32 packets_retransmitted = 4;
+  int32 negotiated_latency_ms = 5;
+  int32 undecrypted_packets_total = 6;
+}
+
+// Somewhere a stream is copied to, besides the local consumption port. The scheme picks the
+// container - RTP carries MPEG-TS in the RTP muxer, everything else is plain MPEG-TS - and query
+// options are libav's, which is how one field covers dialling out, waiting to be pulled from, and
+// pushing with no handshake at all.
+message ForwardTargetMessage {
+  // Empty on the way in, and the server mints one and returns it. Stable across edits afterwards,
+  // so a target whose URL changed is the same forward rather than a new one.
+  string id = 1;
+
+  string url = 2;
+
+  // False stops the copy without forgetting where it went. Switching a forward off and on again is
+  // routine and should not cost the operator a URL they then have to retype.
+  bool enabled = 3;
+}
+
+// What a forward is actually doing, as opposed to what it was asked to do.
+message ForwardStatusMessage {
+  string id = 1;
+  string url = 2;
+  bool connected = 3;
+  int64 bytes = 4;
+  google.protobuf.Timestamp connected_at = 5;
+
+  // Why the last attempt stopped, when one did. Kept while the forward waits to retry, because a
+  // forward that is simply not running looks identical to one that has never been asked to run.
+  optional string error = 6;
+
+  // Present only for an SRT target, which dials or waits through the same direct-libsrt stack the
+  // ingest port uses rather than through libav, the only stack that can answer these. Zero and
+  // absent for UDP and RTP, which open through libav and answer only in bytes.
+  int32 packets_lost = 7;
+  int32 packets_dropped = 8;
+  optional SrtForwardLinkStatsMessage link = 9;
+}
+
+// The sending twin of SrtLinkStatsMessage - libsrt keeps a separate counter for almost everything
+// depending on which direction is asking, so a forward's own numbers are not a source's numbers
+// with a different label. No decrypt-failure field: decrypting is what a receiver does.
+message SrtForwardLinkStatsMessage {
+  double bandwidth_mbps = 1;
+  double send_rate_mbps = 2;
+  double round_trip_time_ms = 3;
+  int32 packets_retransmitted = 4;
+  int32 negotiated_latency_ms = 5;
+}
+
+// A standing instruction about one stream name: fetch it from here, and copy it to there.
+//
+// The difference from LiveStreamMessage is the point of the type. That one is what is on air now
+// and disappears when the feed stops; this is what an operator configured, and it outlives every
+// pod that ever served it. One is a reading, the other is the setting.
+message LiveSourceMessage {
+  string name = 1;
+
+  // Where to pull from. Empty is not "unconfigured": it is the statement that an encoder brings
+  // this name in on the ingest port, which still leaves the forwards below worth configuring.
+  string url = 2;
+
+  // False leaves the row in place and stops acting on it. Deleting is how a source is forgotten;
+  // this is how one is parked.
+  bool enabled = 3;
+
+  // The whole list, not a delta: sending the row back without a forward is how one is removed.
+  repeated ForwardTargetMessage forwards = 4;
+
+  // When the row was last written, set by the server and ignored on the way in.
+  google.protobuf.Timestamp updated_at = 5;
+
+  // The stream of this name that is on air, absent when none is. Set on the listing only and
+  // ignored by SaveLiveSource, so that showing configuration beside current state costs one call.
+  LiveStreamMessage stream = 6;
+}
+
+message LiveSourceListResponse {
+  repeated LiveSourceMessage sources = 1;
+}
+
+message SetLiveDetectionRequest {
+  string name = 1;
+  bool enabled = 2;
+
+  // Detections per second. Zero means the worker's default.
+  int32 rate = 3;
+}
+
+// ST 0903.4 Table 16, the VTracker LS Detection Status, numbered as the standard numbers it so
+// the value casts straight onto the wire. Zero is a real status rather than "unspecified": the
+// field carrying it is optional, so absence is expressed by absence.
+enum VmtiTrackStatus {
+  VMTI_TRACK_STATUS_INACTIVE = 0;
+  VMTI_TRACK_STATUS_ACTIVE = 1;
+  VMTI_TRACK_STATUS_DROPPED = 2;
+  VMTI_TRACK_STATUS_STOPPED = 3;
+}
+
+// One VMTI frame: the detections a worker found in one picture, with the facts a consumer needs
+// to place them. Frame dimensions are not decoration: a box is in pixels of the frame the detector
+// saw, and a client cannot put it on a picture rendered at any other size without them.
+message LiveDetectionsMessage {
+  // VMTI LS tag 2, the frame's ST 0603 time. Same clock as the platform metadata's ST 0601 tag 2.
+  google.protobuf.Timestamp timestamp = 1;
+  int32 frame_width = 2;
+  int32 frame_height = 3;
+  repeated VmtiTargetMessage targets = 4;
+
+  // The ST 0903 packet exactly as the worker posted it.
+  bytes raw = 5;
+}
+
+// One VTarget Pack. The box is in frame pixels as ST 0903 counts them: 1-based, (1, 1) the top
+// left pixel, both corners inclusive. Confidence is the standard's percentage, 0 to 100. The
+// track fields are present only when a tracker, not just a detector, produced the box.
+message VmtiTargetMessage {
+  int32 id = 1;
+  int32 left = 2;
+  int32 top = 3;
+  int32 right = 4;
+  int32 bottom = 5;
+  optional int32 confidence_percent = 6;
+  optional string ontology_class = 7;
+  optional string track_id = 8;
+  optional VmtiTrackStatus track_status = 9;
+}
+
+// How a KLV packet is tied to the pictures, per MISB ST 1402.2's two carriage modes.
+enum KlvAlignment {
+  KLV_ALIGNMENT_UNSPECIFIED = 0;
+
+  // Synchronous carriage: the PES carried a presentation timestamp, so reference_pts is on the
+  // video's clock and a frame is matched by comparing the two.
+  KLV_ALIGNMENT_PRESENTATION_TIMESTAMP = 1;
+
+  // Asynchronous carriage: no PES timestamp, so the only clock is ST 0601 tag 2 and a frame is
+  // matched against its own ST 0604 or ST 0603 time. Less trustworthy, and said so.
+  KLV_ALIGNMENT_TIMESTAMP = 2;
+}
+
+// The MISB ST 0902 minimum set decoded from one ST 0601 packet. Angles are degrees, distances
+// metres, latitude and longitude WGS84. Every field is optional because null is an answer: the
+// packet did not carry the item, carried it at the wrong length, or sent the standard's error
+// value, and a client must not print zero for any of those.
+message Misb0601Message {
+  // Tag 2, the time every item in this packet describes.
+  google.protobuf.Timestamp timestamp = 1;
+  optional string mission_id = 2;
+  optional double platform_heading = 3;
+  optional double platform_pitch = 4;
+  optional double platform_roll = 5;
+  optional string platform_designation = 6;
+  optional string image_source_sensor = 7;
+  optional string image_coordinate_system = 8;
+  optional double sensor_latitude = 9;
+  optional double sensor_longitude = 10;
+  optional double sensor_true_altitude = 11;
+  optional double sensor_horizontal_fov = 12;
+  optional double sensor_vertical_fov = 13;
+  optional double sensor_relative_azimuth = 14;
+  optional double sensor_relative_elevation = 15;
+  optional double sensor_relative_roll = 16;
+  optional double slant_range = 17;
+  optional double frame_center_latitude = 18;
+  optional double frame_center_longitude = 19;
+  optional double frame_center_elevation = 20;
+
+  // The ST 0102 marking from the nested security set. Absent means UNMARKED, as on the list.
+  optional string classification = 21;
+
+  // Tag 65, which revision of ST 0601 the sender wrote to.
+  optional int32 version = 22;
+
+  // Every item outside the minimum set, raw, keyed by ST 0601 tag.
+  map<int32, bytes> unparsed = 23;
+}
+
+// One KLV packet as received, with what was decoded from it: the shape the REST route serves as
+// JSON, field for field.
+message LiveKlvMessage {
+  // The packet's presentation time on the stream's reference clock; absent under asynchronous
+  // carriage.
+  optional int64 reference_pts = 1;
+  KlvAlignment alignment = 2;
+  google.protobuf.Timestamp received_at = 3;
+
+  // Absent when the packet was not an ST 0601 local set at all.
+  Misb0601Message fields = 4;
+
+  // The packet exactly as it arrived, for whatever the fields leave out.
+  bytes raw = 5;
+}
+
+message LiveListResponse {
+  repeated LiveStreamMessage streams = 1;
+
+  // Transports the loaded FFmpeg can carry, such as udp or srt.
+  repeated string transports = 2;
+
+  // False when live streaming is switched off, so a client can hide the whole idea.
+  bool enabled = 3;
+
+  // Where to pull a live stream from. Empty when the server has not been told its own public
+  // address, in which case a client that reached this server can build one from the host it used
+  // and the port below. Configuration wins when it is there, because only it knows about a load
+  // balancer or an ingress in front.
+  string consumption_url = 4;
+
+  // The port viewers connect to, so a client can fall back to the host it already reached rather
+  // than showing nothing because nobody configured an address.
+  int32 consumption_port = 5;
+}
+
+message DocumentId {
+  string id = 1;
+}
+
+message DocumentMessage {
+  string id = 1;
+  string file_name = 2;
+  string storage_key = 3;
+  string content_type = 4;
+  int64 size = 5;
+  google.protobuf.Timestamp created_at = 6;
+
+  // True when DownloadThumbnail will return an image for this document.
+  bool has_thumbnail = 7;
+
+  // Everything the media probe could read: dimensions, duration, codecs, bitrate, tags.
+  // Ordered by the server for display; empty for anything that is not media.
+  repeated MetadataEntry metadata = 8;
+}
+
+// A list rather than a map, because protobuf maps have no defined ordering and the client
+// displays these rows in the order the probe reported them.
+message MetadataEntry {
+  string key = 1;
+  string value = 2;
+}
+
+message ListResponse {
+  repeated DocumentMessage documents = 1;
+}
+
+message Chunk {
+  bytes data = 1;
+}
+
+message UploadMetadata {
+  string file_name = 1;
+  string content_type = 2;
+}
+
+message UploadRequest {
+  oneof payload {
+    UploadMetadata metadata = 1;
+    bytes chunk = 2;
+  }
+}
+
+message ChangeEvent {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    ADDED = 1;
+    UPDATED = 2;
+    REMOVED = 3;
+  }
+
+  Kind kind = 1;
+  string document_id = 2;
+  string storage_key = 3;
+  string file_name = 4;
+}
+
+message ProviderResponse {
+  string storage = 1;
+  string database = 2;
+
+  // Where this server's REST surface can be reached, when it has been told. A client uses it to
+  // play a long recording by streaming and seeking rather than downloading hours of it first.
+  // Empty means the client downloads, which is right for ordinary files.
+  string content_base_url = 3;
+
+  // Whether recordings and snapshots expire, and after how many days, so a client can say when
+  // a document will go. Days is zero when nothing expires. Additive, like every field here.
+  bool retention_enabled = 4;
+  int32 retention_max_age_days = 5;
+}

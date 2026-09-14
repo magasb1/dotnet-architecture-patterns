@@ -1,0 +1,192 @@
+# Scenario C: S3-compatible storage plus PostgreSQL, no AWS account needed.
+# Run from the repository root: docker compose -f docker/docker-compose.yml up --build
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: storagedemo
+      POSTGRES_USER: storagedemo
+      # Demo-only credentials. A real deployment injects these from a secret store.
+      POSTGRES_PASSWORD: storagedemo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U storagedemo -d storagedemo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - minio-data:/data
+
+  # MinIO has no declarative bucket creation, so one short-lived job creates it.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/storage-demo &&
+      echo 'bucket ready'
+      "
+
+  # Shared change feed, so several API replicas push the same events to their clients.
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      # Offset by one from the local ports, so this and a local dotnet run coexist and the
+      # desktop client can switch between them.
+      #
+      # Fixed, not a range. A range lets `--scale api=3` work, but Docker walks upward through it
+      # on every recreate rather than reusing the low end, so a rebuilt API quietly answers on
+      # 8082, then 8083. The saved client endpoint stops working and Live__PublicConsumptionUrl below
+      # advertises a port nothing listens on, which looks like a broken stream rather than a
+      # moved port. A stable address is worth more here; for several replicas, drop these three
+      # lines (the containers still reach each other) or use k8s/, which is the honest shape.
+      - "8081:8080"
+      - "5081:5080"
+      # The two media ports, both SRT and therefore both UDP. Ingest is where encoders push;
+      # consumption is where players pull. Separate so a real deployment can put them on different
+      # networks, and separate here so the split is visible in the demo too.
+      - "9001:9000/udp"
+      - "9011:9010/udp"
+    environment:
+      # Development keeps Swagger and the sample seed. The level is pinned back to Information
+      # because the Development defaults log every EF command, which dominated the request time.
+      ASPNETCORE_ENVIRONMENT: Development
+      Serilog__MinimumLevel__Default: Information
+
+      Storage__Provider: S3
+      Storage__S3__Bucket: storage-demo
+      Storage__S3__Region: us-east-1
+      Storage__S3__ServiceUrl: http://minio:9000
+      Storage__S3__ForcePathStyle: "true"
+
+      Messaging__Provider: Redis
+      Messaging__Redis__ConnectionString: redis:6379
+
+      # MinIO posts bucket notifications here; see README "Event-driven monitoring".
+      StorageMonitor__WebhookToken: local-demo-token
+
+      # Live streaming, on for the demo. The token is required on every call.
+      Live__Enabled: "true"
+      Live__Token: local-demo-token
+
+      # What a player is told to connect to. Published above, so it is reachable from the host and
+      # from the desktop client.
+      Live__PublicConsumptionUrl: srt://127.0.0.1:9011
+
+      # Where the desktop client streams a long recording from, rather than downloading hours of
+      # it before the first frame. The published REST port, reachable from the host.
+      Documents__PublicBaseUrl: http://127.0.0.1:8081
+
+      # How a sibling replica reaches this one, for a forwarded control call and for a relayed
+      # viewer's media alike. The container's own hostname, which Compose sets to the container name
+      # and also resolves on the shared network, so no identity has to be injected.
+      Live__PeerBaseUrl: http://api:8080
+
+      Database__Provider: Postgres
+      Database__Postgres__ConnectionString: Host=postgres;Database=storagedemo;Username=storagedemo;Password=storagedemo
+
+      # MinIO stands in for AWS here. On AWS these are unset and IRSA supplies credentials.
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+
+  # The detection worker (detection-plan.md D2): subscribes to streams the API is running,
+  # decodes them, and posts detections back. On by default, unlike srt-sender/srt-viewer below,
+  # because a worker with nothing to detect is inert - it costs nothing until a stream turns
+  # detection on - where a permanently running sender is traffic nobody asked to see.
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: worker
+    depends_on:
+      - api
+    environment:
+      # The container's own hostname on the Compose network, the same way Live__PeerBaseUrl reaches
+      # the API from itself.
+      Worker__ApiBaseUrl: http://api:8080
+      Worker__Token: local-demo-token
+      # RF-DETR over YOLO26 for the demo: Apache-2.0 against YOLO26's AGPL-3.0 or commercial, the
+      # reason this project settled on it as the default (detection-comparison.md).
+      Worker__Model: rf-detr
+      # ONNX Runtime's own execution-provider probe picks CPU when no CUDA device is visible to the
+      # container, which is every machine that has not added a GPU reservation below - the image is
+      # built once, either processor serves it.
+      Worker__ExecutionProvider: auto
+
+    # Uncomment on a host with an NVIDIA GPU and the container toolkit installed, to exercise the
+    # same CUDA path detection-plan.md's D3 measures:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # A test pattern pushed in over SRT, so the live path can be demonstrated without an encoder.
+  # Off by default, because a permanently running stream is not what every `up` should mean:
+  #
+  #   docker compose -f docker/docker-compose.yml --profile live up -d srt-sender
+  #
+  # Alpine's ffmpeg is built with libsrt, so no image has to be built for this.
+  srt-sender:
+    image: alpine:3.20
+    profiles: ["live"]
+    depends_on:
+      - api
+    volumes:
+      - ./srt-sender.sh:/srt-sender.sh:ro
+    entrypoint: ["/bin/sh", "/srt-sender.sh"]
+
+  # A viewer, pulling the same stream back off the consumption port and measuring the gaps in it.
+  # Useful for watching what a pod restart actually costs somebody watching:
+  #
+  #   docker compose -f docker/docker-compose.yml --profile live up srt-viewer
+  srt-viewer:
+    image: alpine:3.20
+    profiles: ["live"]
+    depends_on:
+      - api
+    volumes:
+      - ./srt-viewer.sh:/srt-viewer.sh:ro
+    entrypoint: ["/bin/sh", "/srt-viewer.sh"]
+
+volumes:
+  postgres-data:
+  minio-data:

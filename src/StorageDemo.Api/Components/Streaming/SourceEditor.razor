@@ -1,0 +1,158 @@
+<div class="drawer-backdrop" @onclick="CancelAsync">
+    <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="source-editor-title"
+           @onclick:stopPropagation="true" @onkeydown="HandleKeyDown">
+        <header>
+            <div>
+                <span class="eyebrow">Stream configuration</span>
+                <h2 id="source-editor-title">@(_source is null ? "Add source" : "Edit source")</h2>
+            </div>
+            <button type="button" class="icon-button" title="Close editor" aria-label="Close editor" @ref="_closeButton"
+                    @onclick="CancelAsync">
+                <AppIcon Name="close" />
+            </button>
+        </header>
+
+        <EditForm Model="_model" OnSubmit="SubmitAsync" class="editor-form">
+            <section>
+                <div class="section-heading">
+                    <h3>Source</h3>
+                    <span>How this stream arrives and whether it should be active.</span>
+                </div>
+
+                <label>
+                    <span>Name</span>
+                    <InputText @bind-Value="_model.Name" disabled="@(_source is not null)"
+                               placeholder="camera/north" autocomplete="off" />
+                    @if (_source is not null)
+                    {
+                        <small>A source name is its identity and cannot be changed.</small>
+                    }
+                </label>
+
+                <fieldset class="segmented-field">
+                    <legend>Connection type</legend>
+                    <div class="segmented">
+                        <label class="@(_model.IsPull ? "selected" : null)">
+                            <input type="radio" name="source-type" checked="@_model.IsPull"
+                                   @onchange="@(() => _model.IsPull = true)" />
+                            <span><strong>Pull</strong><small>This service connects to a URL</small></span>
+                        </label>
+                        <label class="@(!_model.IsPull ? "selected" : null)">
+                            <input type="radio" name="source-type" checked="@(!_model.IsPull)"
+                                   @onchange="@(() => _model.IsPull = false)" />
+                            <span><strong>Push</strong><small>An encoder connects to ingest</small></span>
+                        </label>
+                    </div>
+                </fieldset>
+
+                @if (_model.IsPull)
+                {
+                    <label>
+                        <span>Source URL</span>
+                        <InputText @bind-Value="_model.Url" class="mono"
+                                   placeholder="srt://camera:9000?streamid=camera/north" autocomplete="off" />
+                    </label>
+                }
+
+                <label class="switch-row">
+                    <span><strong>Enabled</strong><small>Disabled sources remain configured but are parked.</small></span>
+                    <InputCheckbox @bind-Value="_model.Enabled" />
+                </label>
+            </section>
+
+            <section>
+                <div class="section-heading forwards-heading">
+                    <div><h3>Forwards</h3><span>Destinations that receive a copy of this stream.</span></div>
+                    <button type="button" class="button secondary compact" @onclick="AddForward">
+                        <AppIcon Name="plus" /> Add
+                    </button>
+                </div>
+
+                @if (_model.Forwards.Count == 0)
+                {
+                    <div class="mini-empty">No forward destinations configured.</div>
+                }
+                else
+                {
+                    <div class="forward-list">
+                        @foreach (var forward in _model.Forwards)
+                        {
+                            <div class="forward-editor" @key="forward.Id">
+                                <label>
+                                    <span>Destination URL</span>
+                                    <InputText @bind-Value="forward.Url" class="mono"
+                                               placeholder="srt://gateway:9000?streamid=name" autocomplete="off" />
+                                </label>
+                                <div class="forward-actions">
+                                    <label class="check-label"><InputCheckbox @bind-Value="forward.Enabled" /> Enabled</label>
+                                    <button type="button" class="text-button danger-text"
+                                            @onclick="@(() => RemoveForward(forward))">Remove</button>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+
+                <details class="protocol-help">
+                    <summary>Supported destination examples</summary>
+                    <code>srt://host:9000?streamid=name</code>
+                    <code>srt://0.0.0.0:9100?mode=listener</code>
+                    <code>udp://239.0.0.1:5000?ttl=2</code>
+                    <code>rtp://host:5004</code>
+                </details>
+            </section>
+
+            @if (!string.IsNullOrWhiteSpace(Error))
+            {
+                <div class="form-error" role="alert"><AppIcon Name="alert" /><span>@Error</span></div>
+            }
+
+            <footer>
+                <button type="button" class="button secondary" @onclick="CancelAsync">Cancel</button>
+                <button type="submit" class="button primary" disabled="@Saving">
+                    @(Saving ? "Saving…" : "Save source")
+                </button>
+            </footer>
+        </EditForm>
+    </aside>
+</div>
+
+@code {
+    [Parameter] public LiveSource? Source { get; set; }
+    [Parameter] public bool Saving { get; set; }
+    [Parameter] public string? Error { get; set; }
+    [Parameter] public EventCallback<SourceEditModel> Save { get; set; }
+    [Parameter] public EventCallback Cancel { get; set; }
+
+    private LiveSource? _source;
+    private SourceEditModel _model = new();
+    private ElementReference _closeButton;
+
+    protected override void OnParametersSet()
+    {
+        if (!ReferenceEquals(_source, Source))
+        {
+            _source = Source;
+            _model = SourceEditModel.From(Source);
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await _closeButton.FocusAsync();
+        }
+    }
+
+    private void AddForward() => _model.Forwards.Add(new ForwardEditModel());
+
+    private void RemoveForward(ForwardEditModel forward) => _model.Forwards.Remove(forward);
+
+    private Task SubmitAsync(EditContext _) => Save.InvokeAsync(_model);
+
+    private Task CancelAsync() => Cancel.InvokeAsync();
+
+    private Task HandleKeyDown(KeyboardEventArgs args)
+        => args.Key == "Escape" ? CancelAsync() : Task.CompletedTask;
+}

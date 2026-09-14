@@ -1,0 +1,92 @@
+- [x] Add filters to file list - date, type etc.
+- [x] Add search to file list - by name
+- [x] Add redis as an alternative to in-memory
+- [x] Add S3 webhook and filesystemwatcher
+- [x] Improve the media handling in infrastructure
+- [x] Performance numbers for local vs containerized
+- [x] Update readme
+- [x] Abstract remaining in-memory state (analysis queue, scan lock, live session registry)
+- [x] Switch the ffmpeg solution over to FFmpeg.AutoGen
+- [x] MPEG-TS multiplexer, live ingest and egress
+- [x] Live preview thumbnails, in-client playback, tiles removed when a stream stops
+- [x] Multi-node shape: StatefulSet, headless DNS, per-pod ingest services (k8s/live/)
+- [ ] SRT needs an FFmpeg built with libsrt; point Media__LibraryPath at one
+- [ ] Local UDP ingest is blocked by this machine's inbound filtering (see README)
+- [x] Own the SRT listener: libsrt directly, deleting the accept carousel and the log-line capture
+
+Scaling to a thousand streams. The plan, the reasoning and the research behind each of these is in
+`.scratch/scale-to-1000/plan.md`; the phase numbers below are its.
+
+- [x] Verify Phase 1 and 2 on Windows: 194 passed, 0 failed, 8 skipped (Postgres only). The
+      resolver found srt.dll beside the FFmpeg natives, which is the branch Linux never takes
+- [x] Stress the snapshot race fix: 100 runs under constrained CPU, zero failures, against a rate
+      of roughly one in eight before it
+- [x] Phase 2: one SRT latency option applied to both listeners, and a one-second GOP in the
+      reference senders. The join-latency floor is the encoder's keyframe interval
+- [x] Phase 1b: a live name is locked. A second publisher of a name that is live and held is
+      refused at the handshake, rather than taking it over
+- [x] Verify cross-pod behaviour on k3s. Found two defects, both fixed: a graceful shutdown was
+      worse for a viewer than a crash, and a stream that moved replicas got a new start time
+- [ ] Decide who sweeps abandoned registry entries. A force-killed pod leaks one per stream into
+      Redis forever, and until something sweeps them a graceful shutdown cannot interrupt instead
+      of delete, which is what a rolling update needs to keep a stream's start time
+- [x] Refresh docs/replica-failover.md and the README's SRT section. Both described the accept
+      carousel, the log-line capture and the self-test as load-bearing; all three are deleted
+- [x] Phase 0 baseline on one container: see `.scratch/scale-to-1000/baseline.md`. Accept rate is
+      at least 20/s and the rig was always the limit, not the service
+- [x] Phase 3: the in-cluster viewer hop becomes HTTP, deleting the SRT relay and AvioStream
+- [x] Raise k8s/live/deployment.yaml's resources. Was 200m/512Mi with a 1Gi limit, which OOM-kills
+      at about 20 camera-rate streams; now 2 cores and 3Gi with a 4Gi limit, and the arithmetic is
+      in the manifest
+- [x] Multi-port ingest via Live__IngestPortCount. The threads do multiply, but the gain is about
+      2x rather than 4x and costs a third more CPU and memory per stream: 17 pods becomes 8-9
+- [ ] Re-measure multi-port on a real node. The load generator ran out of machine before the
+      service did, so the ratio is "about two" rather than a number
+- [ ] Measure whether pooling StreamDemuxer.Pump's per-packet byte[] moves the per-stream thread
+      cost. Two threads per stream at ~1.7% of a core is what actually dominates, not the preview
+- [x] gRPC live RPCs guarded by the same token as REST, via an interceptor. The client must send it
+      on ListLive too, not only on the three actions
+- [x] KLV extraction: an always-attached packet subscriber on the SMPTE KLV index, decoding the ST
+      0902 minimum set from ST 0601 with ST 1402 carriage detected, the ST 0102 classification on
+      LiveStream and on snapshot and recording metadata, and GET /api/live/klv/{name}
+- [x] Phase 11, second half: has_klv, last_klv_at and the marking on ListLive (fields 16-18, 19-25
+      held), and GetLiveKlv forwarding to the owner. The client can now be built entirely on gRPC
+- [x] Phase 11, first half: health on ListLive, the preview proxying to the owner, retention on
+      GetProviders, and the token guard. Fields 14-15, 4-5 The client stays gRPC
+      by decision; health, marking, a proxied preview and KLV must reach ListLive and friends
+- [x] MISB ST 0903 encoder: the VMTI wire format detections leave as, round-tripped through a
+      reader written from the standard. Nothing produces one yet
+- [x] Decided: VMTI rides standalone as its own KLV stream. Never burned into the picture, never
+      nested in ST 0601 tag 74, so recorded imagery is byte-for-byte what the encoder sent
+- [x] Detection provenance: a capture carries the detection that caused it, on both surfaces, and
+      documents are findable by detection. An alert is that document appearing on the change feed
+- [ ] Flaky under a full-suite run: A_reconnect_under_the_same_name_resumes_the_same_stream. Passed
+      3/3 alone, 16/16 in its class and on a repeat full run; the SRT timing tests share ports and
+      ffmpeg senders with the rest of the suite
+- [ ] Detection, per .scratch/scale-to-1000/detection-plan.md: geometry first, then RF-DETR on the
+      processor, the worker, the GPU, YOLO, and tracking
+- [ ] Decide the Ultralytics licence question before YOLO ships in anything delivered. RF-DETR's
+      smaller variants are Apache-2.0 and clean; Ultralytics is AGPL-3.0 or commercial
+- [ ] Phase 8: the ingest pod stops decoding; a worker tier decodes once per stream on a GPU and
+      returns detections and the preview. Detection runs on every stream, so decoding on demand
+      answers nothing; KLV needs no decode at all and must not argue for any
+- [x] Validate the KLV decoder against a real MISB stream. Esri's FMV sample: 711 packets, every
+      checksum verified, and the slant range agrees with the geometry from four independently
+      scaled encodings to under two metres. No scale was wrong
+- [ ] Benchmark RF-DETR on the target GPU before sizing the worker tier: frames per second per GPU
+      at a useful batch size, and whether NVDEC or the model saturates first
+- [ ] Separate detection rate from tracking rate. Pattern of life needs stable identities, which is
+      a tracker property; detecting every frame on every stream is the most expensive option there is
+- [x] The overload signal, proven on the rig at 50, 100 and 250 streams: per-stream loss and drop
+      name the degraded streams, the pod-level kernel counter is the collapse itself, and both
+      agree with delivered bitrate. Phase 4 is unblocked; decide over a window of beats
+- [x] Phase 4: Live__MaxStreams refuses at the handshake when full, always admitting a name the pod
+      already owns, with the autoscaling and alerting guidance in the manifest
+- [ ] Give a pod permission to write its own pod-deletion-cost, if scale-down ever moves enough
+      encoders to hurt. No Role or RoleBinding exists anywhere under k8s/ today
+- [ ] Phase 5: optional SRT passphrase, enforced during the handshake
+- [ ] Phase 6: pulled streams survive their pod, claimed by the heartbeat under the existing lock
+- [ ] Lengthen SrtSocketStream's receive timeout, now that srt_close is proven to unblock a read
+- [x] Rewrite the README's "About SRT" section and CONTEXT.md's "Claim"
+- [x] Drop the README's link to docs/design/server-side-stream-ingest.md, which was never in the
+      repo. CONTEXT.md, the drawio and replica-failover.md carry what it would have said

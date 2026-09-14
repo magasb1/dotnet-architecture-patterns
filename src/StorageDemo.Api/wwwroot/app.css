@@ -1,0 +1,67 @@
+:root {
+  color-scheme: dark;
+  --surface-ground: #070b14; --surface-sidebar: #0a0f1b; --surface-base: #0d1321;
+  --surface-sunken: #090e19; --surface-raised: #121a2a; --surface-overlay: #172033;
+  --surface-hover: rgb(151 170 211 / 8%); --border-subtle: #1b2639; --border-default: #29364b;
+  --text-primary: #f1f5fd; --text-secondary: #c3ccdb; --text-muted: #8f9aae; --text-faint: #667287;
+  --accent: #5b8cff; --accent-hover: #76a0ff; --accent-text: #91b2ff; --accent-soft: rgb(91 140 255 / 12%);
+  --success: #35c985; --success-text: #6ce4ab; --success-soft: rgb(53 201 133 / 10%); --success-border: rgb(53 201 133 / 28%);
+  --warning: #f0ad4e; --warning-text: #f7c875; --warning-soft: rgb(240 173 78 / 10%); --warning-border: rgb(240 173 78 / 28%);
+  --danger: #ef6670; --danger-text: #ff9299; --danger-soft: rgb(239 102 112 / 10%); --danger-border: rgb(239 102 112 / 28%);
+  --radius-sm: 6px; --radius-md: 9px; --radius-lg: 13px; --radius-xl: 18px;
+  --shadow-xl: 0 24px 80px rgb(0 0 0 / 45%);
+}
+
+* { box-sizing: border-box; }
+html { background: var(--surface-ground); }
+html, body { min-height: 100%; margin: 0; }
+body { background: radial-gradient(circle at 72% -10%, rgb(60 92 160 / 11%), transparent 35rem), var(--surface-ground); color: var(--text-primary); font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+button, input, select { font: inherit; }
+button, a, input, select, summary { -webkit-tap-highlight-color: transparent; }
+button { color: inherit; }
+code, .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.skip-link { position: fixed; z-index: 999; top: 8px; left: 8px; padding: 9px 13px; transform: translateY(-150%); border-radius: var(--radius-md); color: white; background: var(--accent); }
+.skip-link:focus { transform: translateY(0); }
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
+.muted { color: var(--text-muted) !important; }
+.warning-text { color: var(--warning-text) !important; }
+.danger-text { color: var(--danger-text) !important; }
+
+input[type="text"], input[type="password"], input[type="search"], input:not([type]), select { min-height: 40px; width: 100%; padding: 8px 11px; color: var(--text-primary); background: var(--surface-sunken); border: 1px solid var(--border-default); border-radius: var(--radius-md); transition: border-color 120ms ease, box-shadow 120ms ease; }
+input::placeholder { color: var(--text-faint); }
+input:hover, select:hover { border-color: #3b4b65; }
+input:focus, select:focus { border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px var(--accent-soft); }
+input:disabled { color: var(--text-faint); background: color-mix(in srgb, var(--surface-sunken) 75%, transparent); cursor: not-allowed; }
+
+.button, .button-link { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 0 15px; border: 1px solid transparent; border-radius: var(--radius-md); font-weight: 650; font-size: .79rem; line-height: 1; text-decoration: none; cursor: pointer; transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease; }
+.button svg, .button-link svg { width: 17px; height: 17px; }
+.button:hover:not(:disabled), .button-link:hover { transform: translateY(-1px); }
+.button:disabled { opacity: .55; cursor: wait; }
+.button.primary, .button-link { color: white; background: var(--accent); box-shadow: 0 7px 22px rgb(39 91 220 / 18%); }
+.button.primary:hover:not(:disabled), .button-link:hover { background: var(--accent-hover); }
+.button.secondary { color: var(--text-secondary); background: var(--surface-raised); border-color: var(--border-default); }
+.button.secondary:hover:not(:disabled) { color: var(--text-primary); background: var(--surface-overlay); }
+.button.danger { color: white; background: #c94752; }
+.button.compact { min-height: 34px; padding: 0 11px; font-size: .72rem; }
+.icon-button { display: inline-grid; place-items: center; width: 36px; height: 36px; padding: 0; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: var(--radius-md); cursor: pointer; }
+.icon-button:hover:not(:disabled) { color: var(--text-primary); background: var(--surface-hover); border-color: var(--border-subtle); }
+.icon-button:disabled { opacity: .45; }
+.icon-button svg { width: 17px; height: 17px; }
+.text-button { padding: 0; color: var(--accent-text); background: transparent; border: 0; font-weight: 650; font-size: .75rem; cursor: pointer; }
+.text-button:hover { text-decoration: underline; }
+.danger-ghost:hover, .danger-text { color: var(--danger-text) !important; }
+.empty-state { display: grid; justify-items: center; gap: 7px; padding: 64px 20px; color: var(--text-muted); text-align: center; }
+.empty-state strong { color: var(--text-primary); font-size: .92rem; }
+.empty-state .button, .empty-state .button-link { margin-top: 13px; }
+.empty-state.compact { padding: 50px 20px; }
+
+.reconnect-modal { display: none; position: fixed; z-index: 500; inset: auto 20px 20px auto; }
+.reconnect-modal.components-reconnect-show, .reconnect-modal.components-reconnect-failed, .reconnect-modal.components-reconnect-rejected { display: block; }
+.reconnect-card { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; max-width: 360px; padding: 14px 16px; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--surface-overlay); box-shadow: var(--shadow-xl); }
+.reconnect-card strong { font-size: .8rem; }
+.reconnect-card > span:last-child { grid-column: 2; color: var(--text-muted); font-size: .72rem; }
+.reconnect-spinner, .spinner { display: inline-block; width: 15px; height: 15px; border: 2px solid var(--border-default); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+svg.spinning { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }

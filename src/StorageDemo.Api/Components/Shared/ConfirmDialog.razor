@@ -1,0 +1,28 @@
+<div class="dialog-backdrop" @onclick="CancelAsync">
+    <section class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title"
+             aria-describedby="confirm-description" @onclick:stopPropagation="true">
+        <span class="danger-icon" aria-hidden="true"><AppIcon Name="trash" /></span>
+        <div>
+            <h2 id="confirm-title">@Title</h2>
+            <p id="confirm-description">@ChildContent</p>
+        </div>
+        <footer>
+            <button type="button" class="button secondary" @onclick="CancelAsync">Cancel</button>
+            <button type="button" class="button danger" disabled="@Busy" @onclick="ConfirmAsync">
+                @(Busy ? "Deleting…" : ConfirmText)
+            </button>
+        </footer>
+    </section>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
+    [Parameter] public string ConfirmText { get; set; } = "Delete";
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public EventCallback Confirm { get; set; }
+    [Parameter] public EventCallback Cancel { get; set; }
+
+    private Task ConfirmAsync() => Confirm.InvokeAsync();
+    private Task CancelAsync() => Cancel.InvokeAsync();
+}

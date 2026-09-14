@@ -1,0 +1,15 @@
+<Router AppAssembly="@typeof(Program).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+        <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+    </Found>
+    <NotFound>
+        <LayoutView Layout="@typeof(MainLayout)">
+            <div class="empty-state">
+                <strong>Page not found</strong>
+                <span>The requested console page does not exist.</span>
+                <a class="button-link" href="/streaming/sources">Return to sources</a>
+            </div>
+        </LayoutView>
+    </NotFound>
+</Router>
