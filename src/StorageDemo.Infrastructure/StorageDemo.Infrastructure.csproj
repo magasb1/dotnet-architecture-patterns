@@ -2,6 +2,12 @@
   <PropertyGroup>
     <!-- libav is called through pointers; there is no other way to talk to it. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Each ORT provider package supplies a different native library with the same filename, so
+         exactly one belongs in a publish. Windows defaults to OpenVINO because it can use an
+         Intel NPU, GPU, or CPU; the Linux container keeps CUDA for NVIDIA production nodes.
+         Override with -p:OnnxRuntimeFlavor=DirectML, Cuda, OpenVino, or Cpu. -->
+    <OnnxRuntimeFlavor Condition="'$(OnnxRuntimeFlavor)' == '' and '$(OS)' == 'Windows_NT'">OpenVino</OnnxRuntimeFlavor>
+    <OnnxRuntimeFlavor Condition="'$(OnnxRuntimeFlavor)' == ''">Cuda</OnnxRuntimeFlavor>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\StorageDemo.Core\StorageDemo.Core.csproj" />
@@ -25,18 +31,29 @@
          open for hours, so it wants the factory's handler pooling rather than a client of its own. -->
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="10.0.0" />
-    <!-- The GPU package on purpose, even though a developer machine has no GPU: its natives carry
-         the processor provider too, and the CUDA library only loads when a session asks for it, so
-         one reference serves both environments. The cost is ~146 MB of unused natives in a
-         developer restore, which beats two project configurations
-         (research/onnxruntime-dotnet.md section 1). -->
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.30.0" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <PackageReference Include="StackExchange.Redis" Version="2.9.11" />
   </ItemGroup>
+  <ItemGroup Condition="'$(OnnxRuntimeFlavor)' == 'Cuda'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.30.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OnnxRuntimeFlavor)' == 'OpenVino'">
+    <PackageReference Include="Intel.ML.OnnxRuntime.OpenVino" Version="1.24.1" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OnnxRuntimeFlavor)' == 'DirectML'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OnnxRuntimeFlavor)' == 'Cpu'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0" />
+  </ItemGroup>
   <ItemGroup>
     <None Include="SeedData\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <Target Name="ValidateOnnxRuntimeFlavor" BeforeTargets="PrepareForBuild"
+          Condition="'$(OnnxRuntimeFlavor)' != 'Cuda' and '$(OnnxRuntimeFlavor)' != 'OpenVino' and '$(OnnxRuntimeFlavor)' != 'DirectML' and '$(OnnxRuntimeFlavor)' != 'Cpu'">
+    <Error Text="Unknown OnnxRuntimeFlavor '$(OnnxRuntimeFlavor)'. Use Cuda, OpenVino, DirectML, or Cpu." />
+  </Target>
 
 </Project>

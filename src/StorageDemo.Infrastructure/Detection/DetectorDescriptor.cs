@@ -47,6 +47,7 @@ public sealed record DetectorDescriptor(
     BoxFormat BoxFormat,
     bool ScoresAreLogits,
     bool NeedsNms,
+    bool SupportsOpenVinoNpu,
     IReadOnlyDictionary<int, string> Classes,
     DetectorGeometry Geometry)
 {
@@ -65,6 +66,7 @@ public sealed record DetectorDescriptor(
         BoxFormat: BoxFormat.CentreNormalised,
         ScoresAreLogits: true,
         NeedsNms: false,
+        SupportsOpenVinoNpu: true,
         Classes: CocoClasses.RfDetr,
         Geometry: new DetectorGeometry.Stretch(384));
 
@@ -84,6 +86,10 @@ public sealed record DetectorDescriptor(
         BoxFormat: BoxFormat.PixelCorners,
         ScoresAreLogits: false,
         NeedsNms: false,
+        // This export's dynamic GatherElements post-processing does not compile for the Intel
+        // NPU. Auto mode goes straight to the GPU instead of paying for a known failed compile;
+        // explicitly requesting openvino-npu still probes it, which keeps re-exports testable.
+        SupportsOpenVinoNpu: false,
         Classes: CocoClasses.Yolo.Index().ToDictionary(c => c.Index, c => c.Item),
         Geometry: new DetectorGeometry.Letterbox(640));
 }

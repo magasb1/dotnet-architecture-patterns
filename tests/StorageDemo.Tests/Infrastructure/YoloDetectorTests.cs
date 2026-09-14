@@ -176,8 +176,8 @@ public sealed class YoloDetectorTests(ITestOutputHelper output) : DetectorTests
 
         var frame = Decode(Dog);
 
-        using var yolo = new OnnxDetector(Model, DetectorDescriptor.Yolo26Nano, 0.7f, new ListLogger(Log));
-        using var rfdetr = new OnnxDetector(RfDetr, DetectorDescriptor.RfDetrNano, 0.7f, new ListLogger(Log));
+        using var yolo = new OnnxDetector(Model, DetectorDescriptor.Yolo26Nano, 0.7f, new ListLogger(Log), "cpu");
+        using var rfdetr = new OnnxDetector(RfDetr, DetectorDescriptor.RfDetrNano, 0.7f, new ListLogger(Log), "cpu");
 
         foreach (IDetector detector in (IDetector[])[yolo, rfdetr])
         {
@@ -226,5 +226,5 @@ public sealed class YoloDetectorTests(ITestOutputHelper output) : DetectorTests
     }
 
     private OnnxDetector Detector(float threshold)
-        => new(Model, DetectorDescriptor.Yolo26Nano, threshold, new ListLogger(Log));
+        => new(Model, DetectorDescriptor.Yolo26Nano, threshold, new ListLogger(Log), "cpu");
 }

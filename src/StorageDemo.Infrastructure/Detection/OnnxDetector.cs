@@ -13,8 +13,8 @@ using StorageDemo.Infrastructure.Streaming;
 namespace StorageDemo.Infrastructure.Detection;
 
 /// <summary>
-/// Runs one ONNX detector, described by a <see cref="DetectorDescriptor"/>, on the processor or
-/// on CUDA when CUDA is there.
+/// Runs one ONNX detector, described by a <see cref="DetectorDescriptor"/>, on the best execution
+/// provider in the native runtime selected at publish time.
 ///
 /// One session per model, shared: <c>Run</c> is thread-safe and sessions do not share weights, so
 /// a session per caller would multiply memory for nothing (research/onnxruntime-dotnet.md
@@ -41,8 +41,8 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
     ///
     /// Static because there is one detector per process and the meter belongs to the process, not
     /// to the object. Two tags, both with a small fixed set of values, as this meter's rule
-    /// requires: <c>provider</c> says CPU or CUDA, which is how a pod that silently fell back to
-    /// the processor is visible at all, and <c>batch</c> separates the calls that carry eight
+    /// requires: <c>provider</c> says which device won, which is how a pod that silently fell back
+    /// to the processor is visible at all, and <c>batch</c> separates calls that carry eight
     /// frames from the ones that carry one — without it the distribution is the mixture of the two
     /// and neither mode means anything. No stream name, ever.
     /// </summary>
@@ -137,7 +137,13 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
     private const SwsFlags Flags = SwsFlags.SWS_FAST_BILINEAR | SwsFlags.SWS_FULL_CHR_H_INT | SwsFlags.SWS_ACCURATE_RND;
 
     /// <param name="threshold">Scores below this, after the sigmoid where one applies, are dropped. 0..1 exclusive.</param>
-    public OnnxDetector(string modelPath, DetectorDescriptor descriptor, float threshold, ILogger logger)
+    public OnnxDetector(
+        string modelPath,
+        DetectorDescriptor descriptor,
+        float threshold,
+        ILogger logger,
+        string executionProvider = "auto",
+        string? openVinoCachePath = null)
     {
         if (threshold is <= 0 or >= 1)
         {
@@ -175,41 +181,77 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
         // warning that made no sense in a worker that is the only component in its process.
         var ours = GlobalThreadPools.Value;
 
-        using var options = new SessionOptions();
-
-        if (ours)
-        {
-            options.DisablePerSessionThreads();
-        }
-        else
+        if (!ours)
         {
             logger.LogWarning(
                 "Another component created this process's ONNX Runtime environment, so this "
                 + "detector runs its own thread pool rather than the shared one. It works and "
                 + "costs threads; measured at 22 percent throughput on a processor.");
         }
-        Provider = AppendBestProvider(options, logger);
-        _session = new InferenceSession(modelPath, options);
+        var requested = executionProvider.Trim().ToLowerInvariant();
+        var available = OrtEnv.Instance().GetAvailableProviders();
+        var candidates = ProviderCandidates(requested, available, descriptor.SupportsOpenVinoNpu);
+        var mayFallback = requested is "auto" or "openvino";
+        InferenceSession? selected = null;
 
-        VerifyContract();
+        foreach (var candidate in candidates)
+        {
+            using var options = new SessionOptions();
+
+            if (ours)
+            {
+                options.DisablePerSessionThreads();
+            }
+
+            InferenceSession? attempt = null;
+
+            try
+            {
+                ConfigureProvider(options, candidate, openVinoCachePath);
+                attempt = new InferenceSession(modelPath, options);
+                _session = attempt;
+                Provider = candidate.Label;
+
+                VerifyContract();
+                Warm(logger);
+                selected = attempt;
+                break;
+            }
+            catch (Exception ex) when (mayFallback && candidate.Kind != ProviderKind.Cpu && IsProviderFailure(ex))
+            {
+                attempt?.Dispose();
+                logger.LogInformation(
+                    "{Provider} could not initialize this model, trying the next execution provider: {Reason}",
+                    candidate.Label,
+                    ex.Message);
+            }
+            catch
+            {
+                attempt?.Dispose();
+                throw;
+            }
+        }
+
+        _session = selected ?? throw new InvalidOperationException(
+            $"No usable ONNX Runtime execution provider was found for '{executionProvider}'. Available: {string.Join(", ", available)}.");
+
         Classes = ReadEmbeddedMetadata(logger) ?? descriptor.Classes;
 
         logger.LogInformation(
             "Detector {Model} on the {Provider} execution provider (available: {Providers}), input {Input} {Shape}",
             Path.GetFileName(modelPath),
             Provider,
-            string.Join(", ", OrtEnv.Instance().GetAvailableProviders()),
+            string.Join(", ", available),
             descriptor.InputName,
             string.Join("x", _session.InputMetadata[descriptor.InputName].Dimensions));
 
         _stride = descriptor.InputSize * Channels;
         _targetStride[0] = _stride;
 
-        Warm(logger);
     }
 
-    /// <summary>"CUDA" or "CPU": which provider the session was built with.</summary>
-    public string Provider { get; }
+    /// <summary>The execution provider and physical device on which the warmed session runs.</summary>
+    public string Provider { get; private set; } = null!;
 
     /// <summary>
     /// The table actually in use: the file's own <c>names</c> when it carries them, the
@@ -312,23 +354,131 @@ public sealed unsafe partial class OnnxDetector : IDetector, IDisposable
     }
 
     /// <summary>
-    /// A missing provider library throws from the append rather than falling back; only an
-    /// unsupported operator falls back, per node, which is a different mechanism (research
-    /// section 2). So: try, catch, and say which one won.
+    /// Provider packages contain competing native libraries named onnxruntime, so a publish carries
+    /// one flavor. Within that flavor auto mode still needs a real startup probe: external CUDA
+    /// dependencies can be absent, and OpenVINO can expose a device on which this model does not
+    /// compile. Warm-up is part of the probe because both providers defer work until the first Run.
     /// </summary>
-    private static string AppendBestProvider(SessionOptions options, ILogger logger)
+    private static IReadOnlyList<ProviderCandidate> ProviderCandidates(
+        string requested,
+        IReadOnlyCollection<string> available,
+        bool supportsOpenVinoNpu)
     {
-        try
+        var providers = available.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var result = new List<ProviderCandidate>();
+
+        void Add(ProviderKind kind, string providerName, string label, string? device = null)
         {
-            options.AppendExecutionProvider_CUDA();
-            return "CUDA";
+            if (kind == ProviderKind.Cpu || providers.Contains(providerName))
+            {
+                result.Add(new ProviderCandidate(kind, label, device));
+            }
         }
-        catch (Exception ex) when (ex is OnnxRuntimeException or DllNotFoundException or EntryPointNotFoundException)
+
+        switch (requested)
         {
-            logger.LogInformation("CUDA execution provider is not available here, using the processor: {Reason}", ex.Message);
-            return "CPU";
+            case "auto":
+                Add(ProviderKind.Cuda, "CUDAExecutionProvider", "CUDA");
+                if (supportsOpenVinoNpu)
+                {
+                    Add(ProviderKind.OpenVino, "OpenVINOExecutionProvider", "OpenVINO/NPU", "NPU");
+                }
+                Add(ProviderKind.OpenVino, "OpenVINOExecutionProvider", "OpenVINO/GPU", "GPU");
+                Add(ProviderKind.OpenVino, "OpenVINOExecutionProvider", "OpenVINO/CPU", "CPU");
+                Add(ProviderKind.DirectML, "DmlExecutionProvider", "DirectML");
+                Add(ProviderKind.Cpu, "CPUExecutionProvider", "CPU");
+                break;
+            case "openvino":
+                Require("OpenVINOExecutionProvider");
+                if (supportsOpenVinoNpu)
+                {
+                    result.Add(new(ProviderKind.OpenVino, "OpenVINO/NPU", "NPU"));
+                }
+                result.Add(new(ProviderKind.OpenVino, "OpenVINO/GPU", "GPU"));
+                result.Add(new(ProviderKind.OpenVino, "OpenVINO/CPU", "CPU"));
+                break;
+            case "openvino-npu": AddRequired(ProviderKind.OpenVino, "OpenVINOExecutionProvider", "OpenVINO/NPU", "NPU"); break;
+            case "openvino-gpu": AddRequired(ProviderKind.OpenVino, "OpenVINOExecutionProvider", "OpenVINO/GPU", "GPU"); break;
+            case "openvino-cpu": AddRequired(ProviderKind.OpenVino, "OpenVINOExecutionProvider", "OpenVINO/CPU", "CPU"); break;
+            case "cuda": AddRequired(ProviderKind.Cuda, "CUDAExecutionProvider", "CUDA"); break;
+            case "tensorrt": AddRequired(ProviderKind.TensorRT, "TensorrtExecutionProvider", "TensorRT"); break;
+            case "directml": AddRequired(ProviderKind.DirectML, "DmlExecutionProvider", "DirectML"); break;
+            case "cpu": result.Add(new(ProviderKind.Cpu, "CPU")); break;
+            default:
+                throw new ArgumentException(
+                    $"Unknown execution provider '{requested}'. Use auto, cpu, cuda, tensorrt, directml, openvino, openvino-npu, openvino-gpu, or openvino-cpu.",
+                    nameof(requested));
+        }
+
+        return result;
+
+        void Require(string providerName)
+        {
+            if (!providers.Contains(providerName))
+            {
+                throw new InvalidOperationException(
+                    $"The requested provider needs {providerName}, but this publish contains: {string.Join(", ", available)}.");
+            }
+        }
+
+        void AddRequired(ProviderKind kind, string providerName, string label, string? device = null)
+        {
+            Require(providerName);
+            result.Add(new(kind, label, device));
         }
     }
+
+    private static void ConfigureProvider(
+        SessionOptions options,
+        ProviderCandidate provider,
+        string? openVinoCachePath)
+    {
+        switch (provider.Kind)
+        {
+            case ProviderKind.Cpu:
+                break;
+            case ProviderKind.Cuda:
+                options.AppendExecutionProvider_CUDA();
+                break;
+            case ProviderKind.TensorRT:
+                options.AppendExecutionProvider_Tensorrt();
+                options.AppendExecutionProvider_CUDA();
+                break;
+            case ProviderKind.DirectML:
+                options.EnableMemoryPattern = false;
+                options.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
+                options.AppendExecutionProvider_DML();
+                break;
+            case ProviderKind.OpenVino:
+                // OpenVINO performs its own device-specific graph optimization. Intel recommends
+                // giving it the original graph instead of ORT's rewritten one.
+                options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_DISABLE_ALL;
+                var cache = string.IsNullOrWhiteSpace(openVinoCachePath)
+                    ? Path.Combine(Path.GetTempPath(), "storagedemo-openvino-cache")
+                    : Path.GetFullPath(openVinoCachePath);
+                Directory.CreateDirectory(cache);
+                options.AppendExecutionProvider(
+                    "OpenVINO",
+                    new Dictionary<string, string>
+                    {
+                        ["device_type"] = provider.Device!,
+                        ["cache_dir"] = cache,
+                    });
+                break;
+            default:
+                throw new UnreachableException();
+        }
+    }
+
+    private static bool IsProviderFailure(Exception ex)
+        => ex is OnnxRuntimeException
+            or DllNotFoundException
+            or EntryPointNotFoundException
+            or BadImageFormatException;
+
+    private enum ProviderKind { Cpu, Cuda, TensorRT, DirectML, OpenVino }
+
+    private sealed record ProviderCandidate(ProviderKind Kind, string Label, string? Device = null);
 
     /// <summary>
     /// A YOLO export self-describes: <c>metadata_props</c> carries <c>names</c> and <c>imgsz</c>,

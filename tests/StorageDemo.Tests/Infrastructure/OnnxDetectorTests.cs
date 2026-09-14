@@ -299,18 +299,16 @@ public sealed class OnnxDetectorTests(ITestOutputHelper output) : DetectorTests
     }
 
     [Fact]
-    public void Provider_selection_lands_on_the_processor_here_and_says_so()
+    public void Explicit_processor_selection_is_deterministic()
     {
         Assert.SkipUnless(File.Exists(Model), NoModel);
 
         using var detector = Detector(threshold: 0.5f);
 
-        // No CUDA on this machine, so the append throws and the log says the processor won.
         Assert.Equal("CPU", detector.Provider);
-        Assert.Contains(Log, line => line.Contains("using the processor", StringComparison.Ordinal));
         Assert.Contains(Log, line => line.Contains("on the CPU execution provider", StringComparison.Ordinal));
     }
 
     private OnnxDetector Detector(float threshold)
-        => new(Model, DetectorDescriptor.RfDetrNano, threshold, new ListLogger(Log));
+        => new(Model, DetectorDescriptor.RfDetrNano, threshold, new ListLogger(Log), "cpu");
 }

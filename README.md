@@ -163,6 +163,8 @@ Worker__ApiBaseUrl=http://127.0.0.1:8080   # not localhost: it resolves to IPv6 
 Worker__Token=<the same Live__Token>
 Worker__Model=rf-detr        # or yolo26
 Worker__ModelPath=           # empty follows the model; set it to use a file elsewhere
+Worker__ExecutionProvider=auto # or cpu/cuda/tensorrt/directml/openvino[-npu|-gpu|-cpu]
+Worker__OpenVinoCachePath=    # mount a node-local persistent directory in production
 Worker__DefaultRate=1        # detections a second when the stream does not say
 ```
 
@@ -174,6 +176,13 @@ into plausible nonsense. Fetch a model first with `scripts/fetch-rfdetr.sh` or `
 RF-DETR Nano is the default because its weights are Apache-2.0. YOLO26 Nano is four to five times
 faster on a processor and misses things RF-DETR finds; it is AGPL-3.0 or commercial, so read
 `.scratch/scale-to-1000/detection-plan.md` before shipping it.
+
+The native ONNX Runtime packages are publish flavors because they each provide a different binary
+with the same filename. Windows builds default to OpenVINO and try an Intel NPU, Intel GPU, then
+OpenVINO CPU; Linux builds default to CUDA and fall back to ORT CPU when the NVIDIA runtime is not
+present. Select another artifact with `-p:OnnxRuntimeFlavor=DirectML`, `Cuda`, `OpenVino`, or `Cpu`.
+DirectML is Windows-only. The published flavor determines which named providers are available;
+requesting one that is absent fails at startup instead of silently using the processor.
 
 **Boxes lag the picture and are meant to.** A detection at one a second on a processor takes about
 half of that second, and the result then travels back through the owner, so the client draws the

@@ -57,6 +57,8 @@ spec:
                   fieldPath: metadata.name
             - name: Worker__ModelPath
               value: /models/rf-detr-nano.onnx
+            - name: Worker__ExecutionProvider
+              value: auto
           # No GPU requested, on purpose: this is the processor path, which is also what a
           # developer machine runs. When a GPU node exists, three things change and nothing else:
           #
@@ -64,8 +66,8 @@ spec:
           #   the image's base becomes an NVIDIA CUDA runtime image (docker/Dockerfile, "base")
           #   the runner logs "on the CUDA execution provider" instead of "using the processor"
           #
-          # The natives already carry the CUDA provider; selection is a try at load time
-          # (OnnxDetector.AppendBestProvider). Then re-measure the frame rate and raise
+          # The CUDA publish carries that provider; selection and warm-up are probes at load time.
+          # Then re-measure the frame rate and raise
           # replicas or the batch size from a number rather than a guess (detection-plan.md D3).
           #
           # Two cores because inference runs one frame at a time and the demultiplexers and

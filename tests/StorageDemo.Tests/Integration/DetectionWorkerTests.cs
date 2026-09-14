@@ -125,6 +125,7 @@ public sealed class DetectionWorkerTests(ITestOutputHelper output) : IAsyncLifet
                 Token = Token,
                 NodeName = "worker-test",
                 ModelPath = Model,
+                ExecutionProvider = "cpu",
             }),
             new HttpClient(_factory.Server.CreateHandler()) { Timeout = Timeout.InfiniteTimeSpan },
             new TestLoggerFactory(output));

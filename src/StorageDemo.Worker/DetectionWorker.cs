@@ -95,7 +95,13 @@ public sealed class DetectionWorker : BackgroundService
 
         _logger.LogInformation("Detecting with {Model} from {Path}", _options.Model, modelPath);
 
-        using var detector = new OnnxDetector(modelPath, descriptor, _options.Threshold, _logger);
+        using var detector = new OnnxDetector(
+            modelPath,
+            descriptor,
+            _options.Threshold,
+            _logger,
+            _options.ExecutionProvider,
+            _options.OpenVinoCachePath);
 
         var detecting = Task.Run(() => DetectAsync(detector, stoppingToken), CancellationToken.None);
 

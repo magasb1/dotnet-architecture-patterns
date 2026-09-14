@@ -50,6 +50,22 @@ public sealed class WorkerOptions
     public string ModelPath { get; init; } = string.Empty;
 
     /// <summary>
+    /// Hardware used for inference. "auto" tries CUDA when that build is deployed, then Intel
+    /// NPU, GPU and CPU when the OpenVINO build is deployed, then DirectML, and finally ORT CPU.
+    /// A named provider is fail-fast except "openvino", which tries all three Intel devices.
+    /// </summary>
+    [RegularExpression(
+        "(?i)^(auto|cpu|cuda|tensorrt|directml|openvino|openvino-npu|openvino-gpu|openvino-cpu)$",
+        ErrorMessage = "ExecutionProvider must be auto, cpu, cuda, tensorrt, directml, openvino, openvino-npu, openvino-gpu, or openvino-cpu.")]
+    public string ExecutionProvider { get; init; } = "auto";
+
+    /// <summary>
+    /// Persistent compiled-model cache for OpenVINO. Empty uses a process temporary directory;
+    /// production should point this at a node-local volume so restarts do not recompile the model.
+    /// </summary>
+    public string OpenVinoCachePath { get; init; } = string.Empty;
+
+    /// <summary>
     /// The detector keeps boxes scoring above this. Low on purpose: the tracker wants the weak
     /// boxes too, for its second association (Tracking.cs), and applies its own thresholds.
     /// </summary>

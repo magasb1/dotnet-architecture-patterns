@@ -72,7 +72,7 @@ ENV LD_LIBRARY_PATH=/app/ffmpeg/linux-x64
 # natives carry the CUDA provider and the runner picks it when it loads (D3).
 FROM build AS build-worker
 COPY src/StorageDemo.Worker/ src/StorageDemo.Worker/
-RUN dotnet publish src/StorageDemo.Worker/StorageDemo.Worker.csproj -c Release -o /worker \
+RUN dotnet publish src/StorageDemo.Worker/StorageDemo.Worker.csproj -c Release -p:OnnxRuntimeFlavor=Cuda -o /worker \
     && rm -rf /worker/ffmpeg \
     && cp -r /app/ffmpeg /worker/ffmpeg
 
