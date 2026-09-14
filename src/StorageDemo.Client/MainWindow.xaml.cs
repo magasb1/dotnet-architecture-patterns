@@ -832,7 +832,7 @@ public partial class MainWindow : Window
         _klvTimer.Stop();
         KlvPanel.Visibility = Visibility.Collapsed;
         KlvList.ItemsSource = null;
-        KlvHint.Visibility = Visibility.Collapsed;
+        KlvHint.Visibility = Visibility.Hidden;
 
         // No KLV, no heads-up display: an overlay left over a stream that stopped carrying the
         // metadata is a readout of a moment that has passed.
@@ -869,7 +869,7 @@ public partial class MainWindow : Window
 
         KlvList.ItemsSource = klv is null ? null : DocumentItem.KlvRows(klv);
         KlvHint.Text = "No KLV packet has arrived yet.";
-        KlvHint.Visibility = klv is null ? Visibility.Visible : Visibility.Collapsed;
+        KlvHint.Visibility = klv is null ? Visibility.Visible : Visibility.Hidden;
 
         UpdateHud(klv);
     }

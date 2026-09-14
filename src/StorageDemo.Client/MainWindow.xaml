@@ -544,7 +544,7 @@
                         <TextBlock Text="Metadata"
                                    FontWeight="SemiBold"
                                    Margin="0,0,0,6" />
-                        <ScrollViewer MaxHeight="190" VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer Height="190" VerticalScrollBarVisibility="Auto">
                             <ItemsControl x:Name="MetadataList"
                                           ItemsPanel="{StaticResource TileLayout}"
                                           ItemTemplate="{StaticResource MetadataRowTemplate}" />
@@ -568,13 +568,14 @@
                         <TextBlock Text="Sensor (MISB ST 0902)"
                                    FontWeight="SemiBold"
                                    Margin="0,0,0,6" />
-                        <ScrollViewer MaxHeight="150" VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer Height="150" VerticalScrollBarVisibility="Auto">
                             <ItemsControl x:Name="KlvList"
                                           ItemsPanel="{StaticResource TileLayout}"
                                           ItemTemplate="{StaticResource MetadataRowTemplate}" />
                         </ScrollViewer>
                         <TextBlock x:Name="KlvHint"
-                                   Visibility="Collapsed"
+                                   Height="16"
+                                   Visibility="Hidden"
                                    Foreground="#999"
                                    FontSize="11" />
                     </StackPanel>
@@ -600,7 +601,7 @@
                                    Foreground="#999"
                                    FontSize="11"
                                    Margin="0,0,0,6" />
-                        <ScrollViewer MaxHeight="120" VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer Height="120" VerticalScrollBarVisibility="Auto">
                             <ItemsControl x:Name="DetectionList"
                                           ItemsPanel="{StaticResource TileLayout}"
                                           ItemTemplate="{StaticResource MetadataRowTemplate}" />
