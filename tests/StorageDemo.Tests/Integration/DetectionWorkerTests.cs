@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
+using Grpc.Net.Client;
+using Grpc.Core;
 using System.Net;
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Hosting;
@@ -118,6 +121,16 @@ public sealed class DetectionWorkerTests(ITestOutputHelper output) : IAsyncLifet
 
         // The worker talks to the test host through its handler, the way a pod talks to a Service.
         // The owner recorded no peer address on this single replica, so the worker uses the API's.
+        using var delivery = new StallingDelivery(_factory.Server.CreateHandler());
+        using var workerHttp = new HttpClient(delivery) { Timeout = Timeout.InfiniteTimeSpan };
+        var completed = 0;
+        using var metrics = new MeterListener();
+        metrics.InstrumentPublished = (instrument, listener) =>
+        {
+            if (instrument.Name == "live.detection.frame.duration") listener.EnableMeasurementEvents(instrument);
+        };
+        metrics.SetMeasurementEventCallback<double>((_, _, _, _) => Interlocked.Increment(ref completed));
+        metrics.Start();
         var worker = new DetectionWorker(
             Options.Create(new WorkerOptions
             {
@@ -127,7 +140,7 @@ public sealed class DetectionWorkerTests(ITestOutputHelper output) : IAsyncLifet
                 ModelPath = Model,
                 ExecutionProvider = "cpu",
             }),
-            new HttpClient(_factory.Server.CreateHandler()) { Timeout = Timeout.InfiniteTimeSpan },
+            workerHttp,
             new TestLoggerFactory(output));
 
         var stopwatch = Stopwatch.StartNew();
@@ -176,6 +189,26 @@ public sealed class DetectionWorkerTests(ITestOutputHelper output) : IAsyncLifet
                 () => "no second frame was served");
             Assert.InRange((sample!.Frame.Timestamp - first).TotalSeconds, 0.5, 5);
 
+            using var grpc = GrpcChannel.ForAddress(_factory.Server.BaseAddress,
+                new GrpcChannelOptions { HttpHandler = _factory.Server.CreateHandler() });
+            var client = new StorageDemo.Grpc.Documents.DocumentsClient(grpc);
+            using var watchDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var watch = client.WatchLiveDetections(new StorageDemo.Grpc.LiveStreamName { Name = name },
+                new Metadata { { "x-storage-token", Token } }, cancellationToken: watchDeadline.Token);
+            Assert.True(await watch.ResponseStream.MoveNext(watchDeadline.Token));
+            var streamedAt = watch.ResponseStream.Current.Timestamp;
+            Assert.True(await watch.ResponseStream.MoveNext(watchDeadline.Token));
+            Assert.True(watch.ResponseStream.Current.Timestamp.ToDateTime() > streamedAt.ToDateTime());
+
+            delivery.Stall = true;
+            await delivery.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var beforeStall = Volatile.Read(ref completed);
+            await SrtSenders.WaitUntilAsync(
+                () => Volatile.Read(ref completed) >= beforeStall + 3,
+                TimeSpan.FromSeconds(15), () => "inference stopped while result delivery was stalled");
+            Assert.True(Volatile.Read(ref delivery.TimedOut) > 0, "stalled POSTs must reach their deadline");
+            delivery.Stall = false;
+
             var cleared = await _client.PutAsJsonAsync($"/api/live/detect/{name}", new DetectRequest(false));
             Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
 
@@ -188,6 +221,24 @@ public sealed class DetectionWorkerTests(ITestOutputHelper output) : IAsyncLifet
         {
             await worker.StopAsync(CancellationToken.None);
             worker.Dispose();
+        }
+    }
+
+    private sealed class StallingDelivery(HttpMessageHandler inner) : DelegatingHandler(inner)
+    {
+        public volatile bool Stall;
+        public int TimedOut;
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (Stall && request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath.Contains("/peer/detections/"))
+            {
+                Entered.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
+                catch (OperationCanceledException) { Interlocked.Increment(ref TimedOut); throw; }
+            }
+            return await base.SendAsync(request, cancellationToken);
         }
     }
 

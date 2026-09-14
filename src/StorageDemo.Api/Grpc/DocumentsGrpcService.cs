@@ -455,6 +455,32 @@ public sealed class DocumentsGrpcService(
             : ToMessage(sample);
     }
 
+    public override async Task WatchLiveDetections(
+        LiveStreamName request, IServerStreamWriter<LiveDetectionsMessage> responseStream, ServerCallContext context)
+    {
+        RequireLive();
+        Timestamp? previous = null;
+        while (!context.CancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var frame = await GetLiveDetections(request, context);
+                if (!Equals(previous, frame.Timestamp))
+                {
+                    await responseStream.WriteAsync(frame, context.CancellationToken);
+                    previous = frame.Timestamp;
+                }
+            }
+            catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
+            {
+                // A worker may not have produced its first result yet, or ownership may move.
+            }
+            // Sample the bounded latest-result ring. Remote owners use a lower frequency to
+            // bound peer traffic; slow clients never accumulate an unbounded result backlog.
+            await Task.Delay(live.Owns(request.Name) ? 50 : 200, context.CancellationToken);
+        }
+    }
+
     private static LiveDetectionsMessage ToMessage(VmtiSample sample)
     {
         var message = new LiveDetectionsMessage

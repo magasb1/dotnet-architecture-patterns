@@ -124,6 +124,9 @@ public sealed class GrpcApiTests : IAsyncLifetime
         Assert.Equal(StatusCode.Unauthenticated, klv.StatusCode);
         Assert.Equal(StatusCode.Unauthenticated, detect.StatusCode);
         Assert.Equal(StatusCode.Unauthenticated, detections.StatusCode);
+        using var watch = _client.WatchLiveDetections(name);
+        var streaming = await Assert.ThrowsAsync<RpcException>(() => watch.ResponseStream.MoveNext(CancellationToken.None));
+        Assert.Equal(StatusCode.Unauthenticated, streaming.StatusCode);
 
         // The token is a live concern only; documents never asked for one.
         await _client.ListAsync(new Empty());

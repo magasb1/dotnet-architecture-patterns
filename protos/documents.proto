@@ -70,6 +70,7 @@ service Documents {
   // the short ring the owner keeps beside the KLV ring. NOT_FOUND when the stream is unknown or
   // no worker has posted a frame yet. Guarded like ListLive.
   rpc GetLiveDetections(LiveStreamName) returns (LiveDetectionsMessage);
+  rpc WatchLiveDetections(LiveStreamName) returns (stream LiveDetectionsMessage);
 
   // Configured sources: what an operator asked this service to fetch and where to copy it on, as
   // opposed to what is on air. Guarded like ListLive.

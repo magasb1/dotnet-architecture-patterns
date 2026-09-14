@@ -57,6 +57,9 @@ public partial class MainWindow : Window
     /// shape as the KLV poll: per watched stream, never per tile.
     /// </summary>
     private readonly DispatcherTimer _detectionTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private CancellationTokenSource? _detectionWatch;
+    private DocumentItem? _detectionItem;
+    private bool _refreshingDetections;
 
     /// <summary>
     /// One colour per track for as long as the stream is watched, so a person can follow one
@@ -1584,9 +1587,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Polls while detection is on for the stream on screen, and not otherwise. At the detection
-    /// rate or once a second, whichever is slower: asking faster than the worker detects only
-    /// re-reads the same frame.
+    /// Watches detection updates for the selected stream. Older servers use bounded-rate polling.
     /// </summary>
     private void SyncDetection(DocumentItem item)
     {
@@ -1597,20 +1598,62 @@ public partial class MainWindow : Window
         }
 
         var rate = item.Live.DetectionRate;
-        _detectionTimer.Interval = TimeSpan.FromSeconds(Math.Max(1, rate > 0 ? 1.0 / rate : 1));
+        _detectionTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(rate > 0 ? 1.0 / rate : 0.2, 0.05, 1));
 
-        if (_detectionTimer.IsEnabled)
+        if (ReferenceEquals(_detectionItem, item))
         {
             return;
         }
 
+        StopDetection();
+        _detectionItem = item;
         DetectionPanel.Visibility = Visibility.Visible;
-        _detectionTimer.Start();
-        _ = RefreshDetectionsAsync();
+        _detectionWatch = CancellationTokenSource.CreateLinkedTokenSource(_connection.Token, _closing.Token);
+        _ = WatchDetectionsAsync(item, _detectionWatch.Token);
+    }
+
+    private async Task WatchDetectionsAsync(DocumentItem item, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && _api is { } api)
+            {
+                try
+                {
+                    await foreach (var frame in api.WatchLiveDetectionsAsync(item.Id, cancellationToken))
+                    {
+                        if (cancellationToken.IsCancellationRequested || !ReferenceEquals(Selected, item)) return;
+                        _detections = frame;
+                        ShowDetections(frame);
+                        LayoutDetections();
+                    }
+                }
+                catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unimplemented)
+                {
+                    if (!cancellationToken.IsCancellationRequested)
+                    {
+                        _detectionTimer.Start();
+                        await RefreshDetectionsAsync();
+                    }
+                    return;
+                }
+                catch (RpcException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Reconnect after a transient transport failure.
+                }
+                await Task.Delay(500, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (RpcException) when (cancellationToken.IsCancellationRequested) { }
     }
 
     private void StopDetection()
     {
+        _detectionWatch?.Cancel();
+        _detectionWatch?.Dispose();
+        _detectionWatch = null;
+        _detectionItem = null;
         _detectionTimer.Stop();
         _detections = null;
         _trackBrushes.Clear();
@@ -1621,6 +1664,7 @@ public partial class MainWindow : Window
 
     private async Task RefreshDetectionsAsync()
     {
+        if (_refreshingDetections) return;
         if (_api is null || Selected is not { IsLive: true } item || item.Live?.DetectionEnabled != true)
         {
             StopDetection();
@@ -1631,6 +1675,7 @@ public partial class MainWindow : Window
 
         try
         {
+            _refreshingDetections = true;
             frame = await _api.GetLiveDetectionsAsync(item.Id, _connection.Token);
         }
         catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unimplemented)
@@ -1642,6 +1687,10 @@ public partial class MainWindow : Window
         {
             // One poll that failed says nothing about the stream; the next one tells the truth.
             return;
+        }
+        finally
+        {
+            _refreshingDetections = false;
         }
 
         if (!ReferenceEquals(Selected, item))

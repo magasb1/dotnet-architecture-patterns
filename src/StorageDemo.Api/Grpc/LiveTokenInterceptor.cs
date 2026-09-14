@@ -22,7 +22,7 @@ public sealed class LiveTokenInterceptor(IOptions<LiveOptions> options) : Interc
     private static readonly HashSet<string> Guarded =
     [
         "ListLive", "GetLiveKlv", "SnapshotLive", "RecordLive", "StopLiveRecording", "SetLiveDetection",
-        "GetLiveDetections", "ListLiveSources", "SaveLiveSource", "DeleteLiveSource",
+        "GetLiveDetections", "WatchLiveDetections", "ListLiveSources", "SaveLiveSource", "DeleteLiveSource",
     ];
 
     public override Task<TResponse> UnaryServerHandler<TRequest, TResponse>(

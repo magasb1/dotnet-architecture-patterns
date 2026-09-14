@@ -34,7 +34,7 @@ public sealed class DetectionWorker : BackgroundService
     private readonly ILoggerFactory _loggers;
     private readonly ILogger _logger;
     private readonly Dictionary<string, StreamJob> _jobs = new(StringComparer.Ordinal);
-    private readonly Channel<PendingFrame> _due = Channel.CreateUnbounded<PendingFrame>(
+    private readonly Channel<StreamJob> _due = Channel.CreateUnbounded<StreamJob>(
         new UnboundedChannelOptions { SingleReader = true });
 
     /// <summary>
@@ -143,7 +143,9 @@ public sealed class DetectionWorker : BackgroundService
 
     private async Task PollAsync(CancellationToken cancellationToken)
     {
-        var listing = await _http.GetFromJsonAsync<Listing>("api/live", cancellationToken) ?? new Listing([]);
+        using var listingDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        listingDeadline.CancelAfter(TimeSpan.FromSeconds(2));
+        var listing = await _http.GetFromJsonAsync<Listing>("api/live", listingDeadline.Token) ?? new Listing([]);
         var listed = listing.Streams.ToDictionary(stream => stream.Name, StringComparer.Ordinal);
 
         foreach (var (name, job) in Jobs())
@@ -209,12 +211,14 @@ public sealed class DetectionWorker : BackgroundService
     /// <summary>True when claimed or renewed, false when another worker holds it, null when the owner could not say.</summary>
     private async Task<bool?> ClaimAsync(LiveStream stream, CancellationToken cancellationToken)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(2));
         try
         {
             using var response = await _http.PutAsJsonAsync(
                 $"{Owner(stream)}/api/live/peer/detector/{stream.Name}",
                 new { worker = Name },
-                cancellationToken);
+                deadline.Token);
 
             return response.StatusCode switch
             {
@@ -223,7 +227,7 @@ public sealed class DetectionWorker : BackgroundService
                 _ => null,
             };
         }
-        catch (HttpRequestException ex)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is HttpRequestException or OperationCanceledException)
         {
             _logger.LogWarning(ex, "Could not reach the owner of '{Name}' at {Owner}", stream.Name, Owner(stream));
             return null;
@@ -254,9 +258,8 @@ public sealed class DetectionWorker : BackgroundService
     }
 
     /// <summary>
-    /// Takes whatever is due, up to the batch size, and runs it as one call. A frame is freed
-    /// whether or not the model or the post succeeded, which is also what lets its stream queue
-    /// the next one.
+    /// Takes the newest waiting frames up to the batch size and runs them as one call. Result
+    /// delivery has its own bounded queue per stream and never holds up the next inference.
     /// </summary>
     private async Task DetectAsync(OnnxDetector detector, CancellationToken cancellationToken)
     {
@@ -266,10 +269,11 @@ public sealed class DetectionWorker : BackgroundService
         {
             while (await _due.Reader.WaitToReadAsync(cancellationToken))
             {
-                while (batch.Count < _options.MaxBatch && _due.Reader.TryRead(out var frame))
+                while (batch.Count < _options.MaxBatch && _due.Reader.TryRead(out var job))
                 {
-                    batch.Add(frame);
+                    if (job.TakeFrame() is { } frame) batch.Add(frame);
                 }
+                if (batch.Count == 0) continue;
 
                 try
                 {
@@ -277,7 +281,7 @@ public sealed class DetectionWorker : BackgroundService
 
                     for (var i = 0; i < batch.Count; i++)
                     {
-                        await batch[i].Job.DetectedAsync(batch[i], results[i], cancellationToken);
+                        batch[i].Job.Detected(batch[i], results[i]);
                     }
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
@@ -301,7 +305,7 @@ public sealed class DetectionWorker : BackgroundService
 
         while (_due.Reader.TryRead(out var left))
         {
-            left.Dispose();
+            left.TakeFrame()?.Dispose();
         }
     }
 

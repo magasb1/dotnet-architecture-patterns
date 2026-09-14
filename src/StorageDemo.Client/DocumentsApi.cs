@@ -309,6 +309,14 @@ public sealed class DocumentsApi : IDisposable
         }
     }
 
+    public async IAsyncEnumerable<LiveDetectionsMessage> WatchLiveDetectionsAsync(
+        string name, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        using var call = _client.WatchLiveDetections(new LiveStreamName { Name = name }, cancellationToken: cancellationToken);
+        while (await call.ResponseStream.MoveNext(cancellationToken))
+            yield return call.ResponseStream.Current;
+    }
+
     public async Task DeleteAsync(string id, CancellationToken cancellationToken)
         => await _client.DeleteAsync(new DocumentId { Id = id }, cancellationToken: cancellationToken);
 

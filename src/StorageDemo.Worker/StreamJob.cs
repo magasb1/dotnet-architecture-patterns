@@ -1,4 +1,6 @@
 using System.Net.Http.Json;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Threading.Channels;
 using FFmpeg.AutoGen.Abstractions;
 using Microsoft.Extensions.Logging;
@@ -28,6 +30,8 @@ internal sealed unsafe class PendingFrame : IDisposable
     }
 
     public StreamJob Job { get; }
+    public long QueuedAt { get; } = Stopwatch.GetTimestamp();
+    public DateTimeOffset DecodedAt { get; } = DateTimeOffset.UtcNow;
 
     public long Pts { get; }
 
@@ -53,7 +57,6 @@ internal sealed unsafe class PendingFrame : IDisposable
             ffmpeg.av_frame_free(&frame);
         }
 
-        Job.Release();
     }
 }
 
@@ -69,16 +72,21 @@ internal sealed unsafe class PendingFrame : IDisposable
 /// do, which is the same motion model run at the same rate and needs no second thread on the
 /// tracker; nothing reads a track between detections, because a VMTI frame is only posted on one.
 ///
-/// ponytail: one frame in flight per stream, and a frame that falls due while one is queued is
-/// dropped. On a processor the detector is the bottleneck and the queue would only grow; a GPU
-/// with room wants the newest frame instead, which is a swap rather than a drop.
+/// Each stream retains its newest waiting frame and newest waiting result. Inference and result
+/// delivery run independently, so a slow owner cannot stop inference for other streams.
 /// </summary>
 internal sealed class StreamJob : IAsyncDisposable
 {
     private readonly string _name;
     private readonly HttpClient _http;
     private readonly StreamDemuxer _demuxer;
-    private readonly ChannelWriter<PendingFrame> _due;
+    private readonly ChannelWriter<StreamJob> _due;
+    private readonly Channel<VmtiSample> _results = Channel.CreateBounded<VmtiSample>(
+        new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+    private static readonly Meter Meter = new(LiveMetrics.MeterName);
+    private static readonly Histogram<double> QueueTime = Meter.CreateHistogram<double>("live.detection.queue.duration", "ms");
+    private static readonly Histogram<double> PostTime = Meter.CreateHistogram<double>("live.detection.post.duration", "ms");
+    private static readonly Histogram<double> FrameTime = Meter.CreateHistogram<double>("live.detection.frame.duration", "ms");
     private readonly double _trackThreshold;
     private readonly ILogger _logger;
     private readonly StreamHub _hub;
@@ -96,7 +104,9 @@ internal sealed class StreamJob : IAsyncDisposable
 
     private IDisposable? _subscription;
     private double _rate;
-    private int _inFlight;
+    private readonly Lock _frameGate = new();
+    private PendingFrame? _pending;
+    private bool _stopped;
 
     public StreamJob(
         string name,
@@ -105,7 +115,7 @@ internal sealed class StreamJob : IAsyncDisposable
         HttpClient http,
         StreamDemuxer demuxer,
         LiveOptions live,
-        ChannelWriter<PendingFrame> due,
+        ChannelWriter<StreamJob> due,
         double trackThreshold,
         ILogger logger)
     {
@@ -124,7 +134,8 @@ internal sealed class StreamJob : IAsyncDisposable
         _running = Task.WhenAll(
             FeedAsync(_lifetime.Token),
             _decoder.RunAsync(_lifetime.Token),
-            CountPacketsAsync(_lifetime.Token));
+            CountPacketsAsync(_lifetime.Token),
+            PublishAsync(_lifetime.Token));
     }
 
     /// <summary>Where the stream's bytes are. Re-read from each listing, because a stream can move.</summary>
@@ -257,26 +268,36 @@ internal sealed class StreamJob : IAsyncDisposable
 
     private void OnFrame(IntPtr frame)
     {
-        if (Interlocked.CompareExchange(ref _inFlight, 1, 0) != 0)
-        {
-            return;
-        }
-
         var pending = PendingFrame.Clone(this, frame);
-
-        if (pending is null)
+        if (pending is null) return;
+        lock (_frameGate)
         {
-            Release();
-            return;
-        }
-
-        if (!_due.TryWrite(pending))
-        {
-            pending.Dispose();
+            if (_stopped)
+            {
+                pending.Dispose();
+                return;
+            }
+            var previous = _pending;
+            _pending = pending;
+            previous?.Dispose();
+            if (previous is null && !_due.TryWrite(this))
+            {
+                _pending.Dispose();
+                _pending = null;
+            }
         }
     }
 
-    internal void Release() => Interlocked.Exchange(ref _inFlight, 0);
+    internal PendingFrame? TakeFrame()
+    {
+        lock (_frameGate)
+        {
+            var frame = _pending;
+            _pending = null;
+            if (frame is not null) QueueTime.Record(Stopwatch.GetElapsedTime(frame.QueuedAt).TotalMilliseconds);
+            return frame;
+        }
+    }
 
     /// <summary>
     /// The detector's boxes for one frame: step the tracker over every packet since the last
@@ -289,7 +310,7 @@ internal sealed class StreamJob : IAsyncDisposable
     /// KlvExtractor on this hub would give the VMTI frame that clock exactly; add it when the
     /// consumer that pairs the two by timestamp exists.
     /// </summary>
-    public async Task DetectedAsync(PendingFrame frame, VmtiDetection[] detections, CancellationToken cancellationToken)
+    public void Detected(PendingFrame frame, VmtiDetection[] detections)
     {
         VmtiFrame vmti;
 
@@ -303,7 +324,7 @@ internal sealed class StreamJob : IAsyncDisposable
                 // identities cannot carry across any of these, so the tracker starts again.
                 _tracker = new ByteTracker(frame.Width, frame.Height, _trackThreshold);
                 _trackerSize = (frame.Width, frame.Height);
-                _anchor = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(seconds);
+                _anchor = frame.DecodedAt - TimeSpan.FromSeconds(seconds);
                 _pendingPts.Clear();
                 _lastPts = long.MinValue;
             }
@@ -343,23 +364,38 @@ internal sealed class StreamJob : IAsyncDisposable
                 string.Join(", ", vmti.Detections.Select(d => $"#{d.Id} {d.OntologyClass} {d.ConfidencePercent}")));
         }
 
+        FrameTime.Record(Stopwatch.GetElapsedTime(frame.QueuedAt).TotalMilliseconds);
+        _results.Writer.TryWrite(new VmtiSample(vmti, Misb0903.Encode(vmti)));
+    }
+
+    private async Task PublishAsync(CancellationToken cancellationToken)
+    {
         try
         {
-            var sample = new VmtiSample(vmti, Misb0903.Encode(vmti));
-
-            using var response = await _http.PostAsJsonAsync(
-                $"{Owner}/api/live/peer/detections/{_name}",
-                sample,
-                cancellationToken);
-
-            if (!response.IsSuccessStatusCode)
+            await foreach (var sample in _results.Reader.ReadAllAsync(cancellationToken))
             {
-                _logger.LogWarning("The owner of '{Name}' answered {Status} to a VMTI frame", _name, (int)response.StatusCode);
+                var started = Stopwatch.GetTimestamp();
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                deadline.CancelAfter(TimeSpan.FromSeconds(2));
+                try
+                {
+                    using var response = await _http.PostAsJsonAsync(
+                        $"{Owner}/api/live/peer/detections/{_name}", sample, deadline.Token);
+                    if (!response.IsSuccessStatusCode)
+                        _logger.LogWarning("The owner of '{Name}' answered {Status} to a VMTI frame", _name, (int)response.StatusCode);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogWarning(ex, "Could not post a VMTI frame for '{Name}'", _name);
+                }
+                finally
+                {
+                    PostTime.Record(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                }
             }
         }
-        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _logger.LogWarning(ex, "Could not post a VMTI frame for '{Name}'", _name);
         }
     }
 
@@ -367,6 +403,13 @@ internal sealed class StreamJob : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        lock (_frameGate)
+        {
+            _stopped = true;
+            _pending?.Dispose();
+            _pending = null;
+        }
+        _results.Writer.TryComplete();
         await _lifetime.CancelAsync();
         _hub.Close();
 
