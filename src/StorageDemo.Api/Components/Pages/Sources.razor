@@ -1,0 +1,454 @@
+@page "/streaming"
+@page "/streaming/sources"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject IStreamConfigurationService ConfigurationService
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+
+<HeadContent><title>Sources · Storage Demo</title></HeadContent>
+
+<div class="page-header">
+    <div>
+        <span class="eyebrow">Streaming</span>
+        <h1>Sources</h1>
+        <p>Configure how streams arrive, where they are forwarded, and monitor their current state.</p>
+    </div>
+    @if (ConfigurationService.Enabled && _authorized)
+    {
+        <button type="button" class="button primary add-button" @onclick="@(() => OpenEditor(null))">
+            <AppIcon Name="plus" /> Add source
+        </button>
+    }
+</div>
+
+@if (!ConfigurationService.Enabled)
+{
+    <div class="notice-panel">
+        <span class="notice-icon"><AppIcon Name="broadcast" /></span>
+        <div>
+            <strong>Live streaming is disabled</strong>
+            <p>Set <code>Live:Enabled</code> to <code>true</code> and restart the service before configuring sources.</p>
+        </div>
+    </div>
+}
+else if (!_authorized)
+{
+    <section class="auth-panel">
+        <span class="auth-icon"><AppIcon Name="broadcast" /></span>
+        <div>
+            <span class="eyebrow">Restricted access</span>
+            <h2>Unlock stream configuration</h2>
+            <p>Use the same operator token required by the live API. It is held only in this server-side session.</p>
+            <div class="auth-form">
+                <label for="operator-token">Operator token</label>
+                <div>
+                    <input id="operator-token" type="password" @bind="_token" @bind:event="oninput"
+                           @onkeydown="HandleTokenKey" autocomplete="current-password" />
+                    <button type="button" class="button primary" @onclick="AuthorizeAsync">Unlock</button>
+                </div>
+                @if (_gateError is not null)
+                {
+                    <span class="field-error" role="alert">@_gateError</span>
+                }
+            </div>
+        </div>
+    </section>
+}
+else
+{
+    var streaming = _rows.Count(row => OverallState(row) == "streaming");
+    var alerts = _rows.Count(row => OverallState(row) == "alert");
+    var inactive = _rows.Count - streaming - alerts;
+    var filteredRows = FilteredRows;
+
+    <section class="summary-grid" aria-label="Source summary">
+        <button type="button" class="summary-card @(_stateFilter == "all" ? "selected" : null)" @onclick="@(() => _stateFilter = "all")">
+            <span>Total sources</span><strong>@_rows.Count.ToString("N0", CultureInfo.InvariantCulture)</strong><small>All configured inputs</small>
+        </button>
+        <button type="button" class="summary-card success @(_stateFilter == "streaming" ? "selected" : null)" @onclick="@(() => _stateFilter = "streaming")">
+            <span>Streaming</span><strong>@streaming.ToString("N0", CultureInfo.InvariantCulture)</strong><small>Healthy and on air</small>
+        </button>
+        <button type="button" class="summary-card warning @(_stateFilter == "alert" ? "selected" : null)" @onclick="@(() => _stateFilter = "alert")">
+            <span>Needs attention</span><strong>@alerts.ToString("N0", CultureInfo.InvariantCulture)</strong><small>Interrupted or degraded</small>
+        </button>
+        <button type="button" class="summary-card @(_stateFilter == "inactive" ? "selected" : null)" @onclick="@(() => _stateFilter = "inactive")">
+            <span>Inactive</span><strong>@inactive.ToString("N0", CultureInfo.InvariantCulture)</strong><small>Waiting or parked</small>
+        </button>
+    </section>
+
+    <section class="sources-panel">
+        <div class="toolbar">
+            <div class="search-field">
+                <AppIcon Name="search" />
+                <input type="search" placeholder="Search sources, outputs, or forwards" aria-label="Search sources"
+                       @bind="_search" @bind:event="oninput" />
+            </div>
+            <label class="select-field">
+                <span class="sr-only">State</span>
+                <select @bind="_stateFilter" aria-label="Filter by state">
+                    <option value="all">All states</option>
+                    <option value="streaming">Streaming</option>
+                    <option value="alert">Needs attention</option>
+                    <option value="inactive">Inactive</option>
+                </select>
+            </label>
+            <label class="select-field">
+                <span class="sr-only">Connection type</span>
+                <select @bind="_typeFilter" aria-label="Filter by connection type">
+                    <option value="all">All types</option>
+                    <option value="pull">Pull</option>
+                    <option value="push">Push</option>
+                </select>
+            </label>
+            <div class="refresh-state" aria-live="polite">
+                @if (_refreshError is not null)
+                {
+                    <span class="stale"><AppIcon Name="alert" /> Data may be stale</span>
+                }
+                else if (_refreshedAt != default)
+                {
+                    <span>Updated @_refreshedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+                }
+                <button type="button" class="icon-button" title="Refresh sources" aria-label="Refresh sources"
+                        disabled="@_refreshing" @onclick="RefreshNowAsync">
+                    <AppIcon Name="refresh" Class="@(_refreshing ? "spinning" : null)" />
+                </button>
+            </div>
+        </div>
+
+        @if (_refreshError is not null)
+        {
+            <div class="inline-alert" role="alert">
+                <AppIcon Name="alert" /><span><strong>Could not refresh sources.</strong> @_refreshError</span>
+            </div>
+        }
+
+        @if (_rows.Count == 0 && _refreshedAt == default && _refreshError is null)
+        {
+            <div class="loading-state"><span class="spinner"></span><span>Loading sources…</span></div>
+        }
+        else if (_rows.Count == 0)
+        {
+            <div class="empty-state">
+                <span class="empty-icon"><AppIcon Name="broadcast" /></span>
+                <strong>No sources configured</strong>
+                <span>Add a pull source or reserve a name for an encoder that pushes to ingest.</span>
+                <button type="button" class="button primary" @onclick="@(() => OpenEditor(null))"><AppIcon Name="plus" /> Add source</button>
+            </div>
+        }
+        else if (filteredRows.Count == 0)
+        {
+            <div class="empty-state compact">
+                <strong>No matching sources</strong>
+                <span>Try a different search or clear the selected filters.</span>
+                <button type="button" class="text-button" @onclick="ClearFilters">Clear filters</button>
+            </div>
+        }
+        else
+        {
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr><th>Source</th><th>Type</th><th>Status</th><th class="numeric">Rate</th><th class="numeric">Viewers</th><th>Forwards</th><th><span class="sr-only">Actions</span></th></tr>
+                    </thead>
+                    @foreach (var row in filteredRows)
+                    {
+                        var expanded = _expanded.Contains(row.Source.Name);
+                        <tbody @key="row.Source.Name">
+                            <tr class="source-row @OverallState(row)">
+                                <td class="source-cell" data-label="Source">
+                                    <button type="button" class="expand-button" aria-expanded="@(expanded ? "true" : "false")"
+                                            aria-label="@(expanded ? $"Collapse {row.Source.Name}" : $"Expand {row.Source.Name}")"
+                                            @onclick="@(() => Toggle(row.Source.Name))">
+                                        <AppIcon Name="chevron" Class="@(expanded ? "open" : null)" />
+                                    </button>
+                                    <span class="source-glyph" aria-hidden="true"><AppIcon Name="broadcast" /></span>
+                                    <span class="source-identity">
+                                        <strong>@row.Source.Name</strong>
+                                        <span class="mono" title="@row.LocalOutput">@row.LocalOutput</span>
+                                    </span>
+                                </td>
+                                <td data-label="Type">
+                                    <span class="type-badge">@(row.Source.IsPull ? "Pull" : "Push")</span>
+                                    @if (!row.Source.Enabled) { <span class="parked">Parked</span> }
+                                </td>
+                                <td data-label="Status"><StatusBadge Text="@StateText(row)" Tone="@StateTone(row)" /></td>
+                                <td class="numeric mono" data-label="Rate">@Throughput(row)</td>
+                                <td class="numeric mono muted" data-label="Viewers">@(row.Stream?.Viewers.ToString("N0", CultureInfo.InvariantCulture) ?? "—")</td>
+                                <td data-label="Forwards"><span class="forward-count @ForwardTone(row)">@ForwardText(row)</span></td>
+                                <td class="actions-cell">
+                                    <button type="button" class="icon-button" title="Copy local output" aria-label="Copy local output"
+                                            @onclick="@(() => CopyAsync(row.LocalOutput))"><AppIcon Name="@(_copied == row.LocalOutput ? "check" : "copy")" /></button>
+                                    <button type="button" class="icon-button" title="Edit source" aria-label="Edit source"
+                                            @onclick="@(() => OpenEditor(row.Source))"><AppIcon Name="edit" /></button>
+                                    <button type="button" class="icon-button danger-ghost" title="Delete source" aria-label="Delete source"
+                                            @onclick="@(() => _deleteSource = row)"><AppIcon Name="trash" /></button>
+                                </td>
+                            </tr>
+                            @if (expanded)
+                            {
+                                <tr class="details-row"><td colspan="7"><SourceDetails Row="row" Edit="@(() => OpenEditor(row.Source))" /></td></tr>
+                            }
+                        </tbody>
+                    }
+                </table>
+            </div>
+            <footer class="table-footer">Showing <strong>@filteredRows.Count.ToString("N0", CultureInfo.InvariantCulture)</strong> of @_rows.Count.ToString("N0", CultureInfo.InvariantCulture) sources</footer>
+        }
+    </section>
+
+    @if (_toast is not null)
+    {
+        <div class="toast" role="status"><AppIcon Name="check" /><span>@_toast</span></div>
+    }
+}
+
+@if (_editorOpen)
+{
+    <SourceEditor @key="_editorKey" Source="_editorSource" Saving="_saving" Error="@_editorError"
+                  Save="SaveSourceAsync" Cancel="CloseEditor" />
+}
+
+@if (_deleteSource is not null)
+{
+    <ConfirmDialog Title="@($"Delete {_deleteSource.Source.Name}?")" ConfirmText="Delete source"
+                   Busy="_saving" Confirm="DeleteSourceAsync" Cancel="@(() => _deleteSource = null)">
+        This removes the saved configuration only. @(_deleteSource.State == SourceState.NotOnAir
+            ? "The source is not on air, so nothing will stop."
+            : "The current feed will continue until it ends or is stopped separately.")
+    </ConfirmDialog>
+}
+
+@code {
+    private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(2);
+    private readonly HashSet<string> _expanded = new(StringComparer.Ordinal);
+    private IReadOnlyList<SourceRow> _rows = [];
+    private CancellationTokenSource? _loop;
+    private bool _polling;
+    private bool _refreshing;
+    private DateTimeOffset _refreshedAt;
+    private string? _host;
+    private string? _refreshError;
+    private bool _authorized;
+    private string _token = string.Empty;
+    private string? _gateError;
+    private string _search = string.Empty;
+    private string _stateFilter = "all";
+    private string _typeFilter = "all";
+    private bool _editorOpen;
+    private LiveSource? _editorSource;
+    private int _editorKey;
+    private string? _editorError;
+    private SourceRow? _deleteSource;
+    private bool _saving;
+    private string? _copied;
+    private string? _toast;
+    private DateTimeOffset _toastUntil;
+
+    private IReadOnlyList<SourceRow> FilteredRows => [.. _rows.Where(row =>
+        (_stateFilter == "all" || OverallState(row) == _stateFilter)
+        && (_typeFilter == "all" || (row.Source.IsPull ? "pull" : "push") == _typeFilter)
+        && (string.IsNullOrWhiteSpace(_search)
+            || row.Source.Name.Contains(_search, StringComparison.OrdinalIgnoreCase)
+            || row.LocalOutput.Contains(_search, StringComparison.OrdinalIgnoreCase)
+            || (row.Source.Url?.Contains(_search, StringComparison.OrdinalIgnoreCase) ?? false)
+            || row.Source.Forwards.Any(forward => forward.Url.Contains(_search, StringComparison.OrdinalIgnoreCase))))];
+
+    protected override async Task OnInitializedAsync()
+    {
+        _host = Uri.TryCreate(Navigation.BaseUri, UriKind.Absolute, out var uri) ? uri.Host : null;
+        _authorized = !ConfigurationService.RequiresToken;
+        if (ConfigurationService.Enabled && _authorized) await RefreshAsync(CancellationToken.None);
+    }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender && ConfigurationService.Enabled && _authorized) StartPolling();
+    }
+
+    private async Task AuthorizeAsync()
+    {
+        if (!ConfigurationService.Authorize(_token))
+        {
+            _gateError = "The token was not accepted.";
+            return;
+        }
+
+        _authorized = true;
+        _token = string.Empty;
+        _gateError = null;
+        StartPolling();
+        await RefreshAsync(_loop!.Token);
+    }
+
+    private Task HandleTokenKey(KeyboardEventArgs args)
+        => args.Key == "Enter" ? AuthorizeAsync() : Task.CompletedTask;
+
+    private void StartPolling()
+    {
+        _loop ??= new CancellationTokenSource();
+        if (_polling) return;
+        _polling = true;
+        _ = PollAsync(_loop.Token);
+    }
+
+    private async Task PollAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(RefreshInterval);
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await RefreshAsync(cancellationToken);
+                if (_toast is not null && DateTimeOffset.UtcNow >= _toastUntil)
+                {
+                    _toast = null;
+                    _copied = null;
+                }
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task RefreshAsync(CancellationToken cancellationToken)
+    {
+        if (_refreshing) return;
+        _refreshing = true;
+        try
+        {
+            _rows = await ConfigurationService.ListAsync(_host, cancellationToken);
+            _refreshedAt = DateTimeOffset.UtcNow;
+            _refreshError = null;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { _refreshError = ex.Message; }
+        finally { _refreshing = false; }
+    }
+
+    private async Task RefreshNowAsync() => await RefreshAsync(_loop?.Token ?? CancellationToken.None);
+
+    private void Toggle(string name) { if (!_expanded.Remove(name)) _expanded.Add(name); }
+
+    private void OpenEditor(LiveSource? source)
+    {
+        _editorSource = source;
+        _editorError = null;
+        _deleteSource = null;
+        _editorKey++;
+        _editorOpen = true;
+    }
+
+    private void CloseEditor()
+    {
+        if (_saving) return;
+        _editorOpen = false;
+        _editorError = null;
+    }
+
+    private async Task SaveSourceAsync(SourceEditModel edit)
+    {
+        _saving = true;
+        try
+        {
+            var result = await ConfigurationService.SaveAsync(edit, _loop?.Token ?? CancellationToken.None);
+            if (!result.Succeeded) { _editorError = result.Error; return; }
+            _editorOpen = false;
+            ShowToast($"{edit.Name.Trim()} was saved.");
+            await RefreshAsync(_loop?.Token ?? CancellationToken.None);
+        }
+        finally { _saving = false; }
+    }
+
+    private async Task DeleteSourceAsync()
+    {
+        if (_deleteSource is null) return;
+        var name = _deleteSource.Source.Name;
+        _saving = true;
+        try
+        {
+            var result = await ConfigurationService.DeleteAsync(name, _loop?.Token ?? CancellationToken.None);
+            if (!result.Succeeded) { _refreshError = result.Error; return; }
+            _deleteSource = null;
+            _expanded.Remove(name);
+            ShowToast($"{name} was deleted.");
+            await RefreshAsync(_loop?.Token ?? CancellationToken.None);
+        }
+        finally { _saving = false; }
+    }
+
+    private async Task CopyAsync(string url)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", url);
+            _copied = url;
+            ShowToast("Local output copied to the clipboard.");
+        }
+        catch (JSException) { _copied = null; }
+    }
+
+    private void ClearFilters() { _search = string.Empty; _stateFilter = "all"; _typeFilter = "all"; }
+
+    private void ShowToast(string message)
+    {
+        _toast = message;
+        _toastUntil = DateTimeOffset.UtcNow.AddSeconds(4);
+    }
+
+    private static string OverallState(SourceRow row)
+        => row.State == SourceState.Interrupted
+            || (row.State == SourceState.Live && row.ForwardsConfigured > row.ForwardsConnected)
+                ? "alert"
+                : row.State == SourceState.Live ? "streaming" : "inactive";
+
+    private static string StateText(SourceRow row) => row.State switch
+    {
+        SourceState.Live when row.ForwardsConfigured > row.ForwardsConnected => "Degraded",
+        SourceState.Live => "Streaming",
+        SourceState.Interrupted => "Interrupted",
+        _ => "Not on air",
+    };
+
+    private static string StateTone(SourceRow row) => OverallState(row) switch
+    {
+        "streaming" => "success",
+        "alert" => "warning",
+        _ => "neutral",
+    };
+
+    private static string ForwardText(SourceRow row) => row.ForwardsConfigured switch
+    {
+        0 => "None",
+        _ => $"{row.ForwardsConnected}/{row.ForwardsConfigured} connected",
+    };
+
+    private static string ForwardTone(SourceRow row)
+        => row.ForwardsConfigured > 0 && row.ForwardsConnected < row.ForwardsConfigured ? "warning-text" : "muted";
+
+    private static string Throughput(SourceRow row)
+    {
+        if (row.BitsPerSecond is { } bits)
+        {
+            return bits >= 1_000_000
+                ? (bits / 1_000_000).ToString("0.0", CultureInfo.InvariantCulture) + " Mb/s"
+                : (bits / 1_000).ToString("0", CultureInfo.InvariantCulture) + " kb/s";
+        }
+        return row.Stream is null ? "—" : FormatSize(row.Stream.Bytes);
+    }
+
+    private static string FormatSize(long bytes) => bytes switch
+    {
+        >= 1L << 30 => (bytes / (double)(1L << 30)).ToString("0.0", CultureInfo.InvariantCulture) + " GB",
+        >= 1L << 20 => (bytes / (double)(1L << 20)).ToString("0.0", CultureInfo.InvariantCulture) + " MB",
+        >= 1L << 10 => (bytes / (double)(1L << 10)).ToString("0", CultureInfo.InvariantCulture) + " kB",
+        _ => bytes + " B",
+    };
+
+    public void Dispose()
+    {
+        _loop?.Cancel();
+        _loop?.Dispose();
+    }
+}

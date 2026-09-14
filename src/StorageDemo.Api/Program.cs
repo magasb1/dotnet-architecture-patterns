@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Http.Features;
 using Serilog;
 using StorageDemo.Api.Components;
+using StorageDemo.Api.Administration.Streaming;
 using StorageDemo.Api.Grpc;
 using StorageDemo.Api.Controllers;
 using StorageDemo.Api.Middleware;
@@ -43,6 +44,7 @@ builder.Services.AddSwaggerGen();
 // components call the store and the stream service on this thread, where a WebAssembly page would
 // have to reach back in over the same REST API for objects already in memory here.
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+builder.Services.AddScoped<IStreamConfigurationService, StreamConfigurationService>();
 
 // The only line that decides which storage and database implementations exist.
 builder.Services.AddInfrastructure(builder.Configuration, builder.Environment.IsDevelopment());

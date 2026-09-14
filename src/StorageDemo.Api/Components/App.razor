@@ -1,19 +1,24 @@
-@*
-    The shell. One page lives inside it, so there is no layout, no navigation bar and no branding:
-    an operator reaches /streaming and stays there.
-*@
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <base href="/" />
-    <title>Sources</title>
+    <meta name="theme-color" content="#0b1120" />
+    <title>Storage Demo Console</title>
     <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="StorageDemo.Api.styles.css" />
     <HeadOutlet />
 </head>
 <body>
     <Routes />
+    <div id="components-reconnect-modal" class="reconnect-modal" aria-live="polite">
+        <div class="reconnect-card">
+            <span class="reconnect-spinner" aria-hidden="true"></span>
+            <strong>Reconnecting to the service</strong>
+            <span>Your last view remains on screen while the connection recovers.</span>
+        </div>
+    </div>
     <script src="_framework/blazor.web.js"></script>
 </body>
 </html>

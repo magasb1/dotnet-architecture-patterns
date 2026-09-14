@@ -1,0 +1,23 @@
+.status {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 26px;
+    padding: 0 9px;
+    border: 1px solid var(--border-default);
+    border-radius: 999px;
+    color: var(--text-muted);
+    background: var(--surface-raised);
+    font-size: .72rem;
+    font-weight: 650;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.indicator { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); }
+.success { color: var(--success-text); border-color: var(--success-border); background: var(--success-soft); }
+.success .indicator { background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 14%, transparent); }
+.warning { color: var(--warning-text); border-color: var(--warning-border); background: var(--warning-soft); }
+.warning .indicator { background: var(--warning); }
+.danger { color: var(--danger-text); border-color: var(--danger-border); background: var(--danger-soft); }
+.danger .indicator { background: var(--danger); }

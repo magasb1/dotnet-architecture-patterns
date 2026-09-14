@@ -1,0 +1,111 @@
+<div class="details-panel">
+    <section class="detail-card">
+        <header>
+            <div><span class="overline">Local output</span><strong>Player connection</strong></div>
+            <StatusBadge Text="@StateText(Row.State)" Tone="@StateTone(Row.State)" />
+        </header>
+        <dl>
+            <div class="url-row"><dt>URL</dt><dd class="mono" title="@Row.LocalOutput">@Row.LocalOutput</dd></div>
+            <div><dt>Transferred</dt><dd class="mono">@(Row.Stream is null ? "—" : FormatSize(Row.Stream.Bytes))</dd></div>
+            <div><dt>Viewers</dt><dd class="mono">@(Row.Stream is null ? "—" : Row.Stream.Viewers.ToString("N0", CultureInfo.InvariantCulture))</dd></div>
+            @if (Row.Stream?.Link is { } link)
+            {
+                <div><dt>Bandwidth</dt><dd class="mono">@FormatMbps(link.BandwidthMbps)</dd></div>
+                <div><dt>Receive rate</dt><dd class="mono">@FormatMbps(link.ReceiveRateMbps)</dd></div>
+                <div><dt>Round trip</dt><dd class="mono">@link.RoundTripTimeMs.ToString("0", CultureInfo.InvariantCulture) ms</dd></div>
+                <div><dt>Retransmitted</dt><dd class="mono">@link.PacketsRetransmitted.ToString("N0", CultureInfo.InvariantCulture)</dd></div>
+                <div><dt>Latency</dt><dd class="mono">@link.NegotiatedLatencyMs ms</dd></div>
+                <div><dt>Undecrypted</dt><dd class="mono @(link.UndecryptedPacketsTotal > 0 ? "danger-text" : null)">@link.UndecryptedPacketsTotal.ToString("N0", CultureInfo.InvariantCulture)</dd></div>
+            }
+            else if (Row.Stream is not null)
+            {
+                <div class="unavailable"><dt>Link statistics</dt><dd>@(Row.Source.IsPull ? "Unavailable for a pulled stream" : "Unavailable")</dd></div>
+            }
+        </dl>
+    </section>
+
+    @foreach (var (target, status) in Row.Detail)
+    {
+        <section class="detail-card" @key="target.Id">
+            <header>
+                <div><span class="overline">Forward</span><strong title="@target.Url">@DestinationName(target.Url)</strong></div>
+                <StatusBadge Text="@ForwardText(target, status)" Tone="@ForwardTone(target, status)" />
+            </header>
+            <dl>
+                <div class="url-row"><dt>URL</dt><dd class="mono" title="@target.Url">@target.Url</dd></div>
+                <div><dt>Transferred</dt><dd class="mono">@(status is null ? "—" : FormatSize(status.Bytes))</dd></div>
+                @if (status?.Link is { } forwardLink)
+                {
+                    <div><dt>Bandwidth</dt><dd class="mono">@FormatMbps(forwardLink.BandwidthMbps)</dd></div>
+                    <div><dt>Send rate</dt><dd class="mono">@FormatMbps(forwardLink.SendRateMbps)</dd></div>
+                    <div><dt>Round trip</dt><dd class="mono">@forwardLink.RoundTripTimeMs.ToString("0", CultureInfo.InvariantCulture) ms</dd></div>
+                    <div><dt>Retransmitted</dt><dd class="mono">@forwardLink.PacketsRetransmitted.ToString("N0", CultureInfo.InvariantCulture)</dd></div>
+                    <div><dt>Latency</dt><dd class="mono">@forwardLink.NegotiatedLatencyMs ms</dd></div>
+                    @if (status.PacketsLost > 0 || status.PacketsDropped > 0)
+                    {
+                        <div><dt>Lost / dropped</dt><dd class="mono warning-text">@status.PacketsLost.ToString("N0", CultureInfo.InvariantCulture) / @status.PacketsDropped.ToString("N0", CultureInfo.InvariantCulture)</dd></div>
+                    }
+                }
+                else if (target.Url.StartsWith("udp://", StringComparison.OrdinalIgnoreCase)
+                    || target.Url.StartsWith("rtp://", StringComparison.OrdinalIgnoreCase))
+                {
+                    <div class="unavailable"><dt>Link statistics</dt><dd>Unavailable for this protocol</dd></div>
+                }
+                @if (status?.Error is { } error)
+                {
+                    <div class="error-row"><dt>Last error</dt><dd>@error</dd></div>
+                }
+            </dl>
+        </section>
+    }
+
+    <button type="button" class="button secondary edit-forwards" @onclick="Edit">
+        <AppIcon Name="edit" /> Configure source and forwards
+    </button>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public SourceRow Row { get; set; } = default!;
+    [Parameter] public EventCallback Edit { get; set; }
+
+    private static string StateText(SourceState state) => state switch
+    {
+        SourceState.Live => "Streaming",
+        SourceState.Interrupted => "Interrupted",
+        _ => "Not on air",
+    };
+
+    private static string StateTone(SourceState state) => state switch
+    {
+        SourceState.Live => "success",
+        SourceState.Interrupted => "warning",
+        _ => "neutral",
+    };
+
+    private string ForwardText(ForwardTarget target, ForwardStatus? status) => status switch
+    {
+        { Connected: true } => "Connected",
+        { } => "Not connected",
+        _ when !target.Enabled => "Off",
+        _ when Row.State == SourceState.NotOnAir => "Waiting for source",
+        _ => "Not running",
+    };
+
+    private static string ForwardTone(ForwardTarget target, ForwardStatus? status)
+        => status is { Connected: true } ? "success" : target.Enabled ? "warning" : "neutral";
+
+    private static string DestinationName(string url)
+        => Uri.TryCreate(url, UriKind.Absolute, out var parsed) ? parsed.Host : "Destination";
+
+    private static string FormatSize(long bytes) => bytes switch
+    {
+        >= 1L << 30 => (bytes / (double)(1L << 30)).ToString("0.0", CultureInfo.InvariantCulture) + " GB",
+        >= 1L << 20 => (bytes / (double)(1L << 20)).ToString("0.0", CultureInfo.InvariantCulture) + " MB",
+        >= 1L << 10 => (bytes / (double)(1L << 10)).ToString("0", CultureInfo.InvariantCulture) + " kB",
+        _ => bytes + " B",
+    };
+
+    private static string FormatMbps(double mbps) => mbps >= 10
+        ? mbps.ToString("0", CultureInfo.InvariantCulture) + " Mb/s"
+        : mbps.ToString("0.00", CultureInfo.InvariantCulture) + " Mb/s";
+}
