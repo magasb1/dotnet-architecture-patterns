@@ -21,7 +21,7 @@ public sealed class LiveTokenInterceptor(IOptions<LiveOptions> options) : Interc
 
     private static readonly HashSet<string> Guarded =
     [
-        "ListLive", "GetLiveKlv", "SnapshotLive", "RecordLive", "StopLiveRecording", "SetLiveDetection",
+        "ListLive", "WatchLiveStreams", "GetLiveKlv", "WatchLiveKlv", "SnapshotLive", "RecordLive", "StopLiveRecording", "SetLiveDetection",
         "GetLiveDetections", "WatchLiveDetections", "ListLiveSources", "SaveLiveSource", "DeleteLiveSource",
     ];
 

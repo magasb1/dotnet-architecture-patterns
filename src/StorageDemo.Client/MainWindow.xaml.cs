@@ -58,6 +58,9 @@ public partial class MainWindow : Window
     /// </summary>
     private readonly DispatcherTimer _detectionTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private CancellationTokenSource? _detectionWatch;
+    private CancellationTokenSource? _liveWatch;
+    private CancellationTokenSource? _klvWatch;
+    private DocumentItem? _klvItem;
     private DocumentItem? _detectionItem;
     private bool _refreshingDetections;
 
@@ -147,6 +150,9 @@ public partial class MainWindow : Window
             _connection.Cancel();
             _positionTimer.Stop();
             _liveTimer.Stop();
+            _liveWatch?.Cancel();
+            _liveWatch?.Dispose();
+            _liveWatch = null;
             _klvTimer.Stop();
             _detectionTimer.Stop();
             _player?.Dispose();
@@ -222,7 +228,8 @@ public partial class MainWindow : Window
         await RefreshLiveAsync();
         _ = ProbeDetectionAsync(_api, _connection.Token);
 
-        _liveTimer.Start();
+        _liveWatch = CancellationTokenSource.CreateLinkedTokenSource(_connection.Token, _closing.Token);
+        _ = WatchLiveStreamsAsync(_liveWatch.Token);
 
         // Fire and forget: the watch loop lives until the next connect or the window closes.
         _ = WatchAsync(_api, _connection.Token);
@@ -442,7 +449,7 @@ public partial class MainWindow : Window
     /// ones update in place, and anything that has stopped is removed. A live tile is transient by
     /// nature, so it is never left behind as a stale entry.
     /// </summary>
-    private async Task RefreshLiveAsync()
+    private async Task RefreshLiveAsync(LiveListResponse? supplied = null)
     {
         if (_api is null)
         {
@@ -450,22 +457,25 @@ public partial class MainWindow : Window
         }
 
         LiveListResponse live;
-
-        try
+        if (supplied is not null)
         {
-            live = await _api.ListLiveAsync(_connection.Token);
+            live = supplied;
         }
-        catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unauthenticated)
+        else
         {
-            // The one failure worth naming: everything live is guarded by the same token, so an
-            // empty Streams tab would otherwise look like a server with nothing on air.
-            SetStatus($"{_api.Address} refused the token. Put the server's Live__Token in the Token box and connect again.");
-            return;
-        }
-        catch (Exception)
-        {
-            // A poll that fails changes nothing on screen; the next one will tell the truth.
-            return;
+            try
+            {
+                live = await _api.ListLiveAsync(_connection.Token);
+            }
+            catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unauthenticated)
+            {
+                SetStatus($"{_api.Address} refused the token. Put the server's Live__Token in the Token box and connect again.");
+                return;
+            }
+            catch (Exception)
+            {
+                return;
+            }
         }
 
         _consumptionUrl = ConsumptionAddress(live);
@@ -800,18 +810,25 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_klvTimer.IsEnabled)
+        if (ReferenceEquals(_klvItem, item) && _klvWatch is not null)
         {
             return;
         }
 
+        _klvWatch?.Cancel();
+        _klvWatch?.Dispose();
+        _klvWatch = CancellationTokenSource.CreateLinkedTokenSource(_connection.Token, _closing.Token);
+        _klvItem = item;
         KlvPanel.Visibility = Visibility.Visible;
-        _klvTimer.Start();
-        _ = RefreshKlvAsync();
+        _ = WatchKlvAsync(item, _klvWatch.Token);
     }
 
     private void StopKlv()
     {
+        _klvWatch?.Cancel();
+        _klvWatch?.Dispose();
+        _klvWatch = null;
+        _klvItem = null;
         _klvTimer.Stop();
         KlvPanel.Visibility = Visibility.Collapsed;
         KlvList.ItemsSource = null;
@@ -1610,6 +1627,62 @@ public partial class MainWindow : Window
         DetectionPanel.Visibility = Visibility.Visible;
         _detectionWatch = CancellationTokenSource.CreateLinkedTokenSource(_connection.Token, _closing.Token);
         _ = WatchDetectionsAsync(item, _detectionWatch.Token);
+    }
+
+    private async Task WatchKlvAsync(DocumentItem item, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && _api is { } api)
+            {
+                try
+                {
+                    await foreach (var klv in api.WatchLiveKlvAsync(item.Id, cancellationToken))
+                    {
+                        if (!ReferenceEquals(Selected, item)) return;
+                        KlvList.ItemsSource = DocumentItem.KlvRows(klv);
+                        KlvHint.Visibility = Visibility.Collapsed;
+                        HudLayer.Visibility = Visibility.Visible;
+                    }
+                }
+                catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unimplemented)
+                {
+                    _klvTimer.Start();
+                    await RefreshKlvAsync();
+                    return;
+                }
+                catch (RpcException) when (!cancellationToken.IsCancellationRequested) { }
+                await Task.Delay(500, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private async Task WatchLiveStreamsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && _api is { } api)
+            {
+                try
+                {
+                    await foreach (var live in api.WatchLiveStreamsAsync(cancellationToken))
+                    {
+                        if (cancellationToken.IsCancellationRequested) return;
+                        await RefreshLiveAsync(live);
+                    }
+                }
+                catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unimplemented)
+                {
+                    _liveTimer.Start();
+                    await RefreshLiveAsync();
+                    return;
+                }
+                catch (RpcException) when (!cancellationToken.IsCancellationRequested) { }
+                await Task.Delay(500, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
     private async Task WatchDetectionsAsync(DocumentItem item, CancellationToken cancellationToken)

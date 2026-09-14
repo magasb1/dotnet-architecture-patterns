@@ -175,6 +175,14 @@ public sealed class DocumentsApi : IDisposable
         }
     }
 
+    public async IAsyncEnumerable<LiveListResponse> WatchLiveStreamsAsync(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        using var call = _client.WatchLiveStreams(new Empty(), cancellationToken: cancellationToken);
+        while (await call.ResponseStream.MoveNext(cancellationToken))
+            yield return call.ResponseStream.Current;
+    }
+
     /// <summary>Null before the first picture of a stream has been decoded.</summary>
     public async Task<byte[]?> DownloadLivePreviewAsync(string name, CancellationToken cancellationToken)
     {
@@ -266,6 +274,14 @@ public sealed class DocumentsApi : IDisposable
         {
             return null;
         }
+    }
+
+    public async IAsyncEnumerable<LiveKlvMessage> WatchLiveKlvAsync(
+        string name, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        using var call = _client.WatchLiveKlv(new LiveStreamName { Name = name }, cancellationToken: cancellationToken);
+        while (await call.ResponseStream.MoveNext(cancellationToken))
+            yield return call.ResponseStream.Current;
     }
 
     /// <summary>

@@ -221,6 +221,22 @@ public sealed class DocumentsGrpcService(
         return response;
     }
 
+    public override async Task WatchLiveStreams(
+        Empty request, IServerStreamWriter<LiveListResponse> responseStream, ServerCallContext context)
+    {
+        LiveListResponse? previous = null;
+        while (!context.CancellationToken.IsCancellationRequested)
+        {
+            var current = await ListLive(request, context);
+            if (previous is null || !current.Equals(previous))
+            {
+                await responseStream.WriteAsync(current, context.CancellationToken);
+                previous = current;
+            }
+            await Task.Delay(TimeSpan.FromSeconds(1), context.CancellationToken);
+        }
+    }
+
     private static LiveStreamMessage ToMessage(LiveStream stream)
     {
         var message = new LiveStreamMessage
@@ -620,6 +636,28 @@ public sealed class DocumentsGrpcService(
         return sample is null
             ? throw new RpcException(new Status(StatusCode.NotFound, "No KLV on that stream."))
             : ToMessage(sample);
+    }
+
+    public override async Task WatchLiveKlv(
+        LiveStreamName request, IServerStreamWriter<LiveKlvMessage> responseStream, ServerCallContext context)
+    {
+        Google.Protobuf.WellKnownTypes.Timestamp? previous = null;
+        while (!context.CancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var current = await GetLiveKlv(request, context);
+                if (previous is null || current.ReceivedAt != previous)
+                {
+                    await responseStream.WriteAsync(current, context.CancellationToken);
+                    previous = current.ReceivedAt;
+                }
+            }
+            catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
+            {
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(200), context.CancellationToken);
+        }
     }
 
     /// <summary>

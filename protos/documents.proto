@@ -35,6 +35,7 @@ service Documents {
 
   // Live streams on air anywhere in the cluster, not only on the replica answering this call.
   rpc ListLive(google.protobuf.Empty) returns (LiveListResponse);
+  rpc WatchLiveStreams(google.protobuf.Empty) returns (stream LiveListResponse);
 
   // The current preview of a stream: the picture now, not a poster frame. Served from whichever
   // replica owns the stream, so any replica answers. NOT_FOUND before the first one has been
@@ -60,6 +61,7 @@ service Documents {
   // alongside. Answered by the owning replica wherever the call lands, as the REST route is.
   // NOT_FOUND when the stream is unknown or carries no KLV. Guarded like ListLive.
   rpc GetLiveKlv(LiveStreamName) returns (LiveKlvMessage);
+  rpc WatchLiveKlv(LiveStreamName) returns (stream LiveKlvMessage);
 
   // Switches detection on or off for one stream, and at what rate, through the owner. A worker
   // claims a stream whose toggle is set and stands down when it clears; nothing pushes work to a
