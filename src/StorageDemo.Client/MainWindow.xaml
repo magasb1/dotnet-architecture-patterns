@@ -344,7 +344,13 @@
                                 </Grid.Resources>
 
                                 <!-- 28 down the picture, which clears the marking banner across the top of the host. -->
-                                <StackPanel HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,28,0,0">
+                                <StackPanel HorizontalAlignment="Left"
+                                            VerticalAlignment="Top"
+                                            Margin="10,28,0,0"
+                                            RenderTransformOrigin="0,0">
+                                    <StackPanel.RenderTransform>
+                                        <ScaleTransform x:Name="HudTopLeftScale" />
+                                    </StackPanel.RenderTransform>
                                     <TextBlock x:Name="HudTopLeft" />
                                     <TextBlock x:Name="HudStale" Visibility="Collapsed" Foreground="#FBBF24" />
                                 </StackPanel>
@@ -353,18 +359,39 @@
                                            HorizontalAlignment="Right"
                                            VerticalAlignment="Top"
                                            TextAlignment="Right"
-                                           Margin="0,28,10,0" />
+                                           Margin="0,28,10,0"
+                                           RenderTransformOrigin="1,0">
+                                    <TextBlock.RenderTransform>
+                                        <ScaleTransform x:Name="HudTopRightScale" />
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
 
                                 <TextBlock x:Name="HudBottomLeft"
                                            HorizontalAlignment="Left"
                                            VerticalAlignment="Bottom"
-                                           Margin="10,0,0,10" />
+                                           Margin="10,0,0,10"
+                                           RenderTransformOrigin="0,1">
+                                    <TextBlock.RenderTransform>
+                                        <ScaleTransform x:Name="HudBottomLeftScale" />
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
 
-                                <!-- The frame centre: a broken cross, so the thing being looked at is not covered. -->
-                                <Grid VerticalAlignment="Center" HorizontalAlignment="Center">
-                                    <Path Data="M -22,0 H -8 M 8,0 H 22 M 0,-22 V -8 M 0,8 V 22"
+                                <!-- Keep the reticle sized and centred independently of the caption. In a shared
+                                     auto-sized wrapper, Path stretches to the caption's much larger layout slot. -->
+                                <Grid HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      RenderTransformOrigin="0.5,0.5">
+                                    <Grid.RenderTransform>
+                                        <ScaleTransform x:Name="HudCentreScale" />
+                                    </Grid.RenderTransform>
+                                    <Path Data="M 0,22 H 14 M 30,22 H 44 M 22,0 V 14 M 22,30 V 44"
                                           Stroke="#F2F2F2"
-                                          StrokeThickness="1">
+                                          StrokeThickness="1"
+                                          Width="44"
+                                          Height="44"
+                                          Stretch="None"
+                                          HorizontalAlignment="Center"
+                                          VerticalAlignment="Center">
                                         <Path.Effect>
                                             <DropShadowEffect ShadowDepth="0" BlurRadius="4" Color="Black" Opacity="1" />
                                         </Path.Effect>
@@ -372,43 +399,61 @@
                                     <TextBlock x:Name="HudCentre"
                                                TextAlignment="Center"
                                                HorizontalAlignment="Center"
-                                               VerticalAlignment="Center"
-                                               Margin="0,76,0,0" />
+                                               VerticalAlignment="Center">
+                                        <TextBlock.RenderTransform>
+                                            <TranslateTransform Y="50" />
+                                        </TextBlock.RenderTransform>
+                                    </TextBlock>
                                 </Grid>
 
                                 <!-- Right edge, vertically centred: the owner's placement. It sits clear of the
                                      classification banner at the top, the corner blocks, and the reticle in the
                                      middle of the picture. -->
-                                <StackPanel HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,14,0">
-                                    <Grid x:Name="HudNorthArrow" Width="54" Height="54" RenderTransformOrigin="0.5,0.5">
+                                <StackPanel HorizontalAlignment="Right"
+                                            VerticalAlignment="Center"
+                                            Margin="0,0,16,0"
+                                            RenderTransformOrigin="1,0.5">
+                                    <StackPanel.RenderTransform>
+                                        <ScaleTransform x:Name="HudNorthScale" />
+                                    </StackPanel.RenderTransform>
+                                    <Grid x:Name="HudNorthArrow"
+                                          Width="40"
+                                          Height="58"
+                                          RenderTransformOrigin="0.5,0.5">
                                         <Grid.RenderTransform>
                                             <RotateTransform x:Name="HudNorthRotate" />
                                         </Grid.RenderTransform>
-                                        <Path Data="M 0,-13 L 6,13 L 0,8 L -6,13 Z"
-                                              Fill="#F2F2F2"
-                                              HorizontalAlignment="Center"
-                                              VerticalAlignment="Center">
-                                            <Path.Effect>
-                                                <DropShadowEffect ShadowDepth="0" BlurRadius="4" Color="Black" Opacity="1" />
-                                            </Path.Effect>
-                                        </Path>
-                                        <!-- On the arrowhead, not ahead of it. The letter marks which end of the
-                                             needle is north, so it belongs over the head; floating beyond the tip
-                                             reads as a separate thing that happens to be nearby. It rides the
-                                             rotation and is held upright by the opposite one, so it stays readable
-                                             at every bearing. -->
+                                        <Canvas Width="40" Height="58">
+                                            <!-- A light instrument needle: open head, slim shaft and a centre
+                                                 break reserved for the label instead of a bulky filled glyph. -->
+                                            <Path Data="M 20,54 V 36 M 20,22 V 7 M 11,17 L 20,7 L 29,17"
+                                                  Stroke="#FFF2F2F2"
+                                                  StrokeThickness="2"
+                                                  StrokeStartLineCap="Round"
+                                                  StrokeEndLineCap="Round"
+                                                  StrokeLineJoin="Round">
+                                                <Path.Effect>
+                                                    <DropShadowEffect ShadowDepth="0" BlurRadius="3" Color="Black" Opacity="1" />
+                                                </Path.Effect>
+                                            </Path>
+                                        </Canvas>
+                                        <!-- The arrow rotates; its centre label remains readable. -->
                                         <TextBlock Text="N"
+                                                   FontSize="11"
                                                    FontWeight="Bold"
+                                                   Foreground="#FFF2F2F2"
                                                    HorizontalAlignment="Center"
                                                    VerticalAlignment="Center"
-                                                   Margin="0,-16,0,0"
                                                    RenderTransformOrigin="0.5,0.5">
                                             <TextBlock.RenderTransform>
                                                 <RotateTransform x:Name="HudNorthLabelRotate" />
                                             </TextBlock.RenderTransform>
                                         </TextBlock>
                                     </Grid>
-                                    <TextBlock x:Name="HudNorthText" TextAlignment="Center" />
+                                    <TextBlock x:Name="HudNorthText"
+                                               FontSize="11"
+                                               TextAlignment="Center"
+                                               Margin="0,3,0,0" />
                                 </StackPanel>
                             </Grid>
 

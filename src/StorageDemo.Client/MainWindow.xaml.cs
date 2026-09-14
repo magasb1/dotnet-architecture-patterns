@@ -921,6 +921,10 @@ public partial class MainWindow : Window
         var heading = Opt(fields.HasPlatformHeading, fields.PlatformHeading);
         var azimuth = Opt(fields.HasSensorRelativeAzimuth, fields.SensorRelativeAzimuth);
         var roll = Opt(fields.HasSensorRelativeRoll, fields.SensorRelativeRoll);
+        var sensorLatitude = Opt(fields.HasSensorLatitude, fields.SensorLatitude);
+        var sensorLongitude = Opt(fields.HasSensorLongitude, fields.SensorLongitude);
+        var frameLatitude = Opt(fields.HasFrameCenterLatitude, fields.FrameCenterLatitude);
+        var frameLongitude = Opt(fields.HasFrameCenterLongitude, fields.FrameCenterLongitude);
 
         HudTopLeft.Text = string.Join(
             '\n',
@@ -942,8 +946,8 @@ public partial class MainWindow : Window
         HudTopRight.Text = string.Join(
             '\n',
             "SENSOR",
-            Latitude(Opt(fields.HasSensorLatitude, fields.SensorLatitude)),
-            Longitude(Opt(fields.HasSensorLongitude, fields.SensorLongitude)),
+            Latitude(sensorLatitude),
+            Longitude(sensorLongitude),
             $"ALT {Number(Opt(fields.HasSensorTrueAltitude, fields.SensorTrueAltitude), 0)} M");
 
         var hfov = Opt(fields.HasSensorHorizontalFov, fields.SensorHorizontalFov);
@@ -960,16 +964,22 @@ public partial class MainWindow : Window
 
         HudCentre.Text = string.Join(
             '\n',
-            $"{Latitude(Opt(fields.HasFrameCenterLatitude, fields.FrameCenterLatitude))}"
-            + $"  {Longitude(Opt(fields.HasFrameCenterLongitude, fields.FrameCenterLongitude))}",
+            $"{Latitude(frameLatitude)}  {Longitude(frameLongitude)}",
             $"ELEV {Number(Opt(fields.HasFrameCenterElevation, fields.FrameCenterElevation), 0)} M");
 
-        if (SensorGeometry.NorthInImage(heading, azimuth, roll) is { } north)
+        // The coordinate pairs describe the actual horizontal look bearing and therefore include
+        // the effect of platform attitude. Heading + relative azimuth is the fallback for sets
+        // that do not carry both positions.
+        var bearing = SensorGeometry.BearingBetween(
+            sensorLatitude, sensorLongitude, frameLatitude, frameLongitude)
+            ?? SensorGeometry.SensorBearing(heading, azimuth);
+
+        if (SensorGeometry.NorthInImage(bearing, roll) is { } north)
         {
             HudNorthArrow.Visibility = Visibility.Visible;
             HudNorthRotate.Angle = north;
             HudNorthLabelRotate.Angle = -north;
-            HudNorthText.Text = $"BRG {SensorGeometry.SensorBearing(heading, azimuth)!.Value:000}"
+            HudNorthText.Text = $"BRG {bearing!.Value:000}°"
                 + (roll is null ? "\nNO ROLL" : string.Empty);
         }
         else
@@ -1007,6 +1017,24 @@ public partial class MainWindow : Window
             top,
             Math.Max(0, DetectionCanvas.ActualWidth - left - width),
             Math.Max(0, DetectionCanvas.ActualHeight - top - height));
+
+        // Keep the authored size in a normal window and shrink only when the actual video becomes
+        // genuinely small. Scale each anchored group independently, so compact graphics do not
+        // pull corner readouts away from their edges or move the reticle off the frame centre.
+        var scale = Math.Clamp(Math.Min(width / 1000, height / 562.5), 0.60, 1.15);
+
+        foreach (var transform in new[]
+        {
+            HudTopLeftScale,
+            HudTopRightScale,
+            HudBottomLeftScale,
+            HudCentreScale,
+            HudNorthScale,
+        })
+        {
+            transform.ScaleX = scale;
+            transform.ScaleY = scale;
+        }
     }
 
     private static string Str(bool has, string value) => has && value.Length > 0 ? value : "--";
@@ -1085,7 +1113,11 @@ public partial class MainWindow : Window
                 // the UI thread, hence the dispatch.
                 if (_player.Renderer is { } renderer)
                 {
-                    renderer.ViewportChanged += (_, _) => Dispatcher.BeginInvoke(LayoutDetections);
+                    renderer.ViewportChanged += (_, _) => Dispatcher.BeginInvoke(() =>
+                    {
+                        LayoutDetections();
+                        LayoutHud();
+                    });
                 }
             }
 
@@ -1641,8 +1673,11 @@ public partial class MainWindow : Window
                     {
                         if (!ReferenceEquals(Selected, item)) return;
                         KlvList.ItemsSource = DocumentItem.KlvRows(klv);
-                        KlvHint.Visibility = Visibility.Collapsed;
-                        HudLayer.Visibility = Visibility.Visible;
+                        KlvHint.Visibility = Visibility.Hidden;
+                        // Keep the streaming and polling paths identical: UpdateHud applies the
+                        // user's toggle before changing visibility. Setting Visible directly here
+                        // used to turn the HUD straight back on with every incoming packet.
+                        UpdateHud(klv);
                     }
                 }
                 catch (RpcException ex) when (ex.StatusCode == RpcStatusCode.Unimplemented)
